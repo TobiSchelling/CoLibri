@@ -7,8 +7,7 @@ class Colibri < Formula
   on_macos do
     on_arm do
       url "https://github.com/TobiSchelling/CoLibri/releases/download/v#{version}/colibri-#{version}-macos-arm64.tar.gz"
-      # SHA256 will be updated by release workflow or manually after first release
-      sha256 "PLACEHOLDER"
+      sha256 "02865a97c1f9fa36d797a42c721c048848e4610d8e9dc8cfb8a34c13ad69a0fd"
     end
   end
 
