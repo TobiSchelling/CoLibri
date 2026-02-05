@@ -65,3 +65,25 @@ Reads/writes standard locations:
 - Rust 2021 edition, stable toolchain
 - Clippy with `-D warnings`
 - Conventional commits
+
+## Releasing
+
+When user says "release version X.Y.Z", follow these steps:
+
+1. **Update version** in `Cargo.toml`
+2. **Commit**: `git add Cargo.toml Cargo.lock && git commit -m "chore: Bump version to X.Y.Z"`
+3. **Push**: `git push`
+4. **Tag and push**: `git tag vX.Y.Z && git push origin vX.Y.Z`
+5. **Monitor release workflow**: `gh run list --limit 1` (wait for success)
+6. **Get SHA256**: `gh release download vX.Y.Z --pattern "*.sha256" --output -`
+7. **Update Homebrew formula** in `packaging/homebrew/colibri.rb`:
+   - Update `version "X.Y.Z"`
+   - Update `sha256 "..."`
+8. **Commit formula**: `git add packaging/homebrew/colibri.rb && git commit -m "chore: Update Homebrew formula for vX.Y.Z" && git push`
+9. **Update tap repo**:
+   ```bash
+   cd /tmp && rm -rf homebrew-tap && gh repo clone TobiSchelling/homebrew-tap
+   cp packaging/homebrew/colibri.rb /tmp/homebrew-tap/Formula/
+   cd /tmp/homebrew-tap && git add -A && git commit -m "Update colibri to vX.Y.Z" && git push
+   ```
+10. **Verify**: `brew update && brew upgrade colibri && colibri --version`
