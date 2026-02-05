@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build Release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: brew install protobuf
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create tarball
+        run: |
+          mkdir -p dist
+          cp target/release/colibri dist/
+          cd dist
+          tar -czvf colibri-${{ steps.version.outputs.version }}-macos-arm64.tar.gz colibri
+          shasum -a 256 colibri-${{ steps.version.outputs.version }}-macos-arm64.tar.gz > colibri-${{ steps.version.outputs.version }}-macos-arm64.tar.gz.sha256
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/colibri-${{ steps.version.outputs.version }}-macos-arm64.tar.gz
+            dist/colibri-${{ steps.version.outputs.version }}-macos-arm64.tar.gz.sha256
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Output SHA256
+        run: cat dist/*.sha256

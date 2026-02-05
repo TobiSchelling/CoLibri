@@ -2,55 +2,40 @@
 
 Local RAG system for semantic search over markdown content. Indexes markdown files into LanceDB and exposes search via CLI and MCP server.
 
-## Prerequisites
+## Installation
 
-### Rust Toolchain
+### Homebrew (macOS)
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+brew tap TobiSchelling/tap
+brew install colibri
 ```
 
-### Protocol Buffers Compiler
+### From Source
 
-LanceDB requires `protoc` for building:
+Requires Rust toolchain and protobuf compiler:
 
 ```bash
-# macOS
+# Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Install protoc (macOS)
 brew install protobuf
 
-# Ubuntu/Debian
-sudo apt install protobuf-compiler
+# Build
+cargo build --release
 
-# Verify
-protoc --version
+# Binary at target/release/colibri
 ```
 
-### Ollama
+## Prerequisites
 
 CoLibri uses Ollama for local embeddings:
 
 ```bash
-# macOS
 brew install ollama
-
-# Start the server
 ollama serve
-
-# Pull the embedding model
 ollama pull nomic-embed-text
-```
-
-## Building
-
-```bash
-# Development build
-cargo build
-
-# Release build (optimized)
-cargo build --release
-
-# Or use Make
-make build
 ```
 
 ## Commands
