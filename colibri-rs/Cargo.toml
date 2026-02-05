@@ -1,0 +1,69 @@
+[package]
+name = "colibri"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Local RAG system — index markdown, search semantically, serve via MCP"
+license = "MIT"
+
+[[bin]]
+name = "colibri"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Async runtime (minimal features)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-std", "sync"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# HTTP client (rustls to avoid openssl)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Vector database — brings arrow transitively
+lancedb = "0.23"
+# Arrow types (version resolved by lancedb's requirements)
+arrow-array = { version = ">=54", default-features = false }
+arrow-schema = { version = ">=54", default-features = false }
+
+# Async stream utilities (for TryStreamExt)
+futures = "0.3"
+
+# Hashing
+sha2 = "0.10"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Time
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
+
+# Path handling
+dirs = "6"
+
+# Text processing
+regex = "1"
+glob = "0.3"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+strip = "symbols"
+codegen-units = 1
+
+[profile.release-small]
+inherits = "release"
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
