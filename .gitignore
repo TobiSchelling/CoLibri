@@ -1,28 +1,5 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-dist/
-build/
-.eggs/
-*.egg
-
-# Virtual environments
-.venv/
-venv/
-ENV/
-
-# Testing/Coverage
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
-
-# Type checking
-.mypy_cache/
-.ruff_cache/
+# Rust
+target/
 
 # IDE
 .idea/
@@ -35,9 +12,7 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Rust
-colibri-rs/target/
-
 # Environment
 .env
 .env.local
+.claude/

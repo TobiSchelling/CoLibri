@@ -1,68 +1,67 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working with this repository.
 
 ## Commands
 
 ```bash
-make dev              # Install with dev dependencies (uv sync --all-extras)
-make test             # Run all tests (uv run pytest tests -v)
-make lint             # Lint + typecheck (ruff check + mypy)
-make format           # Auto-format (ruff format + ruff check --fix)
-
-# Run a single test file or test class
-uv run pytest tests/test_indexer_incremental.py -v
-uv run pytest tests/test_indexer_incremental.py::TestIndexFolder::test_first_run_indexes_everything -v
+make build     # Build release binary
+make check     # Type-check (fast)
+make test      # Run tests
+make lint      # Run clippy
+make format    # Format code
 ```
 
 ## Architecture
 
-CoLibri is a local RAG system that indexes markdown content into LanceDB for semantic search, exposed via MCP (Claude) and REST API interfaces.
+CoLibri is a local RAG system that indexes markdown content into LanceDB for semantic search, exposed via CLI and MCP server.
 
-### Data flow
+### Data Flow
 
 ```
-Content Sources → Indexer → LanceDB ← Query Engine ← MCP Server / REST API
-                    ↑                                        ↑
-              Embedding (Ollama)                        Embedding (Ollama)
+Markdown Sources → Indexer → LanceDB ← Query Engine ← MCP Server / CLI
+                      ↑                       ↑
+                Embedding (Ollama)      Embedding (Ollama)
 ```
 
-### Module layers
+### Module Structure
 
-**Infrastructure (shared by indexer + query):**
-- `embedding.py` — Ollama `/api/embed` HTTP client with batching
-- `index_meta.py` — Schema version tracking (`SCHEMA_VERSION`); bump to force rebuild
-- `source_factory.py` — Creates `MarkdownFolderSource` instances from `FolderProfile` config, handling nested source exclusions
-- `manifest.py` — JSON-based change tracking (mtime + content hash) for incremental indexing
+```
+src/
+├── main.rs           # Entry point, clap CLI
+├── cli/              # Command implementations
+│   ├── doctor.rs     # Health check
+│   ├── index.rs      # Index command
+│   ├── search.rs     # Search command
+│   └── serve.rs      # MCP serve command
+├── config.rs         # YAML config loading
+├── embedding.rs      # Ollama HTTP client
+├── indexer.rs        # Chunking + LanceDB indexing
+├── query.rs          # SearchEngine
+├── manifest.rs       # Change tracking for incremental indexing
+├── index_meta.rs     # Schema version tracking
+├── mcp.rs            # MCP stdio server (JSON-RPC)
+├── sources/          # Content source abstraction
+│   ├── mod.rs        # ContentSource trait
+│   └── markdown.rs   # MarkdownFolderSource
+└── error.rs          # Error types
+```
 
-**Core pipeline:**
-- `config.py` — YAML config from `~/.config/colibri/config.yaml`, module-level constants (`SOURCES`, `LANCEDB_DIR`, etc.). Config is loaded at import time.
-- `indexer.py` — Chunking, per-folder indexing with four modes (static/incremental/append_only/disabled), LanceDB table management
-- `query.py` — `SearchEngine` class: semantic search, document retrieval, book listing, topic browsing. Singleton via `get_engine()`.
+### Key Patterns
 
-**Import pipeline (`processors/`):**
-- Registry pattern: processors auto-register via side-effect imports in `__init__.py`
-- `ProcessorRegistry.get_processor(path)` returns the right processor by file extension
-- PDF (`pymupdf4llm`) and EPUB (`ebooklib`) processors produce `ExtractedContent` → written to library as markdown with YAML frontmatter
+- **Per-source profiles**: Each content directory is a `FolderProfile` with its own indexing mode, doc_type, chunk settings. Defined in config YAML.
+- **Incremental indexing**: `Manifest` tracks file state (mtime + SHA-256). Only changed files are re-embedded.
+- **Schema versioning**: `SCHEMA_VERSION` in `config.rs`. Mismatch triggers rebuild prompt.
 
-**Content sources (`sources/`):**
-- `ContentSource` ABC with `list_documents()` and `read_document()` methods
-- `MarkdownFolderSource` — primary source type, supports configurable extensions and path exclusions
-- `ObsidianSource` — Obsidian-aware variant with wiki-link resolution
+## Data Compatibility
 
-**Interfaces:**
-- `cli.py` — Click CLI (`colibri` command). Import commands use `_import_document()` internally.
-- `mcp_server.py` — MCP stdio server for Claude integration (7 tools)
-- `api_server.py` — FastAPI REST server for HTTP/Copilot integration
-
-### Key patterns
-
-- **Per-source profiles**: Each content directory is a `FolderProfile` with its own indexing mode, doc_type, chunk settings, and file extensions. Defined in config YAML under `sources:`.
-- **Incremental indexing**: `Manifest` tracks file state (mtime + SHA-256). Only changed files are re-embedded. Schema version mismatch triggers automatic full rebuild.
-- **Tests mock embeddings**: Integration tests use `_fake_embed` returning fixed-dimension vectors and patch `colibri.indexer.embed_texts` (patch the consumer module, not `colibri.embedding`).
+Reads/writes standard locations:
+- `~/.config/colibri/config.yaml` — Configuration
+- `~/.local/share/colibri/lancedb/` — Vector index
+- `~/.local/share/colibri/manifest.json` — Change tracking
 
 ## Style
 
-- Python 3.11+, type hints required
-- Ruff rules: `E, F, I, UP, B, SIM` at 100-char line length
+- Rust 2021 edition, stable toolchain
+- Clippy with `-D warnings`
 - Conventional commits

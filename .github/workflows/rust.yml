@@ -2,13 +2,9 @@ name: Rust CI
 
 on:
   push:
-    paths:
-      - 'colibri-rs/**'
-      - '.github/workflows/rust.yml'
+    branches: [main]
   pull_request:
-    paths:
-      - 'colibri-rs/**'
-      - '.github/workflows/rust.yml'
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,9 +13,6 @@ jobs:
   check:
     name: Check & Lint
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: colibri-rs
     steps:
       - uses: actions/checkout@v4
 
@@ -37,8 +30,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            colibri-rs/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('colibri-rs/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
@@ -61,9 +54,6 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-    defaults:
-      run:
-        working-directory: colibri-rs
     steps:
       - uses: actions/checkout@v4
 
@@ -84,8 +74,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            colibri-rs/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('colibri-rs/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
@@ -96,4 +86,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: colibri-${{ matrix.os }}
-          path: colibri-rs/target/release/colibri
+          path: target/release/colibri

@@ -1,37 +1,43 @@
-.PHONY: install dev lint format test clean build
-.PHONY: rust-check rust-build rust-test rust-lint rust-clean setup-rust
+.PHONY: check build test lint format clean setup help
 
-# Install dependencies
-install:
-	uv sync
+# Find cargo: prefer PATH, fallback to ~/.cargo/bin
+CARGO := $(shell command -v cargo 2>/dev/null || echo "$(HOME)/.cargo/bin/cargo")
 
-# Install with dev dependencies
-dev:
-	uv sync --all-extras
+# Default target
+all: build
 
-# Run linter
-lint:
-	uv run ruff check src tests
-	uv run mypy src
+# Fast type-check without full compilation
+check:
+	$(CARGO) check
 
-# Format code
-format:
-	uv run ruff format src tests
-	uv run ruff check --fix src tests
+# Build optimized release binary
+build:
+	$(CARGO) build --release
+	@echo "Binary: target/release/colibri"
 
 # Run tests
 test:
-	uv run pytest tests -v
+	$(CARGO) test
 
-# Build sdist + wheel
-build:
-	uv run python -m build
+# Run clippy linter
+lint:
+	$(CARGO) clippy -- -D warnings
+
+# Format code
+format:
+	$(CARGO) fmt
 
 # Clean build artifacts
 clean:
-	rm -rf build dist *.egg-info
-	rm -rf .pytest_cache .mypy_cache .ruff_cache
-	find . -type d -name __pycache__ -exec rm -rf {} +
+	$(CARGO) clean
+
+# Install Rust toolchain if not present
+setup:
+	@command -v rustup >/dev/null 2>&1 || command -v $(HOME)/.cargo/bin/rustup >/dev/null 2>&1 || { \
+		echo "Installing Rust via rustup..."; \
+		curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y; \
+	}
+	@$(CARGO) --version
 
 # Check Ollama status
 check-ollama:
@@ -44,61 +50,12 @@ pull-models:
 # Show help
 help:
 	@echo "Available targets:"
-	@echo "  install      - Install dependencies"
-	@echo "  dev          - Install with dev dependencies"
-	@echo "  lint         - Run linters"
-	@echo "  format       - Format code"
+	@echo "  setup        - Install Rust toolchain via rustup"
+	@echo "  check        - Type-check code (fast)"
+	@echo "  build        - Build release binary"
 	@echo "  test         - Run tests"
-	@echo "  build        - Build sdist + wheel"
+	@echo "  lint         - Run clippy linter"
+	@echo "  format       - Format code"
 	@echo "  clean        - Clean build artifacts"
 	@echo "  check-ollama - Check if Ollama is running"
 	@echo "  pull-models  - Pull required Ollama models"
-	@echo ""
-	@echo "Rust targets:"
-	@echo "  setup-rust   - Install Rust toolchain via rustup"
-	@echo "  rust-check   - Type-check Rust code (fast)"
-	@echo "  rust-build   - Build release binary"
-	@echo "  rust-test    - Run Rust tests"
-	@echo "  rust-lint    - Run clippy linter"
-	@echo "  rust-clean   - Clean Rust build artifacts"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Rust targets (colibri-rs/)
-# ─────────────────────────────────────────────────────────────────────────────
-
-RUST_DIR := colibri-rs
-# Find cargo: prefer PATH, fallback to ~/.cargo/bin
-CARGO := $(shell command -v cargo 2>/dev/null || echo "$(HOME)/.cargo/bin/cargo")
-
-# Install Rust toolchain if not present
-setup-rust:
-	@command -v rustup >/dev/null 2>&1 || command -v $(HOME)/.cargo/bin/rustup >/dev/null 2>&1 || { \
-		echo "Installing Rust via rustup..."; \
-		curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y; \
-	}
-	@$(CARGO) --version
-
-# Fast type-check without full compilation
-rust-check:
-	cd $(RUST_DIR) && $(CARGO) check
-
-# Build optimized release binary
-rust-build:
-	cd $(RUST_DIR) && $(CARGO) build --release
-	@echo "Binary: $(RUST_DIR)/target/release/colibri"
-
-# Run Rust tests
-rust-test:
-	cd $(RUST_DIR) && $(CARGO) test
-
-# Run clippy linter
-rust-lint:
-	cd $(RUST_DIR) && $(CARGO) clippy -- -D warnings
-
-# Format Rust code
-rust-format:
-	cd $(RUST_DIR) && $(CARGO) fmt
-
-# Clean Rust build artifacts
-rust-clean:
-	cd $(RUST_DIR) && $(CARGO) clean

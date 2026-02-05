@@ -1,41 +1,110 @@
 # CoLibri
 
-CoLibri (COntext LIBRary) is a local-first RAG system for technical books and notes: import PDF/EPUB → Markdown, index into LanceDB, and query it from the command line.
+Local RAG system for semantic search over markdown content. Indexes markdown files into LanceDB and exposes search via CLI and MCP server.
 
-This `README.md` stays intentionally short. The “how-to” lives in `docs/`.
+## Prerequisites
 
-## Quick Start
+### Rust Toolchain
 
 ```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+### Protocol Buffers Compiler
+
+LanceDB requires `protoc` for building:
+
+```bash
+# macOS
+brew install protobuf
+
+# Ubuntu/Debian
+sudo apt install protobuf-compiler
+
+# Verify
+protoc --version
+```
+
+### Ollama
+
+CoLibri uses Ollama for local embeddings:
+
+```bash
+# macOS
+brew install ollama
+
+# Start the server
+ollama serve
+
+# Pull the embedding model
+ollama pull nomic-embed-text
+```
+
+## Building
+
+```bash
+# Development build
+cargo build
+
+# Release build (optimized)
+cargo build --release
+
+# Or use Make
+make build
+```
+
+## Commands
+
+```bash
+# Health check
 colibri doctor
-colibri import ~/Downloads/book.pdf
+
+# Index markdown corpus
 colibri index
-colibri search "clean architecture"
+colibri index --folder Books --force
+
+# Semantic search
+colibri search "microservices patterns"
+colibri search "clean architecture" --json --limit 10
+
+# MCP server (for Claude integration)
+colibri serve
 ```
 
-Setup, configuration, and troubleshooting: `docs/INSTALLATION.md` and `docs/CONFIGURATION.md`.
+## Configuration
 
-## Agent Instructions (Important)
+CoLibri reads configuration from `~/.config/colibri/config.yaml`:
 
-If you are a CLI-native coding agent, treat CoLibri as an external context tool.
+```yaml
+embedding_model: nomic-embed-text
+ollama_base_url: http://localhost:11434
+top_k: 20
+similarity_threshold: 0.3
+
+sources:
+  - name: Books
+    path: ~/Library/Books
+    doc_type: book
+    mode: incremental
+```
+
+## Data Directory
+
+Index and metadata are stored in `~/.local/share/colibri/`:
+
+- `lancedb/` — Vector index
+- `manifest.json` — Change tracking for incremental indexing
+- `index_meta.json` — Schema version and stats
+
+## Development
 
 ```bash
-colibri agent-guide --format markdown
-colibri capabilities --json
-colibri changes --since <revision> --json
-colibri search "your query" -n 10 --json
+make check    # Type-check (fast)
+make test     # Run tests
+make lint     # Clippy linter
+make format   # Format code
 ```
 
-Recommended integration loop:
+## License
 
-1. Call `colibri capabilities --json` once and cache `revision` (and optionally `digest`).
-2. Before/while working, poll `colibri changes --since <revision> --json` and refresh capabilities when it advances.
-
-## Docs
-
-- Install & use: `docs/INSTALLATION.md`
-- Configuration (sources, modes, data dir): `docs/CONFIGURATION.md`
-- Architecture & internals: `docs/ARCHITECTURE.md`
-- Maintainer notes: `docs/MAINTENANCE.md`
-- Releasing / Homebrew tap (maintainers): `docs/RELEASING.md`
-- Repo agent/dev guide: `AGENTS.md`
+MIT
