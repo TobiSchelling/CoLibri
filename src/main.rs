@@ -52,7 +52,9 @@ async fn main() -> anyhow::Result<()> {
             input,
             output_dir,
             converter,
+            image_mode,
+            attachments_dir,
             reindex,
-        } => cli::import::run(input, output_dir, converter, reindex).await,
+        } => cli::import::run(input, output_dir, converter, image_mode, attachments_dir, reindex).await,
     }
 }

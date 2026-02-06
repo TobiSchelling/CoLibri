@@ -55,6 +55,28 @@ impl IndexResult {
 // Text chunking
 // ---------------------------------------------------------------------------
 
+/// Find the nearest valid UTF-8 char boundary at or before the given byte index.
+fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+/// Find the nearest valid UTF-8 char boundary at or after the given byte index.
+fn ceil_char_boundary(s: &str, mut idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    while idx < s.len() && !s.is_char_boundary(idx) {
+        idx += 1;
+    }
+    idx
+}
+
 /// Split text into overlapping chunks on natural boundaries.
 ///
 /// Tries paragraph boundaries first, then sentence boundaries,
@@ -74,7 +96,8 @@ pub fn split_text(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<St
     let mut start = 0;
 
     while start < text_len {
-        let mut end = start + chunk_size;
+        // Ensure end is on a valid char boundary
+        let mut end = floor_char_boundary(text, start + chunk_size);
 
         if end >= text_len {
             let chunk = text[start..].trim();
@@ -104,9 +127,9 @@ pub fn split_text(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<St
             chunks.push(chunk.to_string());
         }
 
-        // Advance with overlap
+        // Advance with overlap, ensuring we land on a char boundary
         let next = end.saturating_sub(chunk_overlap);
-        start = std::cmp::max(start + 1, next);
+        start = ceil_char_boundary(text, std::cmp::max(start + 1, next));
     }
 
     chunks

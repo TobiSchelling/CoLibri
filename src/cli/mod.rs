@@ -76,6 +76,14 @@ pub enum Commands {
         #[arg(long, default_value = "docling", value_parser = clap::value_parser!(import::PdfConverter))]
         converter: import::PdfConverter,
 
+        /// Image handling: placeholder (default, no images), referenced (separate files), embedded (base64)
+        #[arg(long, default_value = "placeholder", value_parser = clap::value_parser!(import::ImageMode))]
+        image_mode: import::ImageMode,
+
+        /// Directory for extracted images (only used with --image-mode=referenced)
+        #[arg(long)]
+        attachments_dir: Option<PathBuf>,
+
         /// Re-index the books folder after import
         #[arg(long)]
         reindex: bool,
