@@ -6,7 +6,7 @@
 use std::env;
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ColibriError;
 
@@ -14,7 +14,7 @@ use crate::error::ColibriError;
 pub const SCHEMA_VERSION: u32 = 4;
 
 /// How a folder should be indexed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IndexMode {
     Static,
@@ -25,7 +25,8 @@ pub enum IndexMode {
 }
 
 /// Per-source indexing configuration (mirrors Python `FolderProfile`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
 pub struct FolderProfile {
     /// Absolute path to the source directory (required).
     pub path: String,
@@ -58,6 +59,20 @@ fn default_doc_type() -> String {
 
 fn default_extensions() -> Vec<String> {
     vec![".md".into()]
+}
+
+impl Default for FolderProfile {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            mode: IndexMode::default(),
+            doc_type: default_doc_type(),
+            chunk_size: None,
+            chunk_overlap: None,
+            extensions: default_extensions(),
+            name: None,
+        }
+    }
 }
 
 impl FolderProfile {
@@ -320,4 +335,59 @@ pub fn load_config() -> Result<AppConfig, ColibriError> {
         chunk_size: raw.chunking.chunk_size,
         chunk_overlap: raw.chunking.chunk_overlap,
     })
+}
+
+/// Structure for saving config back to YAML.
+/// Only includes sources since other settings may be from env vars.
+#[derive(Debug, Serialize)]
+struct SaveConfig {
+    sources: Vec<FolderProfile>,
+}
+
+/// Save configuration sources to the config file.
+///
+/// Only writes the `sources` section to preserve user's other settings.
+/// If the config file exists, it merges sources into the existing file.
+pub fn save_config(config: &AppConfig) -> Result<(), ColibriError> {
+    let config_path = AppConfig::config_path();
+
+    // Ensure config directory exists
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Try to preserve existing config structure
+    let yaml_content = if config_path.exists() {
+        let existing_text = std::fs::read_to_string(&config_path).map_err(|e| {
+            ColibriError::Config(format!("Failed to read {}: {e}", config_path.display()))
+        })?;
+
+        // Parse existing YAML as a generic value to preserve other sections
+        let mut existing: serde_yaml::Value = serde_yaml::from_str(&existing_text)
+            .unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+
+        // Update sources section
+        let sources_value = serde_yaml::to_value(&config.sources)
+            .map_err(|e| ColibriError::Config(format!("Failed to serialize sources: {e}")))?;
+
+        if let serde_yaml::Value::Mapping(ref mut map) = existing {
+            map.insert(serde_yaml::Value::String("sources".into()), sources_value);
+        }
+
+        serde_yaml::to_string(&existing)
+            .map_err(|e| ColibriError::Config(format!("Failed to serialize config: {e}")))?
+    } else {
+        // Create new config with just sources
+        let save_config = SaveConfig {
+            sources: config.sources.clone(),
+        };
+        serde_yaml::to_string(&save_config)
+            .map_err(|e| ColibriError::Config(format!("Failed to serialize config: {e}")))?
+    };
+
+    std::fs::write(&config_path, yaml_content).map_err(|e| {
+        ColibriError::Config(format!("Failed to write {}: {e}", config_path.display()))
+    })?;
+
+    Ok(())
 }

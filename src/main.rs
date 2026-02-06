@@ -36,8 +36,10 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        cli::Commands::Config => cli::config_tui::run().await,
         cli::Commands::Doctor => cli::doctor::run().await,
         cli::Commands::Index { folder, force } => cli::index::run(folder, force).await,
+        cli::Commands::Instructions { output } => cli::instructions::run(output).await,
         cli::Commands::Search {
             query,
             limit,

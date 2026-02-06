@@ -1,14 +1,21 @@
 //! CLI command definitions and handlers.
 
+pub mod config_tui;
 pub mod doctor;
 pub mod index;
+pub mod instructions;
 pub mod search;
 pub mod serve;
+
+use std::path::PathBuf;
 
 use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Interactive TUI for managing configuration
+    Config,
+
     /// Check system health (Ollama, config, index)
     Doctor,
 
@@ -21,6 +28,13 @@ pub enum Commands {
         /// Force full re-index regardless of mode
         #[arg(long)]
         force: bool,
+    },
+
+    /// Generate LLM instructions for using colibri
+    Instructions {
+        /// Output file path (default: ~/COLIBRI_INSTRUCTIONS.md)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
     },
 
     /// Search the indexed library

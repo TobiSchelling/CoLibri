@@ -32,7 +32,7 @@ const MAX_CHUNK_CHARS: usize = 16000;
 const TABLE_NAME: &str = "chunks";
 
 /// Summary of an indexing operation.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct IndexResult {
     pub total_chunks: usize,
     pub files_indexed: usize,
