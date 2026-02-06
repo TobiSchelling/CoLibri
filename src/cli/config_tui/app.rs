@@ -658,7 +658,7 @@ pub fn get_path_completions(input: &str) -> Vec<String> {
         .map(|entry| entry.path().display().to_string())
         .collect();
 
-    completions.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    completions.sort_by_key(|a| a.to_lowercase());
 
     // Limit to reasonable number
     completions.truncate(20);

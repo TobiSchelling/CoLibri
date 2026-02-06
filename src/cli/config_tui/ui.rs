@@ -376,8 +376,7 @@ fn draw_completion_popup(frame: &mut Frame, app: &App, area: Rect) {
         .map(|n| n.len())
         .max()
         .unwrap_or(20)
-        .max(20)
-        .min(50) as u16
+        .clamp(20, 50) as u16
         + 6; // Extra space for scroll indicator
 
     let max_visible = 10;

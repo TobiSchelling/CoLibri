@@ -2,6 +2,7 @@
 
 pub mod config_tui;
 pub mod doctor;
+pub mod import;
 pub mod index;
 pub mod instructions;
 pub mod search;
@@ -61,4 +62,22 @@ pub enum Commands {
 
     /// Start MCP stdio server
     Serve,
+
+    /// Import PDF or EPUB files into the library as markdown
+    Import {
+        /// Input file path (PDF or EPUB)
+        input: PathBuf,
+
+        /// Output directory (defaults to books source from config)
+        #[arg(short, long)]
+        output_dir: Option<PathBuf>,
+
+        /// PDF converter: docling (quality) or marker (speed)
+        #[arg(long, default_value = "docling", value_parser = clap::value_parser!(import::PdfConverter))]
+        converter: import::PdfConverter,
+
+        /// Re-index the books folder after import
+        #[arg(long)]
+        reindex: bool,
+    },
 }

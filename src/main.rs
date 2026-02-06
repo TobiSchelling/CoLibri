@@ -48,5 +48,11 @@ async fn main() -> anyhow::Result<()> {
             folder,
         } => cli::search::run(query, limit, json, doc_type, folder).await,
         cli::Commands::Serve => cli::serve::run().await,
+        cli::Commands::Import {
+            input,
+            output_dir,
+            converter,
+            reindex,
+        } => cli::import::run(input, output_dir, converter, reindex).await,
     }
 }
