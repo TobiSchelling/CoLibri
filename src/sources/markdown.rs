@@ -165,9 +165,7 @@ impl ContentSource for MarkdownFolderSource {
 impl MarkdownFolderSource {
     /// Read a markdown file with optional YAML frontmatter.
     fn read_markdown(&self, path: &Path, full_path: &Path) -> Result<SourceDocument, ColibriError> {
-        let content = std::fs::read_to_string(full_path).map_err(|e| {
-            ColibriError::Source(format!("Failed to read {}: {e}", full_path.display()))
-        })?;
+        let content = read_lossy(full_path)?;
 
         let (metadata, doc_content) = parse_frontmatter(&content);
 
@@ -212,9 +210,7 @@ impl MarkdownFolderSource {
 
     /// Read a YAML file (e.g., OpenAPI spec) as a document.
     fn read_yaml(&self, path: &Path, full_path: &Path) -> Result<SourceDocument, ColibriError> {
-        let content = std::fs::read_to_string(full_path).map_err(|e| {
-            ColibriError::Source(format!("Failed to read {}: {e}", full_path.display()))
-        })?;
+        let content = read_lossy(full_path)?;
 
         let title = extract_yaml_title(&content).unwrap_or_else(|| title_from_filename(path));
 
@@ -302,6 +298,14 @@ fn extract_tags(metadata: &serde_json::Map<String, serde_json::Value>) -> Vec<St
             .collect(),
         _ => vec![],
     }
+}
+
+/// Read a file as UTF-8, replacing invalid bytes with the Unicode replacement character.
+fn read_lossy(path: &Path) -> Result<String, ColibriError> {
+    let bytes = std::fs::read(path).map_err(|e| {
+        ColibriError::Source(format!("Failed to read {}: {e}", path.display()))
+    })?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Extract title from a YAML document (e.g., OpenAPI spec).
