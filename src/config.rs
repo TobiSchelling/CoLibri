@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::ColibriError;
 
 /// Schema version — must match Python's `SCHEMA_VERSION` for cross-compat.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// How a folder should be indexed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -165,7 +165,7 @@ fn default_ollama_url() -> String {
 }
 
 fn default_embedding_model() -> String {
-    "nomic-embed-text".into()
+    "bge-m3".into()
 }
 
 #[derive(Debug, Deserialize)]

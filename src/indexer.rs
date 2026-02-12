@@ -25,7 +25,7 @@ use crate::manifest::{
 use crate::sources::markdown::MarkdownFolderSource;
 use crate::sources::ContentSource;
 
-/// Safety limit for chunk text length (nomic-embed-text context window).
+/// Safety limit for chunk text length (bge-m3 context window ≈ 8192 tokens).
 const MAX_CHUNK_CHARS: usize = 16000;
 
 /// LanceDB table name.
