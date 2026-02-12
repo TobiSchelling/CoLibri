@@ -1,13 +1,13 @@
 class Colibri < Formula
   desc "Local RAG system for semantic search over markdown content"
   homepage "https://github.com/TobiSchelling/CoLibri"
-  version "0.4.0"
+  version "0.6.0"
   license "MIT"
 
   on_macos do
     on_arm do
       url "https://github.com/TobiSchelling/CoLibri/releases/download/v#{version}/colibri-#{version}-macos-arm64.tar.gz"
-      sha256 "618174fe39710634507b35ed94a70ffd4da6eca8aa8e8bbc7e3eae15c06ee91c"
+      sha256 "a473ae0e47fe08bbc8c638d90b9a894923f86797c259d345bbea4f662a9e7454"
     end
   end
 
@@ -22,7 +22,7 @@ class Colibri < Formula
       Install and start Ollama:
         brew install ollama
         ollama serve
-        ollama pull nomic-embed-text
+        ollama pull bge-m3
 
       Then verify installation:
         colibri doctor
