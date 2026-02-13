@@ -182,19 +182,11 @@ fn draw_folder_list(frame: &mut Frame, app: &App, area: Rect) {
 
             let status_style = if !path_exists {
                 Style::default().fg(RED)
-            } else if folder.mode == IndexMode::Disabled {
-                Style::default().fg(OVERLAY0)
             } else {
                 Style::default().fg(GREEN)
             };
 
-            let status = if !path_exists {
-                "MISSING"
-            } else if folder.mode == IndexMode::Disabled {
-                "disabled"
-            } else {
-                "OK"
-            };
+            let status = if !path_exists { "MISSING" } else { "OK" };
 
             let style = if actual_index == selected {
                 Style::default().bg(SURFACE1).fg(TEXT)
@@ -346,7 +338,7 @@ fn get_field_hint(field: EditField) -> &'static str {
         EditField::Path => "Absolute path to folder. Use Tab for autocomplete, ~ expands to home.",
         EditField::Name => "Display name (optional). Defaults to folder name if empty.",
         EditField::DocType => "Document type label (e.g., 'book', 'note', 'article').",
-        EditField::Mode => "static: index once | incremental: track changes | append_only: add only | disabled: skip",
+        EditField::Mode => "static: index once | incremental: track changes",
         EditField::Extensions => "File extensions to index, comma-separated (e.g., .md, .txt).",
         EditField::ChunkSize => "Characters per chunk. Leave empty for default (3000).",
         EditField::ChunkOverlap => "Overlap between chunks. Leave empty for default (200).",
@@ -700,7 +692,5 @@ fn format_mode(mode: IndexMode) -> &'static str {
     match mode {
         IndexMode::Static => "static",
         IndexMode::Incremental => "incremental",
-        IndexMode::AppendOnly => "append_only",
-        IndexMode::Disabled => "disabled",
     }
 }

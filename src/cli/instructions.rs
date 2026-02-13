@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::config::{load_config, AppConfig, IndexMode};
+use crate::config::{load_config, AppConfig};
 use crate::manifest::{get_manifest_path, Manifest};
 
 /// Run the instructions command.
@@ -45,10 +45,6 @@ fn generate_instructions(config: &AppConfig) -> anyhow::Result<String> {
     let manifest = Manifest::load(&manifest_path).ok();
 
     for source in &config.sources {
-        if source.mode == IndexMode::Disabled {
-            continue;
-        }
-
         let (file_count, _) = if let Some(ref m) = manifest {
             count_source_files(m, &source.path)
         } else {

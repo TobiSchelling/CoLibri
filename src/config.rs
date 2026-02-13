@@ -17,11 +17,11 @@ pub const SCHEMA_VERSION: u32 = 5;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IndexMode {
+    /// Content assumed stable — skip known files, but detect deletions.
     Static,
+    /// Track changes via mtime + SHA-256 — re-index modified files, detect deletions.
     #[default]
     Incremental,
-    AppendOnly,
-    Disabled,
 }
 
 /// Per-source indexing configuration (mirrors Python `FolderProfile`).

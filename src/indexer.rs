@@ -1,7 +1,7 @@
 //! Index content sources for semantic search.
 //!
-//! Uses LanceDB Rust SDK and Ollama HTTP API. Supports four per-folder
-//! indexing modes: static, incremental, append_only, disabled.
+//! Uses LanceDB Rust SDK and Ollama HTTP API. Supports two per-folder
+//! indexing modes: static and incremental.
 //! Mirrors the Python `indexer.py` module.
 
 use std::collections::{HashMap, HashSet};
@@ -353,7 +353,7 @@ fn classify_files(
         let key = make_key(source_id, &rel);
 
         match profile.mode {
-            IndexMode::Static | IndexMode::AppendOnly => {
+            IndexMode::Static => {
                 if manifest.is_file_known(&key) {
                     skipped += 1;
                 } else {
@@ -367,9 +367,6 @@ fn classify_files(
                 } else {
                     skipped += 1;
                 }
-            }
-            IndexMode::Disabled => {
-                skipped += 1;
             }
         }
     }
@@ -445,9 +442,9 @@ async fn index_folder(
         .collect();
 
     if files_to_index.is_empty() {
-        // Still detect deletions for incremental mode
+        // Detect deletions for all modes
         let mut deleted = 0;
-        if profile.mode == IndexMode::Incremental && !force {
+        if !force {
             if let Some(tbl) = table.as_ref() {
                 deleted = detect_deleted_files(
                     manifest,
@@ -566,9 +563,9 @@ async fn index_folder(
         }
     }
 
-    // Detect deleted files (incremental mode)
+    // Detect deleted files (all modes)
     let mut deleted = 0;
-    if profile.mode == IndexMode::Incremental && !force {
+    if !force {
         if let Some(tbl) = table.as_ref() {
             deleted = detect_deleted_files(
                 manifest,
@@ -622,11 +619,7 @@ pub async fn index_library(
         }
         matches
     } else {
-        config
-            .sources
-            .iter()
-            .filter(|p| p.mode != IndexMode::Disabled)
-            .collect()
+        config.sources.iter().collect()
     };
 
     let mut force = force;
@@ -647,12 +640,8 @@ pub async fn index_library(
             "Index schema outdated (v{stored_version} -> v{SCHEMA_VERSION}). Forcing full rebuild."
         );
         force = true;
-        // Re-resolve all non-disabled profiles
-        profiles = config
-            .sources
-            .iter()
-            .filter(|p| p.mode != IndexMode::Disabled)
-            .collect();
+        // Re-resolve all profiles
+        profiles = config.sources.iter().collect();
     }
 
     let full_rebuild = force && folder_filter.is_none();
@@ -771,7 +760,5 @@ fn format_mode(mode: IndexMode) -> &'static str {
     match mode {
         IndexMode::Static => "static",
         IndexMode::Incremental => "incremental",
-        IndexMode::AppendOnly => "append_only",
-        IndexMode::Disabled => "disabled",
     }
 }

@@ -409,9 +409,7 @@ impl App {
         if let Some(ref mut folder) = self.editing_folder {
             folder.mode = match folder.mode {
                 IndexMode::Static => IndexMode::Incremental,
-                IndexMode::Incremental => IndexMode::AppendOnly,
-                IndexMode::AppendOnly => IndexMode::Disabled,
-                IndexMode::Disabled => IndexMode::Static,
+                IndexMode::Incremental => IndexMode::Static,
             };
             self.has_changes = true;
         }
@@ -580,8 +578,6 @@ fn format_mode(mode: IndexMode) -> &'static str {
     match mode {
         IndexMode::Static => "static",
         IndexMode::Incremental => "incremental",
-        IndexMode::AppendOnly => "append_only",
-        IndexMode::Disabled => "disabled",
     }
 }
 
@@ -589,8 +585,6 @@ fn parse_mode(s: &str) -> IndexMode {
     match s.to_lowercase().as_str() {
         "static" => IndexMode::Static,
         "incremental" => IndexMode::Incremental,
-        "append_only" | "appendonly" => IndexMode::AppendOnly,
-        "disabled" => IndexMode::Disabled,
         _ => IndexMode::Incremental,
     }
 }
