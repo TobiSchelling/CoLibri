@@ -685,7 +685,10 @@ pub fn get_path_completions(input: &str) -> Vec<String> {
     let (dir_to_list, prefix) = if expanded.ends_with("/.") {
         // User typed "/path/." - they want hidden files in /path/
         let dir = &expanded[..expanded.len() - 2];
-        (PathBuf::from(if dir.is_empty() { "/" } else { dir }), ".".to_string())
+        (
+            PathBuf::from(if dir.is_empty() { "/" } else { dir }),
+            ".".to_string(),
+        )
     } else if expanded.ends_with('/') {
         // Input ends with /, list directory contents
         (PathBuf::from(&expanded), String::new())
@@ -758,7 +761,10 @@ mod tests {
         let home_str = home.display().to_string();
 
         assert_eq!(expand_tilde("~"), home_str);
-        assert_eq!(expand_tilde("~/Documents"), format!("{}/Documents", home_str));
+        assert_eq!(
+            expand_tilde("~/Documents"),
+            format!("{}/Documents", home_str)
+        );
         assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
         assert_eq!(expand_tilde("relative/path"), "relative/path");
     }
@@ -767,7 +773,10 @@ mod tests {
     fn test_empty_input_returns_home() {
         let completions = get_path_completions("");
         assert_eq!(completions.len(), 1);
-        assert_eq!(completions[0], dirs::home_dir().unwrap().display().to_string());
+        assert_eq!(
+            completions[0],
+            dirs::home_dir().unwrap().display().to_string()
+        );
     }
 
     #[test]
@@ -778,7 +787,12 @@ mod tests {
         // All should start with home directory path
         let home = dirs::home_dir().unwrap().display().to_string();
         for c in &completions {
-            assert!(c.starts_with(&home), "Expected {} to start with {}", c, home);
+            assert!(
+                c.starts_with(&home),
+                "Expected {} to start with {}",
+                c,
+                home
+            );
         }
     }
 
@@ -788,7 +802,11 @@ mod tests {
         // None should start with a dot (hidden)
         for c in &completions {
             let name = Path::new(c).file_name().unwrap().to_string_lossy();
-            assert!(!name.starts_with('.'), "Hidden dir {} should be excluded", c);
+            assert!(
+                !name.starts_with('.'),
+                "Hidden dir {} should be excluded",
+                c
+            );
         }
     }
 

@@ -192,10 +192,7 @@ async fn convert_pdf_docling(
     let output_file = out_dir.join(format!("{stem}.md"));
 
     if !output_file.exists() {
-        bail!(
-            "Expected output file not found: {}",
-            output_file.display()
-        );
+        bail!("Expected output file not found: {}", output_file.display());
     }
 
     // If referenced mode with attachments dir, relocate images
@@ -292,10 +289,7 @@ async fn convert_epub(
     }
 
     if !output_file.exists() {
-        bail!(
-            "Expected output file not found: {}",
-            output_file.display()
-        );
+        bail!("Expected output file not found: {}", output_file.display());
     }
 
     Ok(output_file)
@@ -361,8 +355,7 @@ pub async fn run(
         // Find the books source name for targeted indexing
         let folder_filter = config.books_source().map(|s| s.display_name().to_string());
 
-        let result =
-            index_library(&config, folder_filter.as_deref(), false, |_| {}).await?;
+        let result = index_library(&config, folder_filter.as_deref(), false, |_| {}).await?;
 
         if result.errors > 0 {
             eprintln!("Warning: {} indexing errors occurred", result.errors);

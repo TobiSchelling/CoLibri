@@ -797,4 +797,3 @@ pub async fn index_library(
 
     Ok(aggregate)
 }
-

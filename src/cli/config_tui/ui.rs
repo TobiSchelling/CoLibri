@@ -417,7 +417,13 @@ fn draw_completion_popup(frame: &mut Frame, app: &App, area: Rect) {
     let title = if total > max_visible {
         let up_arrow = if visible_start > 0 { "↑ " } else { "" };
         let down_arrow = if visible_end < total { " ↓" } else { "" };
-        format!("{}Folders ({}/{}){}", up_arrow, selected + 1, total, down_arrow)
+        format!(
+            "{}Folders ({}/{}){}",
+            up_arrow,
+            selected + 1,
+            total,
+            down_arrow
+        )
     } else {
         "Folders".to_string()
     };
@@ -464,16 +470,12 @@ fn draw_indexing(frame: &mut Frame, app: &App, area: Rect) {
 
     // Progress indicator
     if app.indexing.is_running {
-        let source_name = app
-            .indexing
-            .current_source
-            .as_deref()
-            .unwrap_or("Starting");
+        let source_name = app.indexing.current_source.as_deref().unwrap_or("Starting");
 
         match app.indexing.phase {
             IndexPhase::Reading if app.indexing.phase_total > 0 => {
-                let pct = (app.indexing.phase_done as f64 / app.indexing.phase_total as f64
-                    * 100.0) as u16;
+                let pct = (app.indexing.phase_done as f64 / app.indexing.phase_total as f64 * 100.0)
+                    as u16;
                 let label = format!(
                     "Reading {source_name}... {}/{}",
                     app.indexing.phase_done, app.indexing.phase_total
@@ -486,8 +488,8 @@ fn draw_indexing(frame: &mut Frame, app: &App, area: Rect) {
                 frame.render_widget(gauge, chunks[1]);
             }
             IndexPhase::Embedding if app.indexing.phase_total > 0 => {
-                let pct = (app.indexing.phase_done as f64 / app.indexing.phase_total as f64
-                    * 100.0) as u16;
+                let pct = (app.indexing.phase_done as f64 / app.indexing.phase_total as f64 * 100.0)
+                    as u16;
                 let label = format!(
                     "Embedding {source_name}... {}/{}",
                     app.indexing.phase_done, app.indexing.phase_total
@@ -640,7 +642,10 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("Chunks: ", Style::default().fg(PEACH)),
-            Span::styled(app.status.chunk_count.to_string(), Style::default().fg(TEXT)),
+            Span::styled(
+                app.status.chunk_count.to_string(),
+                Style::default().fg(TEXT),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Model: ", Style::default().fg(PEACH)),
@@ -661,17 +666,13 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let ollama_status = match &app.status.ollama_status {
         OllamaStatus::Unknown => Span::styled("Unknown", Style::default().fg(OVERLAY0)),
         OllamaStatus::Checking => Span::styled("Checking...", Style::default().fg(YELLOW)),
-        OllamaStatus::Connected(url) => Span::styled(
-            format!("Connected ({url})"),
-            Style::default().fg(GREEN),
-        ),
-        OllamaStatus::Disconnected(url) => Span::styled(
-            format!("Disconnected ({url})"),
-            Style::default().fg(RED),
-        ),
-        OllamaStatus::Error(e) => {
-            Span::styled(format!("Error: {e}"), Style::default().fg(RED))
+        OllamaStatus::Connected(url) => {
+            Span::styled(format!("Connected ({url})"), Style::default().fg(GREEN))
         }
+        OllamaStatus::Disconnected(url) => {
+            Span::styled(format!("Disconnected ({url})"), Style::default().fg(RED))
+        }
+        OllamaStatus::Error(e) => Span::styled(format!("Error: {e}"), Style::default().fg(RED)),
     };
 
     let ollama_text = vec![Line::from(vec![
@@ -695,10 +696,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
                     Span::styled("MISSING", Style::default().fg(RED))
                 };
                 Line::from(vec![
-                    Span::styled(
-                        format!("  {} ", s.display_name()),
-                        Style::default().fg(SKY),
-                    ),
+                    Span::styled(format!("  {} ", s.display_name()), Style::default().fg(SKY)),
                     Span::styled("... ", Style::default().fg(OVERLAY0)),
                     status,
                 ])

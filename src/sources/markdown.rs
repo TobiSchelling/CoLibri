@@ -302,9 +302,8 @@ fn extract_tags(metadata: &serde_json::Map<String, serde_json::Value>) -> Vec<St
 
 /// Read a file as UTF-8, replacing invalid bytes with the Unicode replacement character.
 fn read_lossy(path: &Path) -> Result<String, ColibriError> {
-    let bytes = std::fs::read(path).map_err(|e| {
-        ColibriError::Source(format!("Failed to read {}: {e}", path.display()))
-    })?;
+    let bytes = std::fs::read(path)
+        .map_err(|e| ColibriError::Source(format!("Failed to read {}: {e}", path.display())))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 

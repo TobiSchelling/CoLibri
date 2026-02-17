@@ -38,10 +38,9 @@ impl CliProgress {
             }
             IndexEvent::Reading { done, total } => {
                 if st.read_pb.is_none() {
-                    let style =
-                        ProgressStyle::with_template("  Reading    [{bar:28}] {pos}/{len}")
-                            .unwrap()
-                            .progress_chars("##-");
+                    let style = ProgressStyle::with_template("  Reading    [{bar:28}] {pos}/{len}")
+                        .unwrap()
+                        .progress_chars("##-");
                     let pb = self.mp.add(ProgressBar::new(total as u64));
                     pb.set_style(style);
                     st.read_pb = Some(pb);
@@ -86,18 +85,13 @@ impl CliProgress {
                 pb.set_style(
                     ProgressStyle::with_template("  Writing    {spinner} {msg}")
                         .unwrap()
-                        .tick_strings(&[
-                            "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓",
-                        ]),
+                        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "✓"]),
                 );
                 pb.set_message("Updating index...");
                 pb.enable_steady_tick(std::time::Duration::from_millis(80));
                 st.write_pb = Some(pb);
             }
-            IndexEvent::SourceComplete {
-                name,
-                result,
-            } => {
+            IndexEvent::SourceComplete { name, result } => {
                 // Finish any active bar
                 if let Some(pb) = st.write_pb.take() {
                     pb.finish_and_clear();
@@ -117,9 +111,9 @@ impl CliProgress {
                 } else {
                     String::new()
                 };
-                let _ = self.mp.println(format!(
-                    "  {name}: {skipped} unchanged{deleted_str}"
-                ));
+                let _ = self
+                    .mp
+                    .println(format!("  {name}: {skipped} unchanged{deleted_str}"));
             }
             IndexEvent::Warning { message } => {
                 let _ = self.mp.println(format!("  ⚠ {message}"));
