@@ -361,7 +361,8 @@ pub async fn run(
         // Find the books source name for targeted indexing
         let folder_filter = config.books_source().map(|s| s.display_name().to_string());
 
-        let result = index_library(&config, folder_filter.as_deref(), false).await?;
+        let result =
+            index_library(&config, folder_filter.as_deref(), false, |_| {}).await?;
 
         if result.errors > 0 {
             eprintln!("Warning: {} indexing errors occurred", result.errors);

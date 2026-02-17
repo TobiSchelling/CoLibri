@@ -13,10 +13,10 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema};
 use lancedb::database::CreateTableMode;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::config::{AppConfig, FolderProfile, IndexMode, SCHEMA_VERSION};
-use crate::embedding::embed_texts;
+use crate::embedding::embed_texts_with_progress;
 use crate::error::ColibriError;
 use crate::index_meta::{read_index_meta, write_index_meta};
 use crate::manifest::{
@@ -24,6 +24,42 @@ use crate::manifest::{
 };
 use crate::sources::markdown::MarkdownFolderSource;
 use crate::sources::ContentSource;
+
+// ---------------------------------------------------------------------------
+// Progress events
+// ---------------------------------------------------------------------------
+
+/// Events emitted during indexing for progress reporting.
+///
+/// Each call site (CLI, TUI) provides its own handler to render these events
+/// appropriately — CLI uses indicatif progress bars, TUI sends them over a
+/// channel to update its ratatui gauge.
+#[derive(Debug, Clone)]
+pub enum IndexEvent {
+    /// A source folder is about to be indexed.
+    SourceStart { name: String },
+    /// File reading progress within the current source.
+    Reading { done: usize, total: usize },
+    /// Embedding progress (chunks processed so far).
+    Embedding {
+        chunks_done: usize,
+        total_chunks: usize,
+    },
+    /// Writing embedded chunks to LanceDB.
+    Writing,
+    /// A source completed successfully.
+    SourceComplete { name: String, result: IndexResult },
+    /// A source had no changes (all files skipped).
+    SourceUnchanged {
+        name: String,
+        skipped: usize,
+        deleted: usize,
+    },
+    /// A non-fatal warning (e.g. unreadable file).
+    Warning { message: String },
+    /// Indexing finished (final event, carries the aggregate result or error).
+    Done(Result<IndexResult, String>),
+}
 
 /// Safety limit for chunk text length (bge-m3 context window ≈ 8192 tokens).
 const MAX_CHUNK_CHARS: usize = 16000;
@@ -417,6 +453,7 @@ async fn index_folder(
     chunk_overlap: usize,
     force: bool,
     overwrite_first: bool,
+    on_progress: &(impl Fn(IndexEvent) + Send + Sync),
 ) -> Result<IndexResult, ColibriError> {
     let source_label = profile.display_name().to_string();
     let src_id = source_id_for_root(source.root_path());
@@ -456,14 +493,11 @@ async fn index_folder(
             }
         }
         if files_skipped > 0 || deleted > 0 {
-            info!(
-                "{source_label}: {files_skipped} unchanged{}",
-                if deleted > 0 {
-                    format!(", {deleted} removed")
-                } else {
-                    String::new()
-                }
-            );
+            on_progress(IndexEvent::SourceUnchanged {
+                name: source_label,
+                skipped: files_skipped,
+                deleted,
+            });
         }
         return Ok(IndexResult {
             files_skipped,
@@ -472,13 +506,23 @@ async fn index_folder(
         });
     }
 
+    on_progress(IndexEvent::SourceStart {
+        name: source_label.clone(),
+    });
+
     // Read and chunk all files
     let mut rows: Vec<ChunkRow> = Vec::new();
     let mut files_indexed = 0;
     let mut errors = 0;
     let mut file_chunk_counts: HashMap<String, usize> = HashMap::new();
+    let total_files = files_to_index.len();
 
-    for doc_path in &files_to_index {
+    on_progress(IndexEvent::Reading {
+        done: 0,
+        total: total_files,
+    });
+
+    for (i, doc_path) in files_to_index.iter().enumerate() {
         match build_rows_for_doc(source, doc_path, profile, chunk_size, chunk_overlap) {
             Ok(doc_rows) => {
                 file_chunk_counts.insert(doc_path.to_string_lossy().into_owned(), doc_rows.len());
@@ -486,13 +530,19 @@ async fn index_folder(
                 files_indexed += 1;
             }
             Err(e) => {
-                warn!(
-                    "Skipping {}: {e}",
-                    doc_path.file_name().unwrap_or_default().to_string_lossy()
-                );
+                on_progress(IndexEvent::Warning {
+                    message: format!(
+                        "Skipping {}: {e}",
+                        doc_path.file_name().unwrap_or_default().to_string_lossy()
+                    ),
+                });
                 errors += 1;
             }
         }
+        on_progress(IndexEvent::Reading {
+            done: i + 1,
+            total: total_files,
+        });
     }
 
     if rows.is_empty() {
@@ -504,12 +554,26 @@ async fn index_folder(
     }
 
     // Embed all chunks
-    info!(
-        "Embedding {} chunks from {files_indexed} files...",
-        rows.len()
-    );
+    let total_chunks = rows.len();
+
+    on_progress(IndexEvent::Embedding {
+        chunks_done: 0,
+        total_chunks,
+    });
+
     let texts: Vec<String> = rows.iter().map(|r| r.text.clone()).collect();
-    let vectors = embed_texts(&texts, &config.embedding_model, &config.ollama_base_url).await?;
+    let vectors = embed_texts_with_progress(
+        &texts,
+        &config.embedding_model,
+        &config.ollama_base_url,
+        |done, _total| {
+            on_progress(IndexEvent::Embedding {
+                chunks_done: done,
+                total_chunks,
+            });
+        },
+    )
+    .await?;
 
     if vectors.is_empty() {
         return Err(ColibriError::Embedding(
@@ -522,6 +586,8 @@ async fn index_folder(
     let schema = chunks_schema(vector_dim);
 
     // Write to LanceDB
+    on_progress(IndexEvent::Writing);
+
     if overwrite_first && table.is_none() {
         // First folder in a full rebuild — create with overwrite
         let batches = RecordBatchIterator::new(vec![Ok(batch)], schema);
@@ -577,18 +643,20 @@ async fn index_folder(
         }
     }
 
-    info!(
-        "{source_label}: indexed {files_indexed} files ({} chunks)",
-        rows.len()
-    );
-
-    Ok(IndexResult {
+    let result = IndexResult {
         total_chunks: rows.len(),
         files_indexed,
         files_skipped,
         files_deleted: deleted,
         errors,
-    })
+    };
+
+    on_progress(IndexEvent::SourceComplete {
+        name: source_label,
+        result: result.clone(),
+    });
+
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -600,6 +668,7 @@ pub async fn index_library(
     config: &AppConfig,
     folder_filter: Option<&str>,
     force: bool,
+    on_progress: impl Fn(IndexEvent) + Send + Sync,
 ) -> Result<IndexResult, ColibriError> {
     config.ensure_directories()?;
 
@@ -646,16 +715,6 @@ pub async fn index_library(
 
     let full_rebuild = force && folder_filter.is_none();
 
-    // Print header
-    let sources_str: Vec<String> = profiles
-        .iter()
-        .map(|p| format!("{} ({})", p.display_name(), format_mode(p.mode)))
-        .collect();
-    info!("Indexing sources: {}", sources_str.join(", "));
-    if full_rebuild {
-        info!("Mode: full rebuild");
-    }
-
     if full_rebuild {
         manifest = Manifest::new();
     }
@@ -690,6 +749,7 @@ pub async fn index_library(
             chunk_overlap,
             force,
             full_rebuild && i == 0,
+            &on_progress,
         )
         .await?;
 
@@ -735,30 +795,6 @@ pub async fn index_library(
 
     write_index_meta(&config.lancedb_dir, &config.embedding_model, &extra)?;
 
-    // Print summary
-    eprintln!(
-        "Done: {} files indexed ({} chunks)",
-        aggregate.files_indexed, aggregate.total_chunks
-    );
-    if aggregate.files_skipped > 0 {
-        eprintln!("{} unchanged files skipped", aggregate.files_skipped);
-    }
-    if aggregate.files_deleted > 0 {
-        eprintln!(
-            "{} deleted files removed from index",
-            aggregate.files_deleted
-        );
-    }
-    if aggregate.errors > 0 {
-        eprintln!("{} files had errors", aggregate.errors);
-    }
-
     Ok(aggregate)
 }
 
-fn format_mode(mode: IndexMode) -> &'static str {
-    match mode {
-        IndexMode::Static => "static",
-        IndexMode::Incremental => "incremental",
-    }
-}

@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use super::app::{App, EditField, OllamaStatus, Screen};
+use super::app::{App, EditField, IndexPhase, OllamaStatus, Screen};
 use crate::config::IndexMode;
 
 // Catppuccin Mocha color palette
@@ -464,12 +464,68 @@ fn draw_indexing(frame: &mut Frame, app: &App, area: Rect) {
 
     // Progress indicator
     if app.indexing.is_running {
-        let gauge = Gauge::default()
-            .block(Block::default())
-            .gauge_style(Style::default().fg(GREEN).bg(SURFACE0))
-            .percent(50) // Indeterminate - could enhance with actual progress
-            .label("Processing...");
-        frame.render_widget(gauge, chunks[1]);
+        let source_name = app
+            .indexing
+            .current_source
+            .as_deref()
+            .unwrap_or("Starting");
+
+        match app.indexing.phase {
+            IndexPhase::Reading if app.indexing.phase_total > 0 => {
+                let pct = (app.indexing.phase_done as f64 / app.indexing.phase_total as f64
+                    * 100.0) as u16;
+                let label = format!(
+                    "Reading {source_name}... {}/{}",
+                    app.indexing.phase_done, app.indexing.phase_total
+                );
+                let gauge = Gauge::default()
+                    .block(Block::default())
+                    .gauge_style(Style::default().fg(BLUE).bg(SURFACE0))
+                    .percent(pct.min(100))
+                    .label(label);
+                frame.render_widget(gauge, chunks[1]);
+            }
+            IndexPhase::Embedding if app.indexing.phase_total > 0 => {
+                let pct = (app.indexing.phase_done as f64 / app.indexing.phase_total as f64
+                    * 100.0) as u16;
+                let label = format!(
+                    "Embedding {source_name}... {}/{}",
+                    app.indexing.phase_done, app.indexing.phase_total
+                );
+                let gauge = Gauge::default()
+                    .block(Block::default())
+                    .gauge_style(Style::default().fg(GREEN).bg(SURFACE0))
+                    .percent(pct.min(100))
+                    .label(label);
+                frame.render_widget(gauge, chunks[1]);
+            }
+            IndexPhase::Writing => {
+                // Writing has no known total — show as indeterminate pulse
+                let tick = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    / 200
+                    % 100) as u16;
+                let label = format!("Writing {source_name}...");
+                let gauge = Gauge::default()
+                    .block(Block::default())
+                    .gauge_style(Style::default().fg(PEACH).bg(SURFACE0))
+                    .percent(tick)
+                    .label(label);
+                frame.render_widget(gauge, chunks[1]);
+            }
+            _ => {
+                // Idle or unknown phase — show indeterminate
+                let label = format!("Processing {source_name}...");
+                let gauge = Gauge::default()
+                    .block(Block::default())
+                    .gauge_style(Style::default().fg(GREEN).bg(SURFACE0))
+                    .percent(0)
+                    .label(label);
+                frame.render_widget(gauge, chunks[1]);
+            }
+        }
     } else {
         let status_style = if app.indexing.error.is_some() {
             Style::default().fg(RED)

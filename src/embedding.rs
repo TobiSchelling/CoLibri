@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::ColibriError;
 
 /// Maximum texts per Ollama embedding batch request.
-const EMBED_BATCH_SIZE: usize = 32;
+pub const EMBED_BATCH_SIZE: usize = 32;
 
 /// Request timeout per batch (seconds).
 const EMBED_TIMEOUT_SECS: u64 = 120;
@@ -32,6 +32,18 @@ pub async fn embed_texts(
     model: &str,
     base_url: &str,
 ) -> Result<Vec<Vec<f32>>, ColibriError> {
+    embed_texts_with_progress(texts, model, base_url, |_, _| {}).await
+}
+
+/// Embed texts with a per-batch progress callback.
+///
+/// `on_batch(chunks_done, total_chunks)` is called after each batch completes.
+pub async fn embed_texts_with_progress(
+    texts: &[String],
+    model: &str,
+    base_url: &str,
+    on_batch: impl Fn(usize, usize),
+) -> Result<Vec<Vec<f32>>, ColibriError> {
     if texts.is_empty() {
         return Ok(vec![]);
     }
@@ -42,7 +54,8 @@ pub async fn embed_texts(
         .map_err(|e| ColibriError::Embedding(format!("Failed to build HTTP client: {e}")))?;
 
     let url = format!("{base_url}/api/embed");
-    let mut all_embeddings = Vec::with_capacity(texts.len());
+    let total = texts.len();
+    let mut all_embeddings = Vec::with_capacity(total);
 
     for batch in texts.chunks(EMBED_BATCH_SIZE) {
         let batch_vec: Vec<String> = batch.to_vec();
@@ -71,6 +84,7 @@ pub async fn embed_texts(
         })?;
 
         all_embeddings.extend(data.embeddings);
+        on_batch(all_embeddings.len(), total);
     }
 
     Ok(all_embeddings)

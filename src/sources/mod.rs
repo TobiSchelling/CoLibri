@@ -38,7 +38,7 @@ pub struct SourceDocument {
 /// Mirrors the Python `ContentSource` ABC. Implementations handle
 /// different folder structures and conventions.
 #[allow(dead_code)]
-pub trait ContentSource {
+pub trait ContentSource: Send + Sync {
     /// Human-readable name for this source.
     fn name(&self) -> &str;
 

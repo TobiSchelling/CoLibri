@@ -2,10 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
+use tokio::sync::mpsc;
+
 use crate::config::{save_config, AppConfig, FolderProfile, IndexMode, SCHEMA_VERSION};
 use crate::embedding::check_ollama;
 use crate::index_meta::read_index_meta;
-use crate::indexer::{index_library, IndexResult};
+use crate::indexer::{index_library, IndexEvent, IndexResult};
 use crate::manifest::{get_manifest_path, Manifest};
 
 /// Which screen is currently active.
@@ -56,6 +58,16 @@ impl EditField {
     }
 }
 
+/// Phase of the indexing pipeline.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IndexPhase {
+    #[default]
+    Idle,
+    Reading,
+    Embedding,
+    Writing,
+}
+
 /// Indexing progress state.
 #[derive(Debug, Clone, Default)]
 pub struct IndexingProgress {
@@ -65,6 +77,14 @@ pub struct IndexingProgress {
     pub message: String,
     pub result: Option<IndexResult>,
     pub error: Option<String>,
+    /// Name of the source currently being indexed.
+    pub current_source: Option<String>,
+    /// Current indexing phase.
+    pub phase: IndexPhase,
+    /// Items completed in the current phase.
+    pub phase_done: usize,
+    /// Total items in the current phase.
+    pub phase_total: usize,
 }
 
 /// Status information about the system.
@@ -124,6 +144,8 @@ pub struct App {
 
     // Indexing state
     pub indexing: IndexingProgress,
+    /// Channel receiver for index progress events (set during indexing).
+    index_rx: Option<mpsc::UnboundedReceiver<IndexEvent>>,
 
     // Status state
     pub status: StatusInfo,
@@ -154,6 +176,7 @@ impl App {
             is_editing_field: false,
             path_completion: PathCompletion::default(),
             indexing: IndexingProgress::default(),
+            index_rx: None,
             status: StatusInfo {
                 schema_version: SCHEMA_VERSION,
                 config_path,
@@ -459,14 +482,38 @@ impl App {
     // Indexing
     pub fn start_indexing(&mut self, folder: Option<String>, force: bool) {
         self.indexing = IndexingProgress {
-            folder,
+            folder: folder.clone(),
             force,
             is_running: true,
             message: "Starting indexing...".into(),
             result: None,
             error: None,
+            current_source: None,
+            phase: IndexPhase::Idle,
+            phase_done: 0,
+            phase_total: 0,
         };
         self.go_to_indexing();
+
+        // Spawn indexing on a background task, sending events over a channel
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.index_rx = Some(rx);
+
+        let config = self.config.clone();
+        tokio::spawn(async move {
+            let tx_clone = tx.clone();
+            let result = index_library(&config, folder.as_deref(), force, move |event| {
+                let _ = tx_clone.send(event);
+            })
+            .await;
+
+            // Send final Done event
+            let done_event = match result {
+                Ok(res) => IndexEvent::Done(Ok(res)),
+                Err(e) => IndexEvent::Done(Err(e.to_string())),
+            };
+            let _ = tx.send(done_event);
+        });
     }
 
     /// Called periodically to update async operations.
@@ -477,9 +524,67 @@ impl App {
             self.status_loaded = true;
         }
 
-        // Run indexing if requested
-        if self.indexing.is_running && self.screen == Screen::Indexing {
-            self.run_indexing().await;
+        // Drain index progress events from the channel
+        if let Some(rx) = &mut self.index_rx {
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    IndexEvent::SourceStart { name } => {
+                        self.indexing.current_source = Some(name);
+                        self.indexing.phase = IndexPhase::Idle;
+                        self.indexing.phase_done = 0;
+                        self.indexing.phase_total = 0;
+                    }
+                    IndexEvent::Reading { done, total } => {
+                        self.indexing.phase = IndexPhase::Reading;
+                        self.indexing.phase_done = done;
+                        self.indexing.phase_total = total;
+                    }
+                    IndexEvent::Embedding {
+                        chunks_done,
+                        total_chunks,
+                    } => {
+                        self.indexing.phase = IndexPhase::Embedding;
+                        self.indexing.phase_done = chunks_done;
+                        self.indexing.phase_total = total_chunks;
+                    }
+                    IndexEvent::Writing => {
+                        self.indexing.phase = IndexPhase::Writing;
+                        self.indexing.phase_done = 0;
+                        self.indexing.phase_total = 0;
+                    }
+                    IndexEvent::SourceComplete { .. } | IndexEvent::SourceUnchanged { .. } => {
+                        // Reset phase for next source
+                        self.indexing.phase = IndexPhase::Idle;
+                        self.indexing.phase_done = 0;
+                        self.indexing.phase_total = 0;
+                    }
+                    IndexEvent::Warning { message } => {
+                        self.indexing.message = format!("⚠ {message}");
+                    }
+                    IndexEvent::Done(result) => {
+                        self.indexing.is_running = false;
+                        self.indexing.phase = IndexPhase::Idle;
+                        match result {
+                            Ok(res) => {
+                                self.indexing.message = format!(
+                                    "Done: {} files indexed ({} chunks)",
+                                    res.files_indexed, res.total_chunks
+                                );
+                                self.indexing.result = Some(res);
+                            }
+                            Err(e) => {
+                                self.indexing.message = "Indexing failed".into();
+                                self.indexing.error = Some(e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Clean up channel when indexing is done
+        if !self.indexing.is_running {
+            self.index_rx = None;
         }
     }
 
@@ -519,33 +624,6 @@ impl App {
             }
             Err(e) => {
                 self.status.ollama_status = OllamaStatus::Error(e.to_string());
-            }
-        }
-    }
-
-    async fn run_indexing(&mut self) {
-        self.indexing.message = "Indexing in progress...".into();
-
-        let result = index_library(
-            &self.config,
-            self.indexing.folder.as_deref(),
-            self.indexing.force,
-        )
-        .await;
-
-        self.indexing.is_running = false;
-
-        match result {
-            Ok(res) => {
-                self.indexing.message = format!(
-                    "Done: {} files indexed ({} chunks)",
-                    res.files_indexed, res.total_chunks
-                );
-                self.indexing.result = Some(res);
-            }
-            Err(e) => {
-                self.indexing.message = "Indexing failed".into();
-                self.indexing.error = Some(e.to_string());
             }
         }
     }
