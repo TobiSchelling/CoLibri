@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use chrono::DateTime;
@@ -14,6 +15,8 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::error::ColibriError;
+
+static CONTENT_HASH_RE: OnceLock<Regex> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 pub struct PluginCapabilities {
@@ -131,9 +134,410 @@ fn env_usize(key: &str) -> Option<usize> {
 
 pub fn load_plugin_manifest(manifest_path: &Path) -> Result<PluginManifest, ColibriError> {
     let manifest_text = std::fs::read_to_string(manifest_path)?;
-    let manifest: PluginManifest = serde_json::from_str(&manifest_text)?;
+    let manifest_value: Value = serde_json::from_str(&manifest_text)?;
+    validate_manifest_value(&manifest_value)?;
+    let manifest: PluginManifest = serde_json::from_value(manifest_value)?;
     validate_manifest(&manifest)?;
     Ok(manifest)
+}
+
+fn validate_manifest_value(value: &Value) -> Result<(), ColibriError> {
+    let Some(obj) = value.as_object() else {
+        return Err(ColibriError::Config(
+            "plugin_manifest must be a JSON object".into(),
+        ));
+    };
+
+    let allowed = [
+        "schema_version",
+        "plugin_id",
+        "version",
+        "runtime",
+        "entrypoint",
+        "capabilities",
+        "auth",
+        "config_schema",
+        "cursor_strategy",
+        "retry_policy",
+    ];
+    for key in obj.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(ColibriError::Config(format!(
+                "plugin_manifest has unknown field '{key}'"
+            )));
+        }
+    }
+
+    let schema_version = obj
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| ColibriError::Config("plugin_manifest.schema_version missing".into()))?;
+    if schema_version != 1 {
+        return Err(ColibriError::Config(format!(
+            "Unsupported plugin manifest schema_version {schema_version} (expected 1)"
+        )));
+    }
+
+    let plugin_id = obj
+        .get("plugin_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ColibriError::Config("plugin_manifest.plugin_id missing".into()))?;
+    if !is_valid_plugin_id(plugin_id) {
+        return Err(ColibriError::Config(format!(
+            "Invalid plugin_id '{}'. Allowed characters: [a-z0-9._-]",
+            plugin_id
+        )));
+    }
+
+    let version = obj.get("version").and_then(Value::as_str).unwrap_or("");
+    if version.trim().is_empty() {
+        return Err(ColibriError::Config(
+            "plugin_manifest.version cannot be empty".into(),
+        ));
+    }
+
+    let runtime = obj.get("runtime").and_then(Value::as_str).unwrap_or("");
+    match runtime {
+        "python" | "rust" | "external" | "wasm" => {}
+        other => {
+            return Err(ColibriError::Config(format!(
+                "plugin_manifest.runtime invalid: '{other}'"
+            )))
+        }
+    }
+
+    let entrypoint = obj.get("entrypoint").and_then(Value::as_str).unwrap_or("");
+    if entrypoint.trim().is_empty() {
+        return Err(ColibriError::Config(
+            "plugin_manifest.entrypoint cannot be empty".into(),
+        ));
+    }
+
+    let Some(cap) = obj.get("capabilities").and_then(Value::as_object) else {
+        return Err(ColibriError::Config(
+            "plugin_manifest.capabilities must be an object".into(),
+        ));
+    };
+    let cap_allowed = ["snapshot", "incremental", "webhook"];
+    for key in cap.keys() {
+        if !cap_allowed.contains(&key.as_str()) {
+            return Err(ColibriError::Config(format!(
+                "plugin_manifest.capabilities has unknown field '{key}'"
+            )));
+        }
+    }
+    for key in cap_allowed {
+        if !cap.get(key).is_some_and(Value::is_boolean) {
+            return Err(ColibriError::Config(format!(
+                "plugin_manifest.capabilities.{key} must be boolean"
+            )));
+        }
+    }
+
+    let Some(auth) = obj.get("auth").and_then(Value::as_array) else {
+        return Err(ColibriError::Config(
+            "plugin_manifest.auth must be an array".into(),
+        ));
+    };
+    if auth.is_empty() {
+        return Err(ColibriError::Config(
+            "plugin_manifest.auth must be non-empty".into(),
+        ));
+    }
+    for mode in auth {
+        let Some(mode) = mode.as_str() else {
+            return Err(ColibriError::Config(
+                "plugin_manifest.auth entries must be strings".into(),
+            ));
+        };
+        match mode {
+            "none" | "oauth2" | "token" | "basic" | "service_account" => {}
+            other => {
+                return Err(ColibriError::Config(format!(
+                    "plugin_manifest.auth contains unsupported mode '{other}'"
+                )))
+            }
+        }
+    }
+
+    if !obj.get("config_schema").is_some_and(Value::is_object) {
+        return Err(ColibriError::Config(
+            "plugin_manifest.config_schema must be an object".into(),
+        ));
+    }
+
+    if let Some(strategy) = obj.get("cursor_strategy") {
+        if strategy.is_null() {
+            return Err(ColibriError::Config(
+                "plugin_manifest.cursor_strategy cannot be null".into(),
+            ));
+        }
+        let Some(strategy) = strategy.as_str() else {
+            return Err(ColibriError::Config(
+                "plugin_manifest.cursor_strategy must be a string".into(),
+            ));
+        };
+        match strategy {
+            "none" | "timestamp" | "opaque_token" | "delta_api" => {}
+            other => {
+                return Err(ColibriError::Config(format!(
+                    "plugin_manifest.cursor_strategy invalid: '{other}'"
+                )))
+            }
+        }
+    }
+
+    if let Some(policy) = obj.get("retry_policy") {
+        if policy.is_null() {
+            return Err(ColibriError::Config(
+                "plugin_manifest.retry_policy cannot be null".into(),
+            ));
+        }
+        let Some(policy) = policy.as_object() else {
+            return Err(ColibriError::Config(
+                "plugin_manifest.retry_policy must be an object".into(),
+            ));
+        };
+        for key in policy.keys() {
+            if key != "max_attempts" && key != "backoff_ms" {
+                return Err(ColibriError::Config(format!(
+                    "plugin_manifest.retry_policy has unknown field '{key}'"
+                )));
+            }
+        }
+        let max_attempts = policy
+            .get("max_attempts")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                ColibriError::Config("plugin_manifest.retry_policy.max_attempts missing".into())
+            })?;
+        if max_attempts < 1 {
+            return Err(ColibriError::Config(
+                "plugin_manifest.retry_policy.max_attempts must be >= 1".into(),
+            ));
+        }
+        if !policy
+            .get("backoff_ms")
+            .is_some_and(|v| v.as_u64().is_some())
+        {
+            return Err(ColibriError::Config(
+                "plugin_manifest.retry_policy.backoff_ms missing".into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_document_envelope_value(
+    value: &Value,
+    expected_plugin_id: &str,
+) -> Result<(), ColibriError> {
+    let Some(obj) = value.as_object() else {
+        return Err(ColibriError::Config(
+            "document_envelope must be a JSON object".into(),
+        ));
+    };
+
+    for key in obj.keys() {
+        if key != "schema_version" && key != "source" && key != "document" && key != "metadata" {
+            return Err(ColibriError::Config(format!(
+                "document_envelope has unknown field '{key}'"
+            )));
+        }
+    }
+
+    let schema_version = obj
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| ColibriError::Config("document_envelope.schema_version missing".into()))?;
+    if schema_version != 1 {
+        return Err(ColibriError::Config(format!(
+            "Invalid envelope schema_version {schema_version} (expected 1)"
+        )));
+    }
+
+    let Some(source) = obj.get("source").and_then(Value::as_object) else {
+        return Err(ColibriError::Config(
+            "document_envelope.source must be an object".into(),
+        ));
+    };
+    for key in source.keys() {
+        if key != "plugin_id" && key != "connector_instance" && key != "external_id" && key != "uri"
+        {
+            return Err(ColibriError::Config(format!(
+                "document_envelope.source has unknown field '{key}'"
+            )));
+        }
+    }
+    let plugin_id = source
+        .get("plugin_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ColibriError::Config("document_envelope.source.plugin_id missing".into()))?;
+    if plugin_id != expected_plugin_id {
+        return Err(ColibriError::Config(format!(
+            "Envelope plugin_id mismatch: expected '{}', got '{}'",
+            expected_plugin_id, plugin_id
+        )));
+    }
+    for key in ["connector_instance", "external_id"] {
+        if !source
+            .get(key)
+            .is_some_and(|v| v.as_str().is_some() && !v.as_str().unwrap().trim().is_empty())
+        {
+            return Err(ColibriError::Config(format!(
+                "document_envelope.source.{key} missing or empty"
+            )));
+        }
+    }
+    if let Some(uri) = source.get("uri") {
+        if uri.is_null() || uri.as_str().is_none() {
+            return Err(ColibriError::Config(
+                "document_envelope.source.uri must be a string when present".into(),
+            ));
+        }
+    }
+
+    let Some(doc) = obj.get("document").and_then(Value::as_object) else {
+        return Err(ColibriError::Config(
+            "document_envelope.document must be an object".into(),
+        ));
+    };
+    let allowed_doc = [
+        "doc_id",
+        "title",
+        "markdown",
+        "content_hash",
+        "source_updated_at",
+        "deleted",
+    ];
+    for key in doc.keys() {
+        if !allowed_doc.contains(&key.as_str()) {
+            return Err(ColibriError::Config(format!(
+                "document_envelope.document has unknown field '{key}'"
+            )));
+        }
+    }
+    for key in ["doc_id", "title", "markdown"] {
+        if !doc.get(key).is_some_and(|v| v.as_str().is_some()) {
+            return Err(ColibriError::Config(format!(
+                "document_envelope.document.{key} missing or not a string"
+            )));
+        }
+        if key == "doc_id"
+            && doc
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+        {
+            return Err(ColibriError::Config(
+                "document_envelope.document.doc_id cannot be empty".into(),
+            ));
+        }
+    }
+    let content_hash = doc
+        .get("content_hash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ColibriError::Config("document_envelope.document.content_hash missing".into())
+        })?;
+    let hash_re = CONTENT_HASH_RE.get_or_init(|| {
+        Regex::new(r"^sha256:[a-f0-9]{64}$").expect("content hash regex must compile")
+    });
+    if !hash_re.is_match(content_hash) {
+        return Err(ColibriError::Config(format!(
+            "Envelope content_hash has invalid format: {content_hash}"
+        )));
+    }
+    let updated_at = doc
+        .get("source_updated_at")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ColibriError::Config("document_envelope.document.source_updated_at missing".into())
+        })?;
+    if DateTime::parse_from_rfc3339(updated_at).is_err() {
+        return Err(ColibriError::Config(format!(
+            "Envelope source_updated_at is not RFC3339: {updated_at}"
+        )));
+    }
+    if !doc.get("deleted").is_some_and(Value::is_boolean) {
+        return Err(ColibriError::Config(
+            "document_envelope.document.deleted must be boolean".into(),
+        ));
+    }
+
+    let Some(meta) = obj.get("metadata").and_then(Value::as_object) else {
+        return Err(ColibriError::Config(
+            "document_envelope.metadata must be an object".into(),
+        ));
+    };
+    let doc_type = meta.get("doc_type").and_then(Value::as_str).unwrap_or("");
+    if doc_type.trim().is_empty() {
+        return Err(ColibriError::Config(
+            "Envelope metadata.doc_type cannot be empty".into(),
+        ));
+    }
+    let classification = meta
+        .get("classification")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    match classification {
+        "restricted" | "confidential" | "internal" | "public" => {}
+        other => {
+            return Err(ColibriError::Config(format!(
+                "Envelope classification must be one of restricted/confidential/internal/public, got '{other}'"
+            )))
+        }
+    }
+    if let Some(tags) = meta.get("tags") {
+        if tags.is_null() {
+            return Err(ColibriError::Config(
+                "document_envelope.metadata.tags cannot be null".into(),
+            ));
+        }
+        let Some(arr) = tags.as_array() else {
+            return Err(ColibriError::Config(
+                "document_envelope.metadata.tags must be an array".into(),
+            ));
+        };
+        for t in arr {
+            if t.as_str().is_none() {
+                return Err(ColibriError::Config(
+                    "document_envelope.metadata.tags entries must be strings".into(),
+                ));
+            }
+        }
+    }
+    if let Some(lang) = meta.get("language") {
+        if lang.is_null() || lang.as_str().is_none() {
+            return Err(ColibriError::Config(
+                "document_envelope.metadata.language must be a string when present".into(),
+            ));
+        }
+    }
+    if let Some(acl) = meta.get("acl_tags") {
+        if acl.is_null() {
+            return Err(ColibriError::Config(
+                "document_envelope.metadata.acl_tags cannot be null".into(),
+            ));
+        }
+        let Some(arr) = acl.as_array() else {
+            return Err(ColibriError::Config(
+                "document_envelope.metadata.acl_tags must be an array".into(),
+            ));
+        };
+        for t in arr {
+            if t.as_str().is_none() {
+                return Err(ColibriError::Config(
+                    "document_envelope.metadata.acl_tags entries must be strings".into(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_manifest(manifest: &PluginManifest) -> Result<(), ColibriError> {
@@ -338,6 +742,7 @@ pub async fn run_plugin_manifest(
     })
 }
 
+#[derive(Debug)]
 struct StdoutReadResult {
     envelopes: Vec<DocumentEnvelope>,
     next_cursor: Option<Value>,
@@ -409,6 +814,8 @@ async fn read_plugin_stdout(
                 )));
             }
         }
+
+        validate_document_envelope_value(&parsed, &plugin_id)?;
 
         let envelope: DocumentEnvelope = serde_json::from_value(parsed).map_err(|e| {
             ColibriError::Config(format!(
@@ -578,8 +985,9 @@ fn validate_envelope(
             "Envelope document.content_hash cannot be empty".into(),
         ));
     }
-    let hash_re = Regex::new(r"^sha256:[a-f0-9]{64}$")
-        .map_err(|e| ColibriError::Config(format!("Regex compile failed: {e}")))?;
+    let hash_re = CONTENT_HASH_RE.get_or_init(|| {
+        Regex::new(r"^sha256:[a-f0-9]{64}$").expect("content hash regex must compile")
+    });
     if !hash_re.is_match(&envelope.document.content_hash) {
         return Err(ColibriError::Config(format!(
             "Envelope content_hash has invalid format: {}",
@@ -672,10 +1080,11 @@ mod manifest_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_plugin_stdout;
+    use super::{parse_plugin_stdout, read_plugin_stdout, PluginHostLimits};
+    use tokio::io::{AsyncWriteExt, BufReader};
 
     fn envelope_line() -> String {
-        r##"{"schema_version":1,"source":{"plugin_id":"filesystem_markdown","connector_instance":"x","external_id":"y","uri":null},"document":{"doc_id":"d1","title":"t","markdown":"# x","content_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source_updated_at":"2026-02-18T00:00:00Z","deleted":false},"metadata":{"doc_type":"note","classification":"internal","tags":null,"language":null,"acl_tags":null}}"##.to_string()
+        r##"{"schema_version":1,"source":{"plugin_id":"filesystem_markdown","connector_instance":"x","external_id":"y"},"document":{"doc_id":"d1","title":"t","markdown":"# x","content_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source_updated_at":"2026-02-18T00:00:00Z","deleted":false},"metadata":{"doc_type":"note","classification":"internal"}}"##.to_string()
     }
 
     #[test]
@@ -701,5 +1110,53 @@ mod tests {
             err.to_string().contains("without 'cursor'"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn streaming_parser_accepts_valid_envelope_and_cursor() {
+        let (mut tx, rx) = tokio::io::duplex(64 * 1024);
+        tx.write_all(envelope_line().as_bytes()).await.unwrap();
+        tx.write_all(b"\n").await.unwrap();
+        tx.write_all(br#"{"type":"cursor","cursor":{"k":"v"}}"#)
+            .await
+            .unwrap();
+        tx.write_all(b"\n").await.unwrap();
+        drop(tx);
+
+        let limits = PluginHostLimits {
+            timeout_secs: 1,
+            max_envelopes: 10,
+            max_stdout_bytes: 1024 * 1024,
+            max_stdout_line_bytes: 1024 * 1024,
+            max_stderr_bytes: 1024,
+        };
+        let out = read_plugin_stdout(BufReader::new(rx), "filesystem_markdown".into(), limits)
+            .await
+            .unwrap();
+        assert_eq!(out.envelopes.len(), 1);
+        assert!(out.next_cursor.is_some());
+    }
+
+    #[tokio::test]
+    async fn streaming_parser_rejects_schema_invalid_envelope() {
+        let (mut tx, rx) = tokio::io::duplex(64 * 1024);
+        // `uri` cannot be null per schema (if present).
+        tx.write_all(br##"{"schema_version":1,"source":{"plugin_id":"filesystem_markdown","connector_instance":"x","external_id":"y","uri":null},"document":{"doc_id":"d1","title":"t","markdown":"# x","content_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source_updated_at":"2026-02-18T00:00:00Z","deleted":false},"metadata":{"doc_type":"note","classification":"internal"}}"##)
+            .await
+            .unwrap();
+        tx.write_all(b"\n").await.unwrap();
+        drop(tx);
+
+        let limits = PluginHostLimits {
+            timeout_secs: 1,
+            max_envelopes: 10,
+            max_stdout_bytes: 1024 * 1024,
+            max_stdout_line_bytes: 1024 * 1024,
+            max_stderr_bytes: 1024,
+        };
+        let err = read_plugin_stdout(BufReader::new(rx), "filesystem_markdown".into(), limits)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("uri"));
     }
 }
