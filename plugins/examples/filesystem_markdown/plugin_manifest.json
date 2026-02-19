@@ -6,7 +6,7 @@
   "entrypoint": "plugin.py",
   "capabilities": {
     "snapshot": true,
-    "incremental": false,
+    "incremental": true,
     "webhook": false
   },
   "auth": [
@@ -34,7 +34,7 @@
     },
     "additionalProperties": false
   },
-  "cursor_strategy": "none",
+  "cursor_strategy": "timestamp",
   "retry_policy": {
     "max_attempts": 1,
     "backoff_ms": 0
