@@ -32,6 +32,33 @@ pub struct RetryPolicy {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct RequiredTool {
+    pub check: Option<String>,
+    pub check_from_config: Option<String>,
+    pub default: Option<String>,
+    pub brew: Option<String>,
+    pub brew_cask: Option<String>,
+    pub pipx: Option<String>,
+    pub install_hint: Option<String>,
+    pub optional: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RequiredEnvVar {
+    pub name: Option<String>,
+    pub name_from_config: Option<String>,
+    pub default: Option<String>,
+    pub required: bool,
+    pub hint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PluginRequirements {
+    pub tools: Option<Vec<RequiredTool>>,
+    pub env: Option<Vec<RequiredEnvVar>>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PluginManifest {
     pub schema_version: u32,
     pub plugin_id: String,
@@ -43,6 +70,7 @@ pub struct PluginManifest {
     pub config_schema: Value,
     pub cursor_strategy: Option<String>,
     pub retry_policy: Option<RetryPolicy>,
+    pub requirements: Option<PluginRequirements>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -159,6 +187,7 @@ fn validate_manifest_value(value: &Value) -> Result<(), ColibriError> {
         "config_schema",
         "cursor_strategy",
         "retry_policy",
+        "requirements",
     ];
     for key in obj.keys() {
         if !allowed.contains(&key.as_str()) {
@@ -323,6 +352,151 @@ fn validate_manifest_value(value: &Value) -> Result<(), ColibriError> {
             return Err(ColibriError::Config(
                 "plugin_manifest.retry_policy.backoff_ms missing".into(),
             ));
+        }
+    }
+
+    if let Some(req) = obj.get("requirements") {
+        if !req.is_object() {
+            return Err(ColibriError::Config(
+                "plugin_manifest.requirements must be an object".into(),
+            ));
+        }
+        let req_obj = req.as_object().expect("requirements is object");
+        let allowed_req = ["tools", "env"];
+        for key in req_obj.keys() {
+            if !allowed_req.contains(&key.as_str()) {
+                return Err(ColibriError::Config(format!(
+                    "plugin_manifest.requirements has unknown field '{key}'"
+                )));
+            }
+        }
+
+        if let Some(tools) = req_obj.get("tools") {
+            let Some(arr) = tools.as_array() else {
+                return Err(ColibriError::Config(
+                    "plugin_manifest.requirements.tools must be an array".into(),
+                ));
+            };
+            for (idx, tool) in arr.iter().enumerate() {
+                let Some(obj) = tool.as_object() else {
+                    return Err(ColibriError::Config(format!(
+                        "plugin_manifest.requirements.tools[{idx}] must be an object"
+                    )));
+                };
+                let allowed_tool = [
+                    "check",
+                    "check_from_config",
+                    "default",
+                    "brew",
+                    "brew_cask",
+                    "pipx",
+                    "install_hint",
+                    "optional",
+                ];
+                for key in obj.keys() {
+                    if !allowed_tool.contains(&key.as_str()) {
+                        return Err(ColibriError::Config(format!(
+                            "plugin_manifest.requirements.tools[{idx}] has unknown field '{key}'"
+                        )));
+                    }
+                }
+                let check = obj
+                    .get("check")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                let check_from_config = obj
+                    .get("check_from_config")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                if check.is_empty() && check_from_config.is_empty() {
+                    return Err(ColibriError::Config(format!(
+                        "plugin_manifest.requirements.tools[{idx}] must set 'check' or 'check_from_config'"
+                    )));
+                }
+                for k in [
+                    "check",
+                    "check_from_config",
+                    "default",
+                    "brew",
+                    "brew_cask",
+                    "pipx",
+                ] {
+                    if let Some(v) = obj.get(k) {
+                        if !v.is_string() {
+                            return Err(ColibriError::Config(format!(
+                                "plugin_manifest.requirements.tools[{idx}].{k} must be a string"
+                            )));
+                        }
+                    }
+                }
+                for k in ["install_hint"] {
+                    if let Some(v) = obj.get(k) {
+                        if !v.is_string() {
+                            return Err(ColibriError::Config(format!(
+                                "plugin_manifest.requirements.tools[{idx}].{k} must be a string"
+                            )));
+                        }
+                    }
+                }
+                if let Some(v) = obj.get("optional") {
+                    if !v.is_boolean() {
+                        return Err(ColibriError::Config(format!(
+                            "plugin_manifest.requirements.tools[{idx}].optional must be boolean"
+                        )));
+                    }
+                }
+            }
+        }
+
+        if let Some(env) = req_obj.get("env") {
+            let Some(arr) = env.as_array() else {
+                return Err(ColibriError::Config(
+                    "plugin_manifest.requirements.env must be an array".into(),
+                ));
+            };
+            for (idx, item) in arr.iter().enumerate() {
+                let Some(obj) = item.as_object() else {
+                    return Err(ColibriError::Config(format!(
+                        "plugin_manifest.requirements.env[{idx}] must be an object"
+                    )));
+                };
+                let allowed_env = ["name", "name_from_config", "default", "required", "hint"];
+                for key in obj.keys() {
+                    if !allowed_env.contains(&key.as_str()) {
+                        return Err(ColibriError::Config(format!(
+                            "plugin_manifest.requirements.env[{idx}] has unknown field '{key}'"
+                        )));
+                    }
+                }
+                let required = obj.get("required");
+                if required.is_none() || !required.is_some_and(Value::is_boolean) {
+                    return Err(ColibriError::Config(format!(
+                        "plugin_manifest.requirements.env[{idx}].required must be boolean"
+                    )));
+                }
+                let name = obj.get("name").and_then(Value::as_str).unwrap_or("").trim();
+                let name_from_config = obj
+                    .get("name_from_config")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                if name.is_empty() && name_from_config.is_empty() {
+                    return Err(ColibriError::Config(format!(
+                        "plugin_manifest.requirements.env[{idx}] must set 'name' or 'name_from_config'"
+                    )));
+                }
+                for k in ["name", "name_from_config", "default", "hint"] {
+                    if let Some(v) = obj.get(k) {
+                        if !v.is_string() {
+                            return Err(ColibriError::Config(format!(
+                                "plugin_manifest.requirements.env[{idx}].{k} must be a string"
+                            )));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1041,6 +1215,7 @@ mod manifest_tests {
             config_schema: json!({"type":"object"}),
             cursor_strategy: Some("none".into()),
             retry_policy: None,
+            requirements: None,
         }
     }
 

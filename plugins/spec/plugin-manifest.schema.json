@@ -103,6 +103,82 @@
           "minimum": 0
         }
       }
+    },
+    "requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "check": {
+                "type": "string",
+                "description": "Tool name to resolve on PATH (via `which`) or absolute path."
+              },
+              "check_from_config": {
+                "type": "string",
+                "description": "Config key whose value provides the tool/path to check (example: zephyr_export_cmd)."
+              },
+              "default": {
+                "type": "string",
+                "description": "Default tool name when check_from_config is missing."
+              },
+              "brew": {
+                "type": "string",
+                "description": "Homebrew formula name to install."
+              },
+              "brew_cask": {
+                "type": "string",
+                "description": "Homebrew cask name to install."
+              },
+              "pipx": {
+                "type": "string",
+                "description": "pipx package name to install."
+              },
+              "install_hint": {
+                "type": "string"
+              },
+              "optional": {
+                "type": "boolean",
+                "default": false
+              }
+            }
+          }
+        },
+        "env": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "required"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Environment variable to check."
+              },
+              "name_from_config": {
+                "type": "string",
+                "description": "Config key whose value provides the env var name (example: token_env)."
+              },
+              "default": {
+                "type": "string",
+                "description": "Default env var name when name_from_config is missing."
+              },
+              "required": {
+                "type": "boolean"
+              },
+              "hint": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
     }
   }
 }
