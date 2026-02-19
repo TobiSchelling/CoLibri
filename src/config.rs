@@ -539,7 +539,28 @@ fn resolve_routing_policy(
         policy.insert(class, profile);
     }
 
+    enforce_local_only_routing(&policy, known_profiles)?;
     Ok(policy)
+}
+
+fn enforce_local_only_routing(
+    policy: &HashMap<String, String>,
+    known_profiles: &HashMap<String, EmbeddingProfile>,
+) -> Result<(), ColibriError> {
+    for class in ["restricted", "confidential"] {
+        let Some(profile_id) = policy.get(class) else {
+            continue;
+        };
+        let Some(profile) = known_profiles.get(profile_id) else {
+            continue;
+        };
+        if profile.locality != EmbeddingLocality::Local {
+            return Err(ColibriError::Config(format!(
+                "Safety policy violation: classification '{class}' must route to a local embedding profile, but '{profile_id}' is cloud."
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn resolve_plugin_jobs(
@@ -1236,7 +1257,9 @@ pub fn save_config(config: &AppConfig) -> Result<(), ColibriError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_config, AppConfig};
+    use super::{
+        enforce_local_only_routing, load_config, AppConfig, EmbeddingLocality, EmbeddingProfile,
+    };
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
@@ -1296,6 +1319,40 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         std::env::temp_dir().join(format!("{prefix}-{n}"))
+    }
+
+    #[test]
+    fn restricted_must_not_route_to_cloud_profile() {
+        let mut profiles = std::collections::HashMap::new();
+        profiles.insert(
+            "local_secure".to_string(),
+            EmbeddingProfile {
+                id: "local_secure".to_string(),
+                provider: "tei".to_string(),
+                endpoint: "http://localhost:8080".to_string(),
+                model: "bge-m3".to_string(),
+                locality: EmbeddingLocality::Local,
+            },
+        );
+        profiles.insert(
+            "cloud_fast".to_string(),
+            EmbeddingProfile {
+                id: "cloud_fast".to_string(),
+                provider: "openai_compatible".to_string(),
+                endpoint: "https://api.example.com".to_string(),
+                model: "text-embedding-3-large".to_string(),
+                locality: EmbeddingLocality::Cloud,
+            },
+        );
+
+        let mut policy = std::collections::HashMap::new();
+        policy.insert("restricted".to_string(), "cloud_fast".to_string());
+        policy.insert("confidential".to_string(), "local_secure".to_string());
+        let err = enforce_local_only_routing(&policy, &profiles)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("restricted"));
+        assert!(err.contains("local"));
     }
 
     #[test]
