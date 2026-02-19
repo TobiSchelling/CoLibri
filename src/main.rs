@@ -40,6 +40,26 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        cli::Commands::Bootstrap {
+            config_path,
+            data_dir,
+            init_filesystem_markdown,
+            classification,
+            non_interactive,
+            install,
+            json,
+        } => {
+            cli::bootstrap::run(cli::bootstrap::BootstrapOptions {
+                config_path,
+                data_dir,
+                init_filesystem_markdown,
+                classification,
+                non_interactive,
+                install,
+                json,
+            })
+            .await
+        }
         cli::Commands::Config => cli::config_tui::run().await,
         cli::Commands::Doctor { strict, json } => cli::doctor::run(strict, json).await,
         cli::Commands::Migrate { dry_run, json } => cli::migrate::run(dry_run, json).await,

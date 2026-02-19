@@ -19,6 +19,15 @@ Verify:
 colibri doctor
 ```
 
+## Optional: run the bootstrap wizard
+
+`colibri bootstrap` can write a starter config, initialize storage, and print the exact commands
+needed to install missing tools (including plugin converters).
+
+```bash
+colibri bootstrap
+```
+
 ## 2) Configure your first source
 
 CoLibri reads `~/.config/colibri/config.yaml`.
@@ -54,4 +63,3 @@ colibri generations create gen_candidate
 colibri index --canonical --generation gen_candidate --force
 colibri generations activate gen_candidate
 ```
-

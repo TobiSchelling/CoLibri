@@ -47,6 +47,9 @@ colibri tour concepts
 colibri tour config
 colibri tour use-cases
 
+# First-time setup wizard
+colibri bootstrap
+
 # Health check
 colibri doctor
 colibri doctor --strict

@@ -1,5 +1,6 @@
 //! CLI command definitions and handlers.
 
+pub mod bootstrap;
 pub mod config_tui;
 pub mod doctor;
 pub mod generations;
@@ -19,6 +20,37 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// First-time setup: write config, check dependencies, and initialize storage
+    Bootstrap {
+        /// Path to write config.yaml (default: ~/.config/colibri/config.yaml)
+        #[arg(long)]
+        config_path: Option<PathBuf>,
+
+        /// CoLibri data directory (writes to config as data.directory)
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Initialize a filesystem_markdown plugin job with this root_path
+        #[arg(long)]
+        init_filesystem_markdown: Option<PathBuf>,
+
+        /// Classification for the initialized job (default: internal)
+        #[arg(long, default_value = "internal")]
+        classification: String,
+
+        /// Do not prompt; require flags for paths/init and only print actions
+        #[arg(long)]
+        non_interactive: bool,
+
+        /// Attempt to install missing tools (brew/pipx) and pull Ollama model
+        #[arg(long)]
+        install: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Interactive TUI for managing configuration
     Config,
 
