@@ -137,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
             force,
         } => cli::index::run(folder, canonical, generation, activate, force).await,
         cli::Commands::Instructions { output } => cli::instructions::run(output).await,
+        cli::Commands::Tour { topic } => cli::tour::run(topic).await,
         cli::Commands::Search {
             query,
             limit,

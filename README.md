@@ -41,6 +41,12 @@ ollama pull nomic-embed-text
 ## Commands
 
 ```bash
+# In-app tour / concepts
+colibri tour
+colibri tour concepts
+colibri tour config
+colibri tour use-cases
+
 # Health check
 colibri doctor
 colibri doctor --strict
@@ -194,6 +200,16 @@ export COLIBRI_HOME=/path/to/portable/colibri
 Use `--index-canonical` to chain indexing after a successful sync-all run.
 Use `colibri plugins state` to inspect or reset cursor entries.
 Use `colibri index --canonical` to index that managed corpus.
+
+## User Docs
+
+Start here:
+
+- `docs/user/getting-started.md`
+- `docs/user/concepts.md`
+- `docs/user/configuration.md`
+- `docs/user/use-cases.md`
+- `docs/user/troubleshooting.md`
 
 ## Development
 

@@ -11,6 +11,7 @@ pub mod plugins;
 pub mod profiles;
 pub mod search;
 pub mod serve;
+pub mod tour;
 
 use std::path::PathBuf;
 
@@ -90,6 +91,12 @@ pub enum Commands {
         /// Output file path (default: ~/COLIBRI_INSTRUCTIONS.md)
         #[arg(short, long)]
         output: Option<PathBuf>,
+    },
+
+    /// Explain core concepts and workflows
+    Tour {
+        /// Topic to show (run without this to list topics)
+        topic: Option<String>,
     },
 
     /// Search the indexed library
