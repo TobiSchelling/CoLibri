@@ -19,6 +19,8 @@ struct DoctorReport {
     strict: bool,
     strict_violation: bool,
     config_path: String,
+    sqlite3_available: Option<bool>,
+    sqlite3_error: Option<String>,
     config_ok: bool,
     config_error: Option<String>,
     colibri_home: Option<String>,
@@ -44,6 +46,8 @@ impl DoctorReport {
             strict,
             strict_violation: false,
             config_path: config::AppConfig::config_path().display().to_string(),
+            sqlite3_available: None,
+            sqlite3_error: None,
             config_ok: false,
             config_error: None,
             colibri_home: None,
@@ -73,6 +77,29 @@ pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
 
     let mut report = DoctorReport::new(strict);
     let mut strict_violation = false;
+
+    // 0. Runtime prerequisites
+    if !json {
+        eprint!("SQLite ... ");
+    }
+    match crate::metadata_store::require_sqlite3() {
+        Ok(_) => {
+            report.sqlite3_available = Some(true);
+            if !json {
+                eprintln!("OK");
+            }
+        }
+        Err(e) => {
+            report.sqlite3_available = Some(false);
+            report.sqlite3_error = Some(e.to_string());
+            if !json {
+                eprintln!("ERROR: {e}");
+            }
+            if strict {
+                strict_violation = true;
+            }
+        }
+    }
 
     // 1. Config
     if !json {
@@ -327,7 +354,7 @@ pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
     }
 
     if strict && strict_violation {
-        anyhow::bail!("doctor strict mode failed: serving alignment issues detected");
+        anyhow::bail!("doctor strict mode failed");
     }
 
     if !json {

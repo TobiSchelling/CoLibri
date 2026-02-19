@@ -18,6 +18,31 @@ use crate::error::ColibriError;
 
 const FORMAT_NAME: &str = "colibri-metadata-db";
 
+pub fn require_sqlite3() -> Result<(), ColibriError> {
+    let output = match Command::new("sqlite3").arg("-version").output() {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ColibriError::Config(
+                "sqlite3 not found on PATH. Install SQLite (sqlite3 CLI) to use metadata.db."
+                    .into(),
+            ));
+        }
+        Err(e) => return Err(ColibriError::Io(e)),
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(ColibriError::Config(format!(
+            "sqlite3 failed to run: {}",
+            if stderr.is_empty() {
+                "unknown sqlite3 error".to_string()
+            } else {
+                stderr
+            }
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct DocumentState {
     pub content_hash: String,
@@ -747,6 +772,7 @@ CREATE TABLE IF NOT EXISTS migration_log (
     }
 
     fn exec_script(&self, sql: &str) -> Result<(), ColibriError> {
+        require_sqlite3()?;
         let output = Command::new("sqlite3").arg(&self.path).arg(sql).output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -764,6 +790,7 @@ CREATE TABLE IF NOT EXISTS migration_log (
     }
 
     fn query_json(&self, sql: &str) -> Result<Vec<Value>, ColibriError> {
+        require_sqlite3()?;
         let output = Command::new("sqlite3")
             .arg("-json")
             .arg(&self.path)

@@ -1233,3 +1233,120 @@ pub fn save_config(config: &AppConfig) -> Result<(), ColibriError> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{load_config, AppConfig};
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvSnapshot {
+        home: Option<String>,
+        colibri_home: Option<String>,
+        xdg_data_home: Option<String>,
+        colibri_data_dir: Option<String>,
+    }
+
+    impl EnvSnapshot {
+        fn capture() -> Self {
+            Self {
+                home: std::env::var("HOME").ok(),
+                colibri_home: std::env::var("COLIBRI_HOME").ok(),
+                xdg_data_home: std::env::var("XDG_DATA_HOME").ok(),
+                colibri_data_dir: std::env::var("COLIBRI_DATA_DIR").ok(),
+            }
+        }
+
+        fn restore(self) {
+            set_env_opt("HOME", self.home.as_deref());
+            set_env_opt("COLIBRI_HOME", self.colibri_home.as_deref());
+            set_env_opt("XDG_DATA_HOME", self.xdg_data_home.as_deref());
+            set_env_opt("COLIBRI_DATA_DIR", self.colibri_data_dir.as_deref());
+        }
+    }
+
+    fn set_env_opt(key: &str, val: Option<&str>) {
+        match val {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let ty = entry.file_type()?;
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            if ty.is_dir() {
+                copy_dir_all(&src_path, &dst_path)?;
+            } else if ty.is_file() {
+                std::fs::copy(&src_path, &dst_path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn unique_tmp_dir(prefix: &str) -> PathBuf {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{n}"))
+    }
+
+    #[test]
+    fn portable_colibri_home_copy_preserves_active_generation() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let snap = EnvSnapshot::capture();
+
+        let root = unique_tmp_dir("colibri-portable");
+        let home = root.join("home");
+        let colibri_a = root.join("colibri_a");
+        let colibri_b = root.join("colibri_b");
+
+        let cfg_dir = home.join(".config").join("colibri");
+        std::fs::create_dir_all(&cfg_dir).expect("create config dir");
+        std::fs::write(cfg_dir.join("config.yaml"), "sources: []\n").expect("write config");
+
+        set_env_opt("HOME", Some(home.to_string_lossy().as_ref()));
+        set_env_opt("XDG_DATA_HOME", None);
+        set_env_opt("COLIBRI_DATA_DIR", None);
+
+        set_env_opt("COLIBRI_HOME", Some(colibri_a.to_string_lossy().as_ref()));
+        let cfg = load_config().expect("load config");
+        let gen = "gen_portable_test";
+        cfg.set_active_generation(gen).expect("set generation");
+
+        copy_dir_all(&colibri_a, &colibri_b).expect("copy colibri_home");
+
+        set_env_opt("COLIBRI_HOME", Some(colibri_b.to_string_lossy().as_ref()));
+        let cfg2 = load_config().expect("load config from copied home");
+        assert_eq!(cfg2.active_generation, gen);
+
+        snap.restore();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn config_path_is_under_home() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let snap = EnvSnapshot::capture();
+
+        let root = unique_tmp_dir("colibri-home");
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).expect("create home");
+
+        set_env_opt("HOME", Some(home.to_string_lossy().as_ref()));
+        set_env_opt("XDG_DATA_HOME", None);
+
+        let p = AppConfig::config_path();
+        assert!(p.starts_with(&home));
+
+        snap.restore();
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
