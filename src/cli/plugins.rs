@@ -629,6 +629,11 @@ struct PluginJobView {
     enabled: bool,
     manifest: String,
     manifest_exists: Option<bool>,
+    manifest_valid: Option<bool>,
+    manifest_error: Option<String>,
+    plugin_id: Option<String>,
+    runtime: Option<String>,
+    version: Option<String>,
     config: Value,
 }
 
@@ -665,15 +670,45 @@ pub async fn jobs(json: bool, validate_manifests: bool) -> anyhow::Result<()> {
     let app_config = load_config_no_bootstrap()?;
     let mut rows = Vec::new();
     for job in &app_config.plugin_jobs {
+        let mut manifest_error: Option<String> = None;
+        let mut plugin_id: Option<String> = None;
+        let mut runtime: Option<String> = None;
+        let mut version: Option<String> = None;
+        let mut manifest_valid: Option<bool> = None;
+        let exists = if validate_manifests {
+            let exists = job.manifest.exists();
+            if exists {
+                match crate::plugin_host::load_plugin_manifest(&job.manifest) {
+                    Ok(m) => {
+                        manifest_valid = Some(true);
+                        plugin_id = Some(m.plugin_id);
+                        runtime = Some(m.runtime);
+                        version = Some(m.version);
+                    }
+                    Err(e) => {
+                        manifest_valid = Some(false);
+                        manifest_error = Some(e.to_string());
+                    }
+                }
+            } else {
+                manifest_valid = Some(false);
+                manifest_error = Some("manifest file not found".into());
+            }
+            Some(exists)
+        } else {
+            None
+        };
+
         rows.push(PluginJobView {
             id: job.id.clone(),
             enabled: job.enabled,
             manifest: job.manifest.display().to_string(),
-            manifest_exists: if validate_manifests {
-                Some(job.manifest.exists())
-            } else {
-                None
-            },
+            manifest_exists: exists,
+            manifest_valid,
+            manifest_error,
+            plugin_id,
+            runtime,
+            version,
             config: job.config.clone(),
         });
     }
@@ -699,12 +734,19 @@ pub async fn jobs(json: bool, validate_manifests: bool) -> anyhow::Result<()> {
     for row in &rows {
         if validate_manifests {
             eprintln!(
-                "- {} enabled={} manifest={} exists={}",
+                "- {} enabled={} manifest={} exists={} valid={} plugin={} runtime={} version={}",
                 row.id,
                 row.enabled,
                 row.manifest,
-                row.manifest_exists.unwrap_or(false)
+                row.manifest_exists.unwrap_or(false),
+                row.manifest_valid.unwrap_or(false),
+                row.plugin_id.as_deref().unwrap_or("-"),
+                row.runtime.as_deref().unwrap_or("-"),
+                row.version.as_deref().unwrap_or("-")
             );
+            if let Some(err) = &row.manifest_error {
+                eprintln!("    error: {err}");
+            }
         } else {
             eprintln!(
                 "- {} enabled={} manifest={}",
@@ -717,8 +759,15 @@ pub async fn jobs(json: bool, validate_manifests: bool) -> anyhow::Result<()> {
             .iter()
             .filter(|r| r.manifest_exists == Some(false))
             .count();
+        let invalid = rows
+            .iter()
+            .filter(|r| r.manifest_exists == Some(true) && r.manifest_valid == Some(false))
+            .count();
         if missing > 0 {
             eprintln!("\nWarning: {missing} job(s) reference missing manifest files.");
+        }
+        if invalid > 0 {
+            eprintln!("\nWarning: {invalid} job(s) have invalid manifest files.");
         }
     }
     Ok(())

@@ -13,11 +13,30 @@ use tokio::process::Command;
 use crate::error::ColibriError;
 
 #[derive(Debug, Deserialize)]
+pub struct PluginCapabilities {
+    snapshot: bool,
+    incremental: bool,
+    webhook: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RetryPolicy {
+    max_attempts: u32,
+    backoff_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PluginManifest {
     pub schema_version: u32,
     pub plugin_id: String,
+    pub version: String,
     pub runtime: String,
     pub entrypoint: String,
+    pub capabilities: PluginCapabilities,
+    pub auth: Vec<String>,
+    pub config_schema: Value,
+    pub cursor_strategy: Option<String>,
+    pub retry_policy: Option<RetryPolicy>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -73,20 +92,119 @@ struct PluginRunRequest<'a> {
     cursor: Option<Value>,
 }
 
-pub async fn run_plugin_manifest(
-    manifest_path: &Path,
-    config: &Value,
-    cursor: Option<Value>,
-) -> Result<PluginRunReport, ColibriError> {
+pub fn load_plugin_manifest(manifest_path: &Path) -> Result<PluginManifest, ColibriError> {
     let manifest_text = std::fs::read_to_string(manifest_path)?;
     let manifest: PluginManifest = serde_json::from_str(&manifest_text)?;
+    validate_manifest(&manifest)?;
+    Ok(manifest)
+}
 
+fn validate_manifest(manifest: &PluginManifest) -> Result<(), ColibriError> {
     if manifest.schema_version != 1 {
         return Err(ColibriError::Config(format!(
             "Unsupported plugin manifest schema_version {} (expected 1)",
             manifest.schema_version
         )));
     }
+
+    if !is_valid_plugin_id(&manifest.plugin_id) {
+        return Err(ColibriError::Config(format!(
+            "Invalid plugin_id '{}'. Allowed characters: [a-z0-9._-]",
+            manifest.plugin_id
+        )));
+    }
+
+    if manifest.version.trim().is_empty() {
+        return Err(ColibriError::Config(
+            "Plugin manifest version cannot be empty".into(),
+        ));
+    }
+
+    if manifest.entrypoint.trim().is_empty() {
+        return Err(ColibriError::Config(
+            "Plugin manifest entrypoint cannot be empty".into(),
+        ));
+    }
+
+    match manifest.runtime.as_str() {
+        "python" | "rust" | "external" => {}
+        "wasm" => {
+            return Err(ColibriError::Config(
+                "Plugin runtime 'wasm' is not supported yet by this host".into(),
+            ));
+        }
+        other => {
+            return Err(ColibriError::Config(format!(
+                "Unsupported plugin runtime '{other}'"
+            )));
+        }
+    }
+
+    // Capabilities are required by schema; just ensure shape is present by referencing.
+    let _ = (
+        manifest.capabilities.snapshot,
+        manifest.capabilities.incremental,
+        manifest.capabilities.webhook,
+    );
+
+    if manifest.auth.is_empty() {
+        return Err(ColibriError::Config(
+            "Plugin manifest auth must have at least one entry".into(),
+        ));
+    }
+    for auth in &manifest.auth {
+        match auth.as_str() {
+            "none" | "oauth2" | "token" | "basic" | "service_account" => {}
+            other => {
+                return Err(ColibriError::Config(format!(
+                    "Unsupported auth mode '{other}' in plugin manifest"
+                )));
+            }
+        }
+    }
+
+    if !manifest.config_schema.is_object() {
+        return Err(ColibriError::Config(
+            "Plugin manifest config_schema must be a JSON object".into(),
+        ));
+    }
+
+    if let Some(strategy) = manifest.cursor_strategy.as_deref() {
+        match strategy {
+            "none" | "timestamp" | "opaque_token" | "delta_api" => {}
+            other => {
+                return Err(ColibriError::Config(format!(
+                    "Unsupported cursor_strategy '{other}' in plugin manifest"
+                )));
+            }
+        }
+    }
+
+    if let Some(retry) = &manifest.retry_policy {
+        if retry.max_attempts == 0 {
+            return Err(ColibriError::Config(
+                "Plugin manifest retry_policy.max_attempts must be >= 1".into(),
+            ));
+        }
+        let _ = retry.backoff_ms;
+    }
+
+    Ok(())
+}
+
+fn is_valid_plugin_id(raw: &str) -> bool {
+    !raw.trim().is_empty()
+        && raw.chars().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' || c == '-'
+        })
+}
+
+pub async fn run_plugin_manifest(
+    manifest_path: &Path,
+    config: &Value,
+    cursor: Option<Value>,
+) -> Result<PluginRunReport, ColibriError> {
+    let manifest = load_plugin_manifest(manifest_path)?;
 
     let manifest_dir = manifest_path.parent().unwrap_or(Path::new("."));
     let entrypoint_path = resolve_entrypoint(manifest_dir, &manifest.entrypoint);
@@ -280,6 +398,64 @@ fn validate_envelope(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::{is_valid_plugin_id, validate_manifest, PluginCapabilities, PluginManifest};
+    use serde_json::json;
+
+    fn base_manifest() -> PluginManifest {
+        PluginManifest {
+            schema_version: 1,
+            plugin_id: "filesystem_markdown".into(),
+            version: "0.1.0".into(),
+            runtime: "python".into(),
+            entrypoint: "plugin.py".into(),
+            capabilities: PluginCapabilities {
+                snapshot: true,
+                incremental: true,
+                webhook: false,
+            },
+            auth: vec!["none".into()],
+            config_schema: json!({"type":"object"}),
+            cursor_strategy: Some("none".into()),
+            retry_policy: None,
+        }
+    }
+
+    #[test]
+    fn plugin_id_validation() {
+        assert!(is_valid_plugin_id("abc"));
+        assert!(is_valid_plugin_id("a_b-c.1"));
+        assert!(!is_valid_plugin_id("ABC"));
+        assert!(!is_valid_plugin_id("a b"));
+        assert!(!is_valid_plugin_id(""));
+    }
+
+    #[test]
+    fn manifest_rejects_empty_auth() {
+        let mut m = base_manifest();
+        m.auth.clear();
+        let err = validate_manifest(&m).unwrap_err().to_string();
+        assert!(err.contains("auth"));
+    }
+
+    #[test]
+    fn manifest_rejects_unsupported_runtime() {
+        let mut m = base_manifest();
+        m.runtime = "wasm".into();
+        let err = validate_manifest(&m).unwrap_err().to_string();
+        assert!(err.contains("not supported"));
+    }
+
+    #[test]
+    fn manifest_rejects_non_object_config_schema() {
+        let mut m = base_manifest();
+        m.config_schema = json!(true);
+        let err = validate_manifest(&m).unwrap_err().to_string();
+        assert!(err.contains("config_schema"));
+    }
 }
 
 #[cfg(test)]
