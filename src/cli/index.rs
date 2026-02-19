@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
-use crate::config::load_config;
+use crate::config::{load_config, FolderProfile, IndexMode};
 use crate::embedding::EMBED_BATCH_SIZE;
 use crate::indexer::{index_library, IndexEvent};
 
@@ -123,8 +123,33 @@ impl CliProgress {
     }
 }
 
-pub async fn run(folder: Option<String>, force: bool) -> anyhow::Result<()> {
-    let config = load_config()?;
+pub async fn run(
+    folder: Option<String>,
+    canonical: bool,
+    generation: Option<String>,
+    activate: bool,
+    force: bool,
+) -> anyhow::Result<()> {
+    let base_config = load_config()?;
+    if activate && generation.is_none() {
+        anyhow::bail!("`--activate` requires `--generation <id>`");
+    }
+    let mut config = if let Some(generation) = generation {
+        base_config.with_generation(&generation)?
+    } else {
+        base_config.clone()
+    };
+
+    if canonical {
+        let canonical_sources = canonical_source_profiles(&config);
+        if canonical_sources.is_empty() {
+            anyhow::bail!(
+                "No canonical markdown sources found under {}",
+                config.canonical_dir.display()
+            );
+        }
+        config.sources = canonical_sources;
+    }
 
     // Print header
     let profiles: Vec<_> = if let Some(ref filter) = folder {
@@ -149,9 +174,19 @@ pub async fn run(folder: Option<String>, force: bool) -> anyhow::Result<()> {
             )
         })
         .collect();
+    if sources_str.is_empty() {
+        anyhow::bail!("No matching sources selected for indexing.");
+    }
     eprintln!("Indexing: {}", sources_str.join(", "));
+    if canonical {
+        eprintln!("Source mode: canonical");
+    }
+    eprintln!("Generation: {}", config.active_generation);
     if force && folder.is_none() {
         eprintln!("Mode: full rebuild");
+    }
+    if activate {
+        eprintln!("Will activate generation on success");
     }
 
     let progress = CliProgress::new();
@@ -160,6 +195,11 @@ pub async fn run(folder: Option<String>, force: bool) -> anyhow::Result<()> {
         progress.handle(e);
     })
     .await?;
+
+    if activate {
+        base_config.set_active_generation(&config.active_generation)?;
+        eprintln!("Activated generation: {}", config.active_generation);
+    }
 
     // Print summary
     let mut summary_parts = vec![format!(
@@ -183,4 +223,25 @@ pub async fn run(folder: Option<String>, force: bool) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn canonical_source_profiles(config: &crate::config::AppConfig) -> Vec<FolderProfile> {
+    let mut profiles = Vec::new();
+    for class in ["restricted", "confidential", "internal", "public"] {
+        let class_dir = config.canonical_dir.join(class);
+        if !class_dir.exists() || !class_dir.is_dir() {
+            continue;
+        }
+        profiles.push(FolderProfile {
+            path: class_dir.to_string_lossy().to_string(),
+            mode: IndexMode::Incremental,
+            doc_type: "note".into(),
+            chunk_size: None,
+            chunk_overlap: None,
+            extensions: vec![".md".into()],
+            name: Some(format!("canonical-{class}")),
+            classification: class.to_string(),
+        });
+    }
+    profiles
 }

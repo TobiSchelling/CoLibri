@@ -12,6 +12,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::config::DEFAULT_ACTIVE_GENERATION;
 use crate::error::ColibriError;
 
 /// Tracking state for a single indexed file.
@@ -28,23 +29,38 @@ pub struct FileEntry {
 pub struct Manifest {
     pub version: u32,
     pub indexed_at: String,
+    #[serde(default = "default_active_generation")]
+    pub active_generation: String,
     pub files: HashMap<String, FileEntry>,
+}
+
+fn default_active_generation() -> String {
+    DEFAULT_ACTIVE_GENERATION.to_string()
 }
 
 impl Default for Manifest {
     fn default() -> Self {
         Self {
-            version: 2,
+            version: 3,
             indexed_at: String::new(),
+            active_generation: default_active_generation(),
             files: HashMap::new(),
         }
     }
 }
 
 impl Manifest {
-    /// Create an empty v2 manifest.
+    /// Create an empty v3 manifest.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create an empty manifest with a specific active generation.
+    pub fn new_with_active_generation(active_generation: &str) -> Self {
+        Self {
+            active_generation: active_generation.to_string(),
+            ..Self::default()
+        }
     }
 
     /// Load manifest from disk, or return an empty one if missing.
@@ -187,6 +203,7 @@ pub fn is_namespaced_key(key: &str) -> bool {
 /// Build a manifest signature for change tracking.
 ///
 /// Returns `{rel_path: (content_hash, chunk_count)}` for all files.
+#[allow(dead_code)]
 pub fn manifest_signature(manifest: &Manifest) -> HashMap<String, (String, usize)> {
     manifest
         .files

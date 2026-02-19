@@ -3,25 +3,61 @@
 //! Implements the Model Context Protocol for Claude integration.
 //! Supports `search_library` and `list_books` tools.
 
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
+use serde::Serialize;
 use serde_json::{json, Value};
 use tracing::{debug, info};
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, SCHEMA_VERSION};
 use crate::error::ColibriError;
+use crate::index_meta::read_index_meta;
+use crate::metadata_store::MetadataStore;
 use crate::query::SearchEngine;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StartupProfileCheck {
+    pub profile_id: String,
+    pub queryable: bool,
+    pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StartupReport {
+    pub active_generation: String,
+    pub total_profiles: usize,
+    pub queryable_profiles: usize,
+    pub issues: Vec<String>,
+    pub profiles: Vec<StartupProfileCheck>,
+}
 
 /// Run the MCP server, reading JSON-RPC from stdin and writing to stdout.
 pub async fn run_server(config: &AppConfig) -> Result<(), ColibriError> {
     info!("Starting CoLibri MCP server...");
+    let report = startup_report(config)?;
+    eprintln!(
+        "MCP startup profile check: queryable_profiles={}/{} (active generation: {})",
+        report.queryable_profiles, report.total_profiles, report.active_generation
+    );
+    for issue in &report.issues {
+        eprintln!("  - {}", issue);
+    }
+    if report.queryable_profiles == 0 {
+        return Err(ColibriError::Mcp(
+            "No queryable embedding profile is ready for serving. Run `colibri doctor`, then rebuild/activate a ready generation.".into(),
+        ));
+    }
+
+    let engine = SearchEngine::new(config).await.map_err(|e| {
+        ColibriError::Mcp(format!(
+            "Search engine initialization failed at MCP startup: {e}"
+        ))
+    })?;
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
-
-    // Lazily initialize the search engine on first tool call
-    let mut engine: Option<SearchEngine> = None;
 
     for line in stdin.lock().lines() {
         let line = line.map_err(|e| ColibriError::Mcp(format!("stdin read error: {e}")))?;
@@ -59,21 +95,7 @@ pub async fn run_server(config: &AppConfig) -> Result<(), ColibriError> {
                 continue;
             }
             "tools/list" => handle_tools_list(id),
-            "tools/call" => {
-                // Lazy-init the search engine
-                if engine.is_none() {
-                    match SearchEngine::new(config).await {
-                        Ok(e) => engine = Some(e),
-                        Err(e) => {
-                            let resp =
-                                error_response(id, -32603, &format!("Engine init failed: {e}"));
-                            write_response(&mut stdout, &resp)?;
-                            continue;
-                        }
-                    }
-                }
-                handle_tools_call(id, &request, engine.as_ref().unwrap()).await
-            }
+            "tools/call" => handle_tools_call(id, &request, &engine).await,
             "notifications/cancelled" | "ping" => {
                 // Ignore notifications, respond to ping
                 if method == "ping" {
@@ -93,6 +115,103 @@ pub async fn run_server(config: &AppConfig) -> Result<(), ColibriError> {
     }
 
     Ok(())
+}
+
+pub fn startup_report(config: &AppConfig) -> Result<StartupReport, ColibriError> {
+    let generation_status = load_generation_status(config)?;
+    let mut profile_ids: Vec<String> = config.embedding_profiles.keys().cloned().collect();
+    profile_ids.sort();
+
+    let mut profiles = Vec::new();
+
+    for profile_id in profile_ids {
+        let profile = config.embedding_profile(&profile_id)?;
+        let mut profile_issues = Vec::new();
+
+        if !generation_status.is_empty() {
+            match generation_status.get(&profile_id).map(String::as_str) {
+                Some("ready") => {}
+                Some(status) => profile_issues.push(format!(
+                    "lifecycle status for generation '{}' is '{}'",
+                    config.active_generation, status
+                )),
+                None => profile_issues.push(format!(
+                    "missing generation metadata row for '{}'",
+                    config.active_generation
+                )),
+            }
+        }
+
+        let lancedb_dir = config.lancedb_dir_for_profile(&profile_id);
+        let meta = read_index_meta(&lancedb_dir)?;
+        if meta.is_empty() {
+            profile_issues.push(format!(
+                "index metadata missing at {}",
+                lancedb_dir.display()
+            ));
+        } else {
+            let stored_version = meta
+                .get("schema_version")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            if stored_version != SCHEMA_VERSION {
+                profile_issues.push(format!(
+                    "schema outdated (index v{}, expected v{})",
+                    stored_version, SCHEMA_VERSION
+                ));
+            }
+
+            let model = meta
+                .get("embedding_model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if model.is_empty() {
+                profile_issues.push("embedding_model missing in index metadata".into());
+            } else if model != profile.model {
+                profile_issues.push(format!(
+                    "embedding model mismatch (index='{}', config='{}')",
+                    model, profile.model
+                ));
+            }
+        }
+
+        profiles.push(StartupProfileCheck {
+            profile_id,
+            queryable: profile_issues.is_empty(),
+            issues: profile_issues,
+        });
+    }
+
+    let queryable_profiles = profiles.iter().filter(|p| p.queryable).count();
+    let mut issues = Vec::new();
+    for p in &profiles {
+        if !p.queryable {
+            issues.push(format!("{}: {}", p.profile_id, p.issues.join("; ")));
+        }
+    }
+
+    Ok(StartupReport {
+        active_generation: config.active_generation.clone(),
+        total_profiles: config.embedding_profiles.len(),
+        queryable_profiles,
+        issues,
+        profiles,
+    })
+}
+
+fn load_generation_status(config: &AppConfig) -> Result<HashMap<String, String>, ColibriError> {
+    if !config.metadata_db_path.exists() {
+        return Ok(HashMap::new());
+    }
+    let store = MetadataStore::open(&config.metadata_db_path)?;
+    let rows = store.list_generation_entries()?;
+    let mut out = HashMap::new();
+    for row in rows {
+        if row.generation_id == config.active_generation {
+            out.insert(row.embedding_profile_id, row.status);
+        }
+    }
+    Ok(out)
 }
 
 fn handle_initialize(id: Option<Value>) -> Value {
@@ -306,4 +425,126 @@ fn write_response(stdout: &mut impl Write, response: &Value) -> Result<(), Colib
     writeln!(stdout, "{line}")?;
     stdout.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::startup_report;
+    use crate::config::{
+        AppConfig, EmbeddingLocality, EmbeddingProfile, DEFAULT_ACTIVE_GENERATION,
+    };
+    use crate::index_meta::write_index_meta;
+    use crate::metadata_store::MetadataStore;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+
+    fn temp_root() -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "colibri-mcp-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        path
+    }
+
+    fn test_config(root: &Path) -> AppConfig {
+        let active_generation = DEFAULT_ACTIVE_GENERATION.to_string();
+        let mut embedding_profiles = HashMap::new();
+        embedding_profiles.insert(
+            "local_default".to_string(),
+            EmbeddingProfile {
+                id: "local_default".into(),
+                provider: "ollama".into(),
+                endpoint: "http://localhost:11434".into(),
+                model: "bge-m3".into(),
+                locality: EmbeddingLocality::Local,
+            },
+        );
+        let mut routing_policy = HashMap::new();
+        for class in ["restricted", "confidential", "internal", "public"] {
+            routing_policy.insert(class.to_string(), "local_default".to_string());
+        }
+
+        let colibri_home = root.to_path_buf();
+        let indexes_dir = colibri_home.join("indexes");
+        let lancedb_dir = indexes_dir
+            .join(&active_generation)
+            .join("local_default")
+            .join("lancedb");
+        AppConfig {
+            sources: Vec::new(),
+            plugin_jobs: Vec::new(),
+            colibri_home: colibri_home.clone(),
+            data_dir: colibri_home.clone(),
+            canonical_dir: colibri_home.join("canonical"),
+            indexes_dir,
+            state_dir: colibri_home.join("state"),
+            backups_dir: colibri_home.join("backups"),
+            logs_dir: colibri_home.join("logs"),
+            metadata_db_path: colibri_home.join("metadata.db"),
+            active_generation,
+            index_dir_name: "lancedb".into(),
+            embedding_profiles,
+            routing_policy,
+            default_embedding_profile: "local_default".into(),
+            lancedb_dir,
+            ollama_base_url: "http://localhost:11434".into(),
+            embedding_model: "bge-m3".into(),
+            top_k: 10,
+            similarity_threshold: 0.3,
+            chunk_size: 3000,
+            chunk_overlap: 200,
+        }
+    }
+
+    #[test]
+    fn startup_report_flags_missing_index_metadata() {
+        let root = temp_root();
+        let cfg = test_config(&root);
+        cfg.ensure_storage_layout().expect("bootstrap layout");
+
+        let report = startup_report(&cfg).expect("startup report");
+        assert_eq!(report.queryable_profiles, 0);
+        assert_eq!(report.total_profiles, 1);
+        assert_eq!(report.profiles.len(), 1);
+        assert!(!report.profiles[0].queryable);
+        assert!(report.profiles[0]
+            .issues
+            .iter()
+            .any(|s| s.contains("index metadata missing")));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn startup_report_marks_profile_queryable_when_ready() {
+        let root = temp_root();
+        let cfg = test_config(&root);
+        cfg.ensure_storage_layout().expect("bootstrap layout");
+
+        // Write index metadata for active generation/profile.
+        std::fs::create_dir_all(&cfg.lancedb_dir).expect("create lancedb dir");
+        write_index_meta(&cfg.lancedb_dir, "bge-m3", &serde_json::Map::new())
+            .expect("write index meta");
+
+        // Mark generation/profile as ready.
+        let store = MetadataStore::open(&cfg.metadata_db_path).expect("open store");
+        store
+            .upsert_generation_status(
+                &cfg.active_generation,
+                "local_default",
+                &json!({"pipeline_schema_version": 1}),
+                "ready",
+            )
+            .expect("upsert generation status");
+
+        let report = startup_report(&cfg).expect("startup report");
+        assert_eq!(report.queryable_profiles, 1);
+        assert!(report.issues.is_empty());
+        assert!(report.profiles[0].queryable);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

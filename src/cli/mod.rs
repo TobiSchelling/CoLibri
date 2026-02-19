@@ -2,9 +2,13 @@
 
 pub mod config_tui;
 pub mod doctor;
+pub mod generations;
 pub mod import;
 pub mod index;
 pub mod instructions;
+pub mod migrate;
+pub mod plugins;
+pub mod profiles;
 pub mod search;
 pub mod serve;
 
@@ -18,13 +22,63 @@ pub enum Commands {
     Config,
 
     /// Check system health (Ollama, config, index)
-    Doctor,
+    Doctor {
+        /// Exit non-zero when serving alignment has any issue
+        #[arg(long)]
+        strict: bool,
+
+        /// Output health report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Inspect or apply storage migrations
+    Migrate {
+        /// Show pending/applied migrations without changing files
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show embedding profiles, routing policy, and index readiness
+    Profiles {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Run plugin commands
+    Plugins {
+        #[command(subcommand)]
+        command: PluginCommands,
+    },
+
+    /// Manage index generations
+    Generations {
+        #[command(subcommand)]
+        command: GenerationCommands,
+    },
 
     /// Index markdown corpus into LanceDB
     Index {
         /// Only index the source matching this name
         #[arg(long)]
         folder: Option<String>,
+
+        /// Index from managed canonical store (`COLIBRI_HOME/canonical`)
+        #[arg(long)]
+        canonical: bool,
+
+        /// Target generation id (defaults to active generation)
+        #[arg(long)]
+        generation: Option<String>,
+
+        /// Activate target generation after successful indexing
+        #[arg(long)]
+        activate: bool,
 
         /// Force full re-index regardless of mode
         #[arg(long)]
@@ -61,7 +115,15 @@ pub enum Commands {
     },
 
     /// Start MCP stdio server
-    Serve,
+    Serve {
+        /// Run startup readiness checks only (do not start server)
+        #[arg(long)]
+        check: bool,
+
+        /// Output check report as JSON (requires --check)
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Import PDF or EPUB files into the library as markdown
     Import {
@@ -87,5 +149,229 @@ pub enum Commands {
         /// Re-index the books folder after import
         #[arg(long)]
         reindex: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GenerationCommands {
+    /// Create a generation layout for all embedding profiles
+    Create {
+        /// Generation id (example: gen_2026_02_18_bge-m3_v1)
+        generation: String,
+
+        /// Activate generation after creation
+        #[arg(long)]
+        activate: bool,
+    },
+
+    /// List known generations and profile index status
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Activate (or create) an index generation
+    Activate {
+        /// Generation id (example: gen_2026_02_18_bge-m3_v1)
+        generation: String,
+
+        /// Allow activating a generation even if no profile is serve-ready
+        #[arg(long)]
+        allow_unready: bool,
+    },
+
+    /// Delete a generation directory
+    Delete {
+        /// Generation id to delete
+        generation: String,
+
+        /// Required confirmation token; must exactly match generation id
+        #[arg(long)]
+        confirm: String,
+
+        /// Allow deleting currently active generation
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PluginCommands {
+    /// Execute a plugin manifest and validate emitted envelopes
+    Run {
+        /// Path to plugin_manifest.json
+        #[arg(long)]
+        manifest: PathBuf,
+
+        /// JSON object passed as plugin config (mutually exclusive with --config-file)
+        #[arg(long)]
+        config_json: Option<String>,
+
+        /// Path to JSON file used as plugin config (mutually exclusive with --config-json)
+        #[arg(long)]
+        config_file: Option<PathBuf>,
+
+        /// Include envelope payloads in output (default: summary only)
+        #[arg(long)]
+        include_envelopes: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Execute a plugin and persist envelopes into canonical storage
+    Ingest {
+        /// Path to plugin_manifest.json
+        #[arg(long)]
+        manifest: PathBuf,
+
+        /// JSON object passed as plugin config (mutually exclusive with --config-file)
+        #[arg(long)]
+        config_json: Option<String>,
+
+        /// Path to JSON file used as plugin config (mutually exclusive with --config-json)
+        #[arg(long)]
+        config_file: Option<PathBuf>,
+
+        /// Validate and report writes without mutating canonical storage
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Execute a plugin incrementally using persisted sync cursor state
+    Sync {
+        /// Path to plugin_manifest.json
+        #[arg(long)]
+        manifest: PathBuf,
+
+        /// JSON object passed as plugin config (mutually exclusive with --config-file)
+        #[arg(long)]
+        config_json: Option<String>,
+
+        /// Path to JSON file used as plugin config (mutually exclusive with --config-json)
+        #[arg(long)]
+        config_file: Option<PathBuf>,
+
+        /// Validate and report writes without mutating canonical storage/state
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Execute all configured plugin sync jobs from config.yaml
+    SyncAll {
+        /// Restrict to specific job id(s); may be repeated
+        #[arg(long = "job")]
+        jobs: Vec<String>,
+
+        /// Also run jobs marked as disabled in config
+        #[arg(long)]
+        include_disabled: bool,
+
+        /// Stop on first failed job
+        #[arg(long)]
+        fail_fast: bool,
+
+        /// Index canonical corpus after successful sync run
+        #[arg(long)]
+        index_canonical: bool,
+
+        /// Target generation id for optional index step
+        #[arg(long)]
+        generation: Option<String>,
+
+        /// Activate target generation after successful optional index step
+        #[arg(long)]
+        activate: bool,
+
+        /// Force full rebuild for optional index step
+        #[arg(long)]
+        index_force: bool,
+
+        /// Validate and report writes without mutating canonical storage/state
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show configured plugin jobs from config.yaml
+    Jobs {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Include filesystem validation status for manifest paths
+        #[arg(long)]
+        validate_manifests: bool,
+    },
+
+    /// Inspect or reset persisted plugin sync state
+    State {
+        #[command(subcommand)]
+        command: PluginStateCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PluginStateCommands {
+    /// List all persisted plugin sync entries
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show sync entry for a specific manifest + config pair
+    Show {
+        /// Path to plugin_manifest.json
+        #[arg(long)]
+        manifest: PathBuf,
+
+        /// JSON object passed as plugin config (mutually exclusive with --config-file)
+        #[arg(long)]
+        config_json: Option<String>,
+
+        /// Path to JSON file used as plugin config (mutually exclusive with --config-json)
+        #[arg(long)]
+        config_file: Option<PathBuf>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Remove sync entry for a specific manifest + config pair
+    Reset {
+        /// Path to plugin_manifest.json
+        #[arg(long)]
+        manifest: PathBuf,
+
+        /// JSON object passed as plugin config (mutually exclusive with --config-file)
+        #[arg(long)]
+        config_json: Option<String>,
+
+        /// Path to JSON file used as plugin config (mutually exclusive with --config-json)
+        #[arg(long)]
+        config_file: Option<PathBuf>,
+
+        /// Required safety flag to confirm reset action
+        #[arg(long)]
+        yes: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }

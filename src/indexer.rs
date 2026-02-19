@@ -4,7 +4,7 @@
 //! indexing modes: static and incremental.
 //! Mirrors the Python `indexer.py` module.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -15,13 +15,12 @@ use arrow_schema::{DataType, Field, Schema};
 use lancedb::database::CreateTableMode;
 use tracing::info;
 
-use crate::config::{AppConfig, FolderProfile, IndexMode, SCHEMA_VERSION};
+use crate::config::{AppConfig, FolderProfile, IndexMode, PIPELINE_SCHEMA_VERSION, SCHEMA_VERSION};
 use crate::embedding::embed_texts_with_progress;
 use crate::error::ColibriError;
 use crate::index_meta::{read_index_meta, write_index_meta};
-use crate::manifest::{
-    get_manifest_path, make_key, manifest_signature, source_id_for_root, Manifest,
-};
+use crate::manifest::{get_manifest_path, make_key, source_id_for_root, Manifest};
+use crate::metadata_store::MetadataStore;
 use crate::sources::markdown::MarkdownFolderSource;
 use crate::sources::ContentSource;
 
@@ -207,6 +206,16 @@ pub fn create_source_for_profile(
         profile.extensions.clone(),
         exclude_paths,
     )
+}
+
+fn canonical_markdown_path_for_doc(
+    config: &AppConfig,
+    source_root: &Path,
+    rel_path: &Path,
+) -> Option<String> {
+    let class_root = source_root.strip_prefix(&config.canonical_dir).ok()?;
+    let joined = class_root.join(rel_path);
+    Some(joined.to_string_lossy().replace('\\', "/"))
 }
 
 // ---------------------------------------------------------------------------
@@ -420,8 +429,8 @@ async fn detect_deleted_files(
     known_keys: &HashSet<String>,
     current_keys: &HashSet<String>,
     table: &lancedb::Table,
-) -> Result<usize, ColibriError> {
-    let mut deleted = 0;
+) -> Result<Vec<String>, ColibriError> {
+    let mut deleted_rel_paths = Vec::new();
 
     for key in known_keys {
         if !current_keys.contains(key) {
@@ -429,11 +438,11 @@ async fn detect_deleted_files(
             let escaped = rel_path.replace('\'', "''");
             table.delete(&format!("source_file = '{escaped}'")).await?;
             manifest.remove_file(key);
-            deleted += 1;
+            deleted_rel_paths.push(rel_path.to_string());
         }
     }
 
-    Ok(deleted)
+    Ok(deleted_rel_paths)
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +458,10 @@ async fn index_folder(
     db: &lancedb::Connection,
     table: &mut Option<lancedb::Table>,
     config: &AppConfig,
+    metadata_store: &MetadataStore,
+    generation_id: &str,
+    embedding_profile_id: &str,
+    canonical_doc_ids: &HashMap<String, String>,
     chunk_size: usize,
     chunk_overlap: usize,
     force: bool,
@@ -457,6 +470,7 @@ async fn index_folder(
 ) -> Result<IndexResult, ColibriError> {
     let source_label = profile.display_name().to_string();
     let src_id = source_id_for_root(source.root_path());
+    let source_root = source.root_path();
 
     let all_files = source.list_documents();
     let all_rel_paths: HashSet<String> = all_files
@@ -483,13 +497,30 @@ async fn index_folder(
         let mut deleted = 0;
         if !force {
             if let Some(tbl) = table.as_ref() {
-                deleted = detect_deleted_files(
+                let deleted_rel_paths = detect_deleted_files(
                     manifest,
                     &manifest_keys_for_source,
                     &current_keys_for_source,
                     tbl,
                 )
                 .await?;
+                deleted = deleted_rel_paths.len();
+                for rel in deleted_rel_paths {
+                    let rel_path = Path::new(&rel);
+                    if let Some(canonical_path) =
+                        canonical_markdown_path_for_doc(config, source_root, rel_path)
+                    {
+                        if let Some(doc_id) = canonical_doc_ids.get(&canonical_path) {
+                            metadata_store.upsert_document_index_state(
+                                doc_id,
+                                generation_id,
+                                embedding_profile_id,
+                                "deleted",
+                                None,
+                            )?;
+                        }
+                    }
+                }
             }
         }
         if files_skipped > 0 || deleted > 0 {
@@ -530,6 +561,19 @@ async fn index_folder(
                 files_indexed += 1;
             }
             Err(e) => {
+                if let Some(canonical_path) =
+                    canonical_markdown_path_for_doc(config, source_root, doc_path)
+                {
+                    if let Some(doc_id) = canonical_doc_ids.get(&canonical_path) {
+                        metadata_store.upsert_document_index_state(
+                            doc_id,
+                            generation_id,
+                            embedding_profile_id,
+                            "error",
+                            None,
+                        )?;
+                    }
+                }
                 on_progress(IndexEvent::Warning {
                     message: format!(
                         "Skipping {}: {e}",
@@ -625,6 +669,19 @@ async fn index_folder(
         if abs_path.exists() {
             if let Some(&count) = file_chunk_counts.get(rel.as_ref()) {
                 manifest.record_file(&key, &abs_path, count)?;
+                if let Some(canonical_path) =
+                    canonical_markdown_path_for_doc(config, source_root, doc_path)
+                {
+                    if let Some(doc_id) = canonical_doc_ids.get(&canonical_path) {
+                        metadata_store.upsert_document_index_state(
+                            doc_id,
+                            generation_id,
+                            embedding_profile_id,
+                            "indexed",
+                            Some(count as u64),
+                        )?;
+                    }
+                }
             }
         }
     }
@@ -633,13 +690,30 @@ async fn index_folder(
     let mut deleted = 0;
     if !force {
         if let Some(tbl) = table.as_ref() {
-            deleted = detect_deleted_files(
+            let deleted_rel_paths = detect_deleted_files(
                 manifest,
                 &manifest_keys_for_source,
                 &current_keys_for_source,
                 tbl,
             )
             .await?;
+            deleted = deleted_rel_paths.len();
+            for rel in deleted_rel_paths {
+                let rel_path = Path::new(&rel);
+                if let Some(canonical_path) =
+                    canonical_markdown_path_for_doc(config, source_root, rel_path)
+                {
+                    if let Some(doc_id) = canonical_doc_ids.get(&canonical_path) {
+                        metadata_store.upsert_document_index_state(
+                            doc_id,
+                            generation_id,
+                            embedding_profile_id,
+                            "deleted",
+                            None,
+                        )?;
+                    }
+                }
+            }
         }
     }
 
@@ -670,10 +744,13 @@ pub async fn index_library(
     force: bool,
     on_progress: impl Fn(IndexEvent) + Send + Sync,
 ) -> Result<IndexResult, ColibriError> {
-    config.ensure_directories()?;
+    // Indexing should never mutate the global active_generation pointer.
+    config.ensure_storage_layout()?;
+    let metadata_store = MetadataStore::open(&config.metadata_db_path)?;
+    let canonical_doc_ids = metadata_store.list_live_document_paths()?;
 
-    // Resolve profiles
-    let mut profiles: Vec<&FolderProfile> = if let Some(filter) = folder_filter {
+    // Resolve source profiles for this run
+    let selected_profiles: Vec<&FolderProfile> = if let Some(filter) = folder_filter {
         let matches: Vec<&FolderProfile> = config
             .sources
             .iter()
@@ -691,109 +768,188 @@ pub async fn index_library(
         config.sources.iter().collect()
     };
 
-    let mut force = force;
+    // Group sources by embedding profile resolved from classification routing.
+    let mut grouped_profiles: BTreeMap<String, Vec<&FolderProfile>> = BTreeMap::new();
+    for profile in &selected_profiles {
+        let embedding_profile_id = config.resolve_embedding_profile_id(&profile.classification);
+        config.embedding_profile(&embedding_profile_id)?;
+        grouped_profiles
+            .entry(embedding_profile_id)
+            .or_default()
+            .push(*profile);
+    }
 
     // Load manifest
     let manifest_path = get_manifest_path(&config.data_dir);
     let mut manifest = Manifest::load(&manifest_path)?;
 
-    // Check schema version — force rebuild if outdated
-    let meta = read_index_meta(&config.lancedb_dir)?;
-    let stored_version = meta
-        .get("schema_version")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
-
-    if stored_version != SCHEMA_VERSION && !force {
-        info!(
-            "Index schema outdated (v{stored_version} -> v{SCHEMA_VERSION}). Forcing full rebuild."
-        );
-        force = true;
-        // Re-resolve all profiles
-        profiles = config.sources.iter().collect();
-    }
-
     let full_rebuild = force && folder_filter.is_none();
 
     if full_rebuild {
-        manifest = Manifest::new();
+        manifest = Manifest::new_with_active_generation(&config.active_generation);
     }
-
-    // Connect to LanceDB
-    std::fs::create_dir_all(&config.lancedb_dir)?;
-    let db = lancedb::connect(config.lancedb_dir.to_string_lossy().as_ref())
-        .execute()
-        .await?;
-
-    let mut table: Option<lancedb::Table> = if full_rebuild {
-        None
-    } else {
-        db.open_table(TABLE_NAME).execute().await.ok()
-    };
 
     let mut aggregate = IndexResult::default();
 
-    for (i, profile) in profiles.iter().enumerate() {
-        let source = create_source_for_profile(profile, &config.sources);
-        let chunk_size = profile.effective_chunk_size(config.chunk_size);
-        let chunk_overlap = profile.effective_chunk_overlap(config.chunk_overlap);
+    for (embedding_profile_id, profiles) in grouped_profiles {
+        let embedding_profile = config.embedding_profile(&embedding_profile_id)?.clone();
+        let profile_config = config.with_embedding_profile(&embedding_profile);
+        let pipeline_version = serde_json::json!({
+            "pipeline_schema_version": PIPELINE_SCHEMA_VERSION,
+            "index_schema_version": SCHEMA_VERSION,
+            "embedding_profile_id": embedding_profile.id.clone(),
+            "embedding_provider": embedding_profile.provider.clone(),
+            "embedding_model": embedding_profile.model.clone(),
+            "chunk_size_default": config.chunk_size,
+            "chunk_overlap_default": config.chunk_overlap
+        });
+        metadata_store.upsert_generation_status(
+            &config.active_generation,
+            &embedding_profile_id,
+            &pipeline_version,
+            "building",
+        )?;
+        std::fs::create_dir_all(&profile_config.lancedb_dir)?;
 
-        let result = index_folder(
-            &source,
-            profile,
-            &mut manifest,
-            &db,
-            &mut table,
-            config,
-            chunk_size,
-            chunk_overlap,
-            force,
-            full_rebuild && i == 0,
-            &on_progress,
-        )
-        .await?;
+        // Check schema version per profile-specific index and decide local rebuild mode.
+        let mut profile_force = force;
+        let meta = read_index_meta(&profile_config.lancedb_dir)?;
+        let stored_version = meta
+            .get("schema_version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        if stored_version != SCHEMA_VERSION && !profile_force {
+            info!(
+                "Index schema outdated for profile '{}' (v{} -> v{}). Forcing rebuild for this profile.",
+                embedding_profile_id, stored_version, SCHEMA_VERSION
+            );
+            profile_force = true;
+        }
 
-        aggregate.accumulate(&result);
+        let profile_full_rebuild = full_rebuild || (profile_force && folder_filter.is_none());
+
+        let profile_outcome: Result<IndexResult, ColibriError> = async {
+            let db = lancedb::connect(profile_config.lancedb_dir.to_string_lossy().as_ref())
+                .execute()
+                .await?;
+
+            let mut table: Option<lancedb::Table> = if profile_full_rebuild {
+                None
+            } else {
+                db.open_table(TABLE_NAME).execute().await.ok()
+            };
+
+            let mut profile_aggregate = IndexResult::default();
+
+            for (i, profile) in profiles.iter().enumerate() {
+                let source = create_source_for_profile(profile, &config.sources);
+                let chunk_size = profile.effective_chunk_size(config.chunk_size);
+                let chunk_overlap = profile.effective_chunk_overlap(config.chunk_overlap);
+
+                let result = index_folder(
+                    &source,
+                    profile,
+                    &mut manifest,
+                    &db,
+                    &mut table,
+                    &profile_config,
+                    &metadata_store,
+                    &config.active_generation,
+                    &embedding_profile_id,
+                    &canonical_doc_ids,
+                    chunk_size,
+                    chunk_overlap,
+                    profile_force,
+                    profile_full_rebuild && i == 0,
+                    &on_progress,
+                )
+                .await?;
+
+                profile_aggregate.accumulate(&result);
+                aggregate.accumulate(&result);
+            }
+            Ok(profile_aggregate)
+        }
+        .await;
+
+        let profile_aggregate = match profile_outcome {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = metadata_store.upsert_generation_status(
+                    &config.active_generation,
+                    &embedding_profile_id,
+                    &pipeline_version,
+                    "error",
+                );
+                return Err(e);
+            }
+        };
+
+        let mut profile_extra = serde_json::Map::new();
+        profile_extra.insert(
+            "embedding_profile_id".into(),
+            serde_json::Value::String(embedding_profile_id.clone()),
+        );
+        profile_extra.insert(
+            "embedding_provider".into(),
+            serde_json::Value::String(embedding_profile.provider.clone()),
+        );
+        profile_extra.insert(
+            "embedding_locality".into(),
+            serde_json::Value::String(
+                match embedding_profile.locality {
+                    crate::config::EmbeddingLocality::Local => "local",
+                    crate::config::EmbeddingLocality::Cloud => "cloud",
+                }
+                .to_string(),
+            ),
+        );
+        profile_extra.insert(
+            "files_indexed_last_run".into(),
+            serde_json::Value::Number(profile_aggregate.files_indexed.into()),
+        );
+        profile_extra.insert(
+            "file_count".into(),
+            serde_json::Value::Number(
+                (profile_aggregate.files_indexed + profile_aggregate.files_skipped).into(),
+            ),
+        );
+        profile_extra.insert(
+            "chunk_count".into(),
+            serde_json::Value::Number(profile_aggregate.total_chunks.into()),
+        );
+        profile_extra.insert(
+            "files_skipped_last_run".into(),
+            serde_json::Value::Number(profile_aggregate.files_skipped.into()),
+        );
+        profile_extra.insert(
+            "files_deleted_last_run".into(),
+            serde_json::Value::Number(profile_aggregate.files_deleted.into()),
+        );
+        profile_extra.insert(
+            "errors_last_run".into(),
+            serde_json::Value::Number(profile_aggregate.errors.into()),
+        );
+        write_index_meta(
+            &profile_config.lancedb_dir,
+            &embedding_profile.model,
+            &profile_extra,
+        )?;
+
+        metadata_store.upsert_generation_status(
+            &config.active_generation,
+            &embedding_profile_id,
+            &pipeline_version,
+            if profile_aggregate.errors > 0 {
+                "error"
+            } else {
+                "ready"
+            },
+        )?;
     }
 
     // Save manifest
     manifest.save(&manifest_path)?;
-
-    // Write index metadata
-    let after_sig = manifest_signature(&manifest);
-    let total_chunks: usize = after_sig.values().map(|(_, count)| count).sum();
-
-    let mut extra = serde_json::Map::new();
-    extra.insert(
-        "last_indexed_at".into(),
-        serde_json::Value::String(manifest.indexed_at.clone()),
-    );
-    extra.insert(
-        "file_count".into(),
-        serde_json::Value::Number(after_sig.len().into()),
-    );
-    extra.insert(
-        "chunk_count".into(),
-        serde_json::Value::Number(total_chunks.into()),
-    );
-    extra.insert(
-        "files_indexed_last_run".into(),
-        serde_json::Value::Number(aggregate.files_indexed.into()),
-    );
-    extra.insert(
-        "files_skipped_last_run".into(),
-        serde_json::Value::Number(aggregate.files_skipped.into()),
-    );
-    extra.insert(
-        "files_deleted_last_run".into(),
-        serde_json::Value::Number(aggregate.files_deleted.into()),
-    );
-    extra.insert(
-        "errors_last_run".into(),
-        serde_json::Value::Number(aggregate.errors.into()),
-    );
-
-    write_index_meta(&config.lancedb_dir, &config.embedding_model, &extra)?;
 
     Ok(aggregate)
 }
