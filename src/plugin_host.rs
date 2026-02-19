@@ -2,13 +2,16 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use chrono::DateTime;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
+use tokio::time::timeout;
 
 use crate::error::ColibriError;
 
@@ -84,12 +87,46 @@ pub struct PluginRunReport {
     pub next_cursor: Option<Value>,
     pub envelopes: Vec<DocumentEnvelope>,
     pub stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
 }
 
 #[derive(Debug, Serialize)]
 struct PluginRunRequest<'a> {
     config: &'a Value,
     cursor: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PluginHostLimits {
+    timeout_secs: u64,
+    max_envelopes: usize,
+    max_stdout_bytes: usize,
+    max_stdout_line_bytes: usize,
+    max_stderr_bytes: usize,
+}
+
+impl PluginHostLimits {
+    fn from_env() -> Self {
+        Self {
+            timeout_secs: env_u64("COLIBRI_PLUGIN_TIMEOUT_SECS").unwrap_or(300),
+            max_envelopes: env_usize("COLIBRI_PLUGIN_MAX_ENVELOPES").unwrap_or(10_000),
+            max_stdout_bytes: env_usize("COLIBRI_PLUGIN_MAX_STDOUT_BYTES")
+                .unwrap_or(8 * 1024 * 1024),
+            max_stdout_line_bytes: env_usize("COLIBRI_PLUGIN_MAX_LINE_BYTES").unwrap_or(512 * 1024),
+            max_stderr_bytes: env_usize("COLIBRI_PLUGIN_MAX_STDERR_BYTES").unwrap_or(64 * 1024),
+        }
+    }
+}
+
+fn env_u64(key: &str) -> Option<u64> {
+    std::env::var(key).ok().and_then(|v| v.parse::<u64>().ok())
+}
+
+fn env_usize(key: &str) -> Option<usize> {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
 }
 
 pub fn load_plugin_manifest(manifest_path: &Path) -> Result<PluginManifest, ColibriError> {
@@ -233,38 +270,213 @@ pub async fn run_plugin_manifest(
         })?;
     }
 
-    let output = child.wait_with_output().await.map_err(|e| {
-        ColibriError::Config(format!(
-            "Failed waiting for plugin '{}': {e}",
-            manifest.plugin_id
-        ))
-    })?;
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let limits = PluginHostLimits::from_env();
+    let timeout_duration = Duration::from_secs(limits.timeout_secs);
 
-    if !output.status.success() {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ColibriError::Config("Plugin stdout pipe unavailable".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| ColibriError::Config("Plugin stderr pipe unavailable".into()))?;
+
+    let plugin_id = manifest.plugin_id.clone();
+    let stdout_handle = tokio::spawn(read_plugin_stdout(
+        BufReader::new(stdout),
+        plugin_id.clone(),
+        limits,
+    ));
+    let stderr_handle = tokio::spawn(read_plugin_stderr(stderr, limits));
+
+    let status = match timeout(timeout_duration, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(e)) => {
+            let _ = child.kill().await;
+            return Err(ColibriError::Config(format!(
+                "Failed waiting for plugin '{}': {e}",
+                plugin_id
+            )));
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = stdout_handle.await;
+            let _ = stderr_handle.await;
+            return Err(ColibriError::Config(format!(
+                "Plugin '{}' timed out after {}s",
+                plugin_id, limits.timeout_secs
+            )));
+        }
+    };
+
+    let stderr_out = stderr_handle
+        .await
+        .map_err(|e| ColibriError::Config(format!("Plugin stderr task failed: {e}")))??;
+    let stdout_out = stdout_handle
+        .await
+        .map_err(|e| ColibriError::Config(format!("Plugin stdout task failed: {e}")))??;
+
+    if !status.success() {
         return Err(ColibriError::Config(format!(
             "Plugin '{}' failed (exit {}): {}",
-            manifest.plugin_id, output.status, stderr
+            plugin_id, status, stderr_out.stderr
         )));
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let (envelopes, next_cursor) = parse_plugin_stdout(&stdout, &manifest.plugin_id)?;
-
-    let deleted_count = envelopes.iter().filter(|e| e.document.deleted).count();
 
     Ok(PluginRunReport {
         plugin_id: manifest.plugin_id,
         runtime: manifest.runtime,
         manifest_path: manifest_path.display().to_string(),
-        envelope_count: envelopes.len(),
-        deleted_count,
-        next_cursor,
-        envelopes,
-        stderr,
+        envelope_count: stdout_out.envelopes.len(),
+        deleted_count: stdout_out.deleted_count,
+        next_cursor: stdout_out.next_cursor,
+        envelopes: stdout_out.envelopes,
+        stderr: stderr_out.stderr,
+        stdout_truncated: stdout_out.stdout_truncated,
+        stderr_truncated: stderr_out.stderr_truncated,
     })
 }
 
+struct StdoutReadResult {
+    envelopes: Vec<DocumentEnvelope>,
+    next_cursor: Option<Value>,
+    deleted_count: usize,
+    stdout_truncated: bool,
+}
+
+async fn read_plugin_stdout(
+    mut reader: BufReader<impl tokio::io::AsyncRead + Unpin>,
+    plugin_id: String,
+    limits: PluginHostLimits,
+) -> Result<StdoutReadResult, ColibriError> {
+    let mut envelopes = Vec::new();
+    let mut next_cursor: Option<Value> = None;
+    let mut deleted_count = 0usize;
+
+    let mut total_bytes = 0usize;
+    let mut line_num = 0usize;
+
+    loop {
+        let mut buf: Vec<u8> = Vec::new();
+        let n = reader.read_until(b'\n', &mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        line_num += 1;
+        total_bytes += n;
+
+        if total_bytes > limits.max_stdout_bytes {
+            return Err(ColibriError::Config(format!(
+                "Plugin '{}' exceeded max stdout bytes ({} > {})",
+                plugin_id, total_bytes, limits.max_stdout_bytes
+            )));
+        }
+        if buf.len() > limits.max_stdout_line_bytes {
+            return Err(ColibriError::Config(format!(
+                "Plugin '{}' emitted an oversized stdout line at {} ({} > {} bytes)",
+                plugin_id,
+                line_num,
+                buf.len(),
+                limits.max_stdout_line_bytes
+            )));
+        }
+
+        while buf.last() == Some(&b'\n') || buf.last() == Some(&b'\r') {
+            buf.pop();
+        }
+        if buf.is_empty() {
+            continue;
+        }
+
+        let parsed: Value = serde_json::from_slice(&buf).map_err(|e| {
+            ColibriError::Config(format!(
+                "Plugin '{}' emitted invalid JSON at line {}: {e}",
+                plugin_id, line_num
+            ))
+        })?;
+
+        // Control line for incremental sync cursor.
+        if let Some(obj) = parsed.as_object() {
+            if obj.get("type").and_then(Value::as_str) == Some("cursor") {
+                if let Some(cursor) = obj.get("cursor") {
+                    next_cursor = Some(cursor.clone());
+                    continue;
+                }
+                return Err(ColibriError::Config(format!(
+                    "Plugin '{}' emitted cursor control line without 'cursor' at line {}",
+                    plugin_id, line_num
+                )));
+            }
+        }
+
+        let envelope: DocumentEnvelope = serde_json::from_value(parsed).map_err(|e| {
+            ColibriError::Config(format!(
+                "Plugin '{}' emitted invalid envelope at line {}: {e}",
+                plugin_id, line_num
+            ))
+        })?;
+        validate_envelope(&envelope, &plugin_id)?;
+        if envelope.document.deleted {
+            deleted_count += 1;
+        }
+        envelopes.push(envelope);
+
+        if envelopes.len() > limits.max_envelopes {
+            return Err(ColibriError::Config(format!(
+                "Plugin '{}' exceeded max envelope count ({} > {})",
+                plugin_id,
+                envelopes.len(),
+                limits.max_envelopes
+            )));
+        }
+    }
+
+    Ok(StdoutReadResult {
+        envelopes,
+        next_cursor,
+        deleted_count,
+        stdout_truncated: false,
+    })
+}
+
+struct StderrReadResult {
+    stderr: String,
+    stderr_truncated: bool,
+}
+
+async fn read_plugin_stderr(
+    mut stderr: impl tokio::io::AsyncRead + Unpin,
+    limits: PluginHostLimits,
+) -> Result<StderrReadResult, ColibriError> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut truncated = false;
+
+    loop {
+        let n = stderr.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        if buf.len() < limits.max_stderr_bytes {
+            let remaining = limits.max_stderr_bytes - buf.len();
+            let take = remaining.min(n);
+            buf.extend_from_slice(&chunk[..take]);
+            if take < n {
+                truncated = true;
+            }
+        } else {
+            truncated = true;
+        }
+    }
+
+    Ok(StderrReadResult {
+        stderr: String::from_utf8_lossy(&buf).to_string(),
+        stderr_truncated: truncated,
+    })
+}
+
+#[cfg(test)]
 fn parse_plugin_stdout(
     stdout: &str,
     plugin_id: &str,
