@@ -1,6 +1,12 @@
 # Configuration
 
-CoLibri reads `~/.config/colibri/config.yaml`.
+CoLibri reads `~/.config/colibri/config.yaml` by default.
+
+Override for experiments or multi-profile setups:
+
+```bash
+export COLIBRI_CONFIG_PATH=/path/to/config.yaml
+```
 
 ## Sources (legacy / direct indexing)
 
@@ -79,4 +85,3 @@ colibri plugins jobs --validate-manifests
 
 Prefer passing secrets via environment variables referenced by plugin config (for example `token_env`),
 not inline `config.yaml`.
-

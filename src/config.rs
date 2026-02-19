@@ -817,6 +817,18 @@ impl AppConfig {
 
     /// Config file path.
     pub fn config_path() -> PathBuf {
+        if let Ok(p) = env::var("COLIBRI_CONFIG_PATH") {
+            let trimmed = p.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed);
+            }
+        }
+        if let Ok(p) = env::var("COLIBRI_CONFIG") {
+            let trimmed = p.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed);
+            }
+        }
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".config")
@@ -1270,6 +1282,8 @@ mod tests {
         colibri_home: Option<String>,
         xdg_data_home: Option<String>,
         colibri_data_dir: Option<String>,
+        colibri_config_path: Option<String>,
+        colibri_config: Option<String>,
     }
 
     impl EnvSnapshot {
@@ -1279,6 +1293,8 @@ mod tests {
                 colibri_home: std::env::var("COLIBRI_HOME").ok(),
                 xdg_data_home: std::env::var("XDG_DATA_HOME").ok(),
                 colibri_data_dir: std::env::var("COLIBRI_DATA_DIR").ok(),
+                colibri_config_path: std::env::var("COLIBRI_CONFIG_PATH").ok(),
+                colibri_config: std::env::var("COLIBRI_CONFIG").ok(),
             }
         }
 
@@ -1287,6 +1303,8 @@ mod tests {
             set_env_opt("COLIBRI_HOME", self.colibri_home.as_deref());
             set_env_opt("XDG_DATA_HOME", self.xdg_data_home.as_deref());
             set_env_opt("COLIBRI_DATA_DIR", self.colibri_data_dir.as_deref());
+            set_env_opt("COLIBRI_CONFIG_PATH", self.colibri_config_path.as_deref());
+            set_env_opt("COLIBRI_CONFIG", self.colibri_config.as_deref());
         }
     }
 
@@ -1397,11 +1415,37 @@ mod tests {
         let home = root.join("home");
         std::fs::create_dir_all(&home).expect("create home");
 
+        set_env_opt("COLIBRI_CONFIG_PATH", None);
+        set_env_opt("COLIBRI_CONFIG", None);
         set_env_opt("HOME", Some(home.to_string_lossy().as_ref()));
         set_env_opt("XDG_DATA_HOME", None);
 
         let p = AppConfig::config_path();
         assert!(p.starts_with(&home));
+
+        snap.restore();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn config_path_respects_env_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let snap = EnvSnapshot::capture();
+
+        let root = unique_tmp_dir("colibri-config");
+        let cfg = root.join("config.yaml");
+        std::fs::create_dir_all(&root).expect("create tmp root");
+        std::fs::write(&cfg, "sources: []\n").expect("write config");
+
+        set_env_opt("COLIBRI_CONFIG_PATH", Some(cfg.to_string_lossy().as_ref()));
+        set_env_opt("COLIBRI_CONFIG", None);
+        let p = AppConfig::config_path();
+        assert_eq!(p, cfg);
+
+        set_env_opt("COLIBRI_CONFIG_PATH", None);
+        set_env_opt("COLIBRI_CONFIG", Some(cfg.to_string_lossy().as_ref()));
+        let p2 = AppConfig::config_path();
+        assert_eq!(p2, cfg);
 
         snap.restore();
         let _ = std::fs::remove_dir_all(root);
