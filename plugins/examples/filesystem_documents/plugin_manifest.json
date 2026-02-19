@@ -60,6 +60,16 @@
         "type": "boolean",
         "default": true
       },
+      "pptx_backend": {
+        "type": "string",
+        "enum": [
+          "soffice_pdf_docling",
+          "pandoc",
+          "python_pptx",
+          "markitdown"
+        ],
+        "default": "soffice_pdf_docling"
+      },
       "mode": {
         "type": "string",
         "enum": [
@@ -83,4 +93,3 @@
     "backoff_ms": 0
   }
 }
-

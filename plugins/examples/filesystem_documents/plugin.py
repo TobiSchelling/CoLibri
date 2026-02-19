@@ -119,6 +119,126 @@ def convert_pdf_with_docling(input_path: Path) -> str:
         return out_md.read_text(encoding="utf-8", errors="replace")
 
 
+def convert_pptx_with_soffice_pdf_docling(input_path: Path) -> str:
+    if which("soffice") is None:
+        raise RuntimeError(
+            "soffice not found (install with: brew install libreoffice)"
+        )
+    if which("docling") is None:
+        raise RuntimeError("docling not found (install with: pipx install docling)")
+
+    with tempfile.TemporaryDirectory(prefix="colibri-soffice-") as tmp:
+        out_dir = Path(tmp)
+        p = run_cmd(
+            [
+                "soffice",
+                "--headless",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(out_dir),
+                str(input_path),
+            ],
+            timeout_secs=1800,
+        )
+        if p.returncode != 0:
+            raise RuntimeError(f"soffice failed: {p.stderr.strip()}")
+
+        # LibreOffice typically writes <stem>.pdf into outdir, but be robust.
+        stem = input_path.stem
+        candidates = sorted(out_dir.glob(f"{stem}*.pdf"))
+        if not candidates:
+            candidates = sorted(out_dir.glob("*.pdf"))
+        if not candidates:
+            raise RuntimeError("soffice did not produce a PDF output")
+        pdf_path = candidates[0]
+        return convert_pdf_with_docling(pdf_path)
+
+
+def convert_pptx_with_python_pptx(input_path: Path) -> str:
+    try:
+        from pptx import Presentation  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(
+            "python-pptx not available (install with: pipx inject <venv> python-pptx or pip install python-pptx)"
+        ) from e
+
+    prs = Presentation(str(input_path))
+    out: list[str] = []
+    out.append(f"# {input_path.stem}")
+    out.append("")
+
+    for idx, slide in enumerate(prs.slides, start=1):
+        title = ""
+        if hasattr(slide, "shapes") and slide.shapes.title is not None:
+            try:
+                title = slide.shapes.title.text.strip()
+            except Exception:
+                title = ""
+        out.append(f"## Slide {idx}" + (f": {title}" if title else ""))
+        out.append("")
+
+        # Collect text from all shapes (best-effort).
+        lines: list[str] = []
+        for shape in slide.shapes:
+            if not hasattr(shape, "has_text_frame") or not shape.has_text_frame:
+                continue
+            try:
+                text = shape.text_frame.text.strip()
+            except Exception:
+                continue
+            if text:
+                lines.append(text)
+
+        if lines:
+            for t in lines:
+                out.append(f"- {t}")
+            out.append("")
+
+        # Speaker notes (best-effort).
+        try:
+            notes = slide.notes_slide.notes_text_frame.text.strip()
+        except Exception:
+            notes = ""
+        if notes:
+            out.append("### Notes")
+            out.append("")
+            out.append(notes)
+            out.append("")
+
+    return "\n".join(out).rstrip() + "\n"
+
+
+def convert_pptx_with_markitdown(input_path: Path) -> str:
+    try:
+        from markitdown import MarkItDown  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(
+            "markitdown not available (install with: pipx install markitdown)"
+        ) from e
+
+    md = MarkItDown()
+    result = md.convert(str(input_path))
+    text = getattr(result, "text_content", None)
+    if not isinstance(text, str) or not text.strip():
+        raise RuntimeError("markitdown produced empty output")
+    return text.rstrip() + "\n"
+
+
+def convert_pptx(input_path: Path, backend: str) -> str:
+    match backend:
+        case "soffice_pdf_docling":
+            return convert_pptx_with_soffice_pdf_docling(input_path)
+        case "pandoc":
+            return convert_with_pandoc(input_path, "pptx")
+        case "python_pptx":
+            return convert_pptx_with_python_pptx(input_path)
+        case "markitdown":
+            return convert_pptx_with_markitdown(input_path)
+        case other:
+            raise RuntimeError(f"Unsupported pptx_backend: {other}")
+
+
 @dataclass(frozen=True)
 class PlantUmlSummary:
     entities: list[str]
@@ -288,6 +408,7 @@ def main() -> int:
     include_extensions = cfg.get("include_extensions") or SUPPORTED_DEFAULT_EXTS
     exclude_globs = cfg.get("exclude_globs") or []
     plantuml_summaries = cfg.get("plantuml_summaries", True)
+    pptx_backend = cfg.get("pptx_backend", "soffice_pdf_docling")
     mode = cfg.get("mode", "snapshot")
     doc_type_by_extension = cfg.get("doc_type_by_extension") or {}
 
@@ -330,7 +451,7 @@ def main() -> int:
             elif ext == ".docx":
                 markdown = convert_with_pandoc(file_path, "docx")
             elif ext == ".pptx":
-                markdown = convert_with_pandoc(file_path, "pptx")
+                markdown = convert_pptx(file_path, pptx_backend)
             else:
                 continue
         except Exception as e:
@@ -363,4 +484,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
