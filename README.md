@@ -35,7 +35,7 @@ CoLibri uses Ollama for local embeddings:
 ```bash
 brew install ollama
 ollama serve
-ollama pull nomic-embed-text
+ollama pull bge-m3
 ```
 
 ## Commands

@@ -45,7 +45,7 @@ check-ollama:
 
 # Pull required Ollama models
 pull-models:
-	ollama pull nomic-embed-text
+	ollama pull bge-m3
 
 # Show help
 help:
