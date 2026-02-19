@@ -1,17 +1,33 @@
 //! `colibri doctor` — health check command.
 
+use std::path::PathBuf;
+use std::process::Command;
+
 use serde::Serialize;
 
 use crate::config::{self, load_config, SCHEMA_VERSION};
 use crate::embedding::check_ollama;
 use crate::index_meta::read_index_meta;
 use crate::mcp;
+use crate::plugin_host::load_plugin_manifest;
 
 #[derive(Debug, Serialize)]
 struct DoctorSourceStatus {
     name: String,
     path: String,
     status: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorPluginJobStatus {
+    id: String,
+    enabled: bool,
+    manifest: String,
+    plugin_id: Option<String>,
+    runtime: Option<String>,
+    entrypoint: Option<String>,
+    status: String,
+    issues: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -38,6 +54,7 @@ struct DoctorReport {
     serving_total_profiles: Option<usize>,
     serving_issues: Vec<String>,
     sources: Vec<DoctorSourceStatus>,
+    plugin_jobs: Vec<DoctorPluginJobStatus>,
 }
 
 impl DoctorReport {
@@ -65,8 +82,30 @@ impl DoctorReport {
             serving_total_profiles: None,
             serving_issues: Vec::new(),
             sources: Vec::new(),
+            plugin_jobs: Vec::new(),
         }
     }
+}
+
+fn resolve_entrypoint(manifest_path: &PathBuf, entrypoint: &str) -> PathBuf {
+    let manifest_dir = manifest_path
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let candidate = PathBuf::from(entrypoint);
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        manifest_dir.join(candidate)
+    }
+}
+
+fn tool_on_path(tool: &str) -> bool {
+    Command::new("which")
+        .arg(tool)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
@@ -133,7 +172,194 @@ pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
                 eprintln!("  LanceDB dir: {}", config.lancedb_dir.display());
             }
 
-            // 1b. Migrations
+            // 1b. Plugins
+            if !json {
+                eprint!("\nPlugins ... ");
+            }
+            if config.plugin_jobs.is_empty() {
+                if !json {
+                    eprintln!("OK (no plugin jobs configured)");
+                }
+            } else {
+                if !json {
+                    eprintln!("OK ({})", config.plugin_jobs.len());
+                }
+                for job in &config.plugin_jobs {
+                    let mut issues: Vec<String> = Vec::new();
+                    let mut status = "ok".to_string();
+
+                    if !job.manifest.exists() {
+                        status = "missing_manifest".into();
+                        issues.push("manifest file not found".into());
+                        if strict && job.enabled {
+                            strict_violation = true;
+                        }
+                        report.plugin_jobs.push(DoctorPluginJobStatus {
+                            id: job.id.clone(),
+                            enabled: job.enabled,
+                            manifest: job.manifest.display().to_string(),
+                            plugin_id: None,
+                            runtime: None,
+                            entrypoint: None,
+                            status,
+                            issues,
+                        });
+                        continue;
+                    }
+
+                    let manifest = match load_plugin_manifest(&job.manifest) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            status = "invalid_manifest".into();
+                            issues.push(e.to_string());
+                            if strict && job.enabled {
+                                strict_violation = true;
+                            }
+                            report.plugin_jobs.push(DoctorPluginJobStatus {
+                                id: job.id.clone(),
+                                enabled: job.enabled,
+                                manifest: job.manifest.display().to_string(),
+                                plugin_id: None,
+                                runtime: None,
+                                entrypoint: None,
+                                status,
+                                issues,
+                            });
+                            continue;
+                        }
+                    };
+
+                    let entrypoint_path = resolve_entrypoint(&job.manifest, &manifest.entrypoint);
+                    if !entrypoint_path.exists() {
+                        status = "warn".into();
+                        issues.push(format!(
+                            "entrypoint not found: {}",
+                            entrypoint_path.display()
+                        ));
+                    }
+
+                    match manifest.runtime.as_str() {
+                        "python" => {
+                            if !tool_on_path("python3") {
+                                status = "warn".into();
+                                issues.push("python3 not found on PATH".into());
+                            }
+                        }
+                        "external" | "rust" => {
+                            if entrypoint_path.exists() {
+                                if let Ok(meta) = std::fs::metadata(&entrypoint_path) {
+                                    #[cfg(unix)]
+                                    {
+                                        use std::os::unix::fs::PermissionsExt;
+                                        if meta.permissions().mode() & 0o111 == 0 {
+                                            status = "warn".into();
+                                            issues.push(format!(
+                                                "entrypoint is not executable: {}",
+                                                entrypoint_path.display()
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        "wasm" => {
+                            status = "warn".into();
+                            issues.push(
+                                "wasm runtime declared, but no wasm runner is implemented".into(),
+                            );
+                        }
+                        other => {
+                            status = "warn".into();
+                            issues.push(format!("unsupported runtime: {other}"));
+                        }
+                    }
+
+                    // Known tool dependencies (best-effort; manifests do not declare them yet).
+                    match manifest.plugin_id.as_str() {
+                        "filesystem_documents" => {
+                            if !tool_on_path("pandoc") {
+                                status = "warn".into();
+                                issues
+                                    .push("pandoc not found on PATH (brew install pandoc)".into());
+                            }
+                            if !tool_on_path("docling") {
+                                status = "warn".into();
+                                issues.push(
+                                    "docling not found on PATH (pipx install docling)".into(),
+                                );
+                            }
+                            if !tool_on_path("soffice") {
+                                status = "warn".into();
+                                issues.push(
+                                    "soffice not found on PATH (install LibreOffice; used by default PPTX backend)"
+                                        .into(),
+                                );
+                            }
+                        }
+                        "zephyr_scale" => {
+                            let zephyr_cmd = job
+                                .config
+                                .get("zephyr_export_cmd")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("zephyr-export");
+                            let token_env = job
+                                .config
+                                .get("token_env")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("ZEPHYR_API_TOKEN");
+
+                            let cmd_path = PathBuf::from(zephyr_cmd);
+                            let cmd_ok = if cmd_path.is_absolute() {
+                                cmd_path.exists()
+                            } else {
+                                tool_on_path(zephyr_cmd)
+                            };
+                            if !cmd_ok {
+                                status = "warn".into();
+                                issues.push(format!(
+                                    "zephyr-export not found (set config.zephyr_export_cmd). Missing: {zephyr_cmd}"
+                                ));
+                            }
+                            if std::env::var(token_env).ok().is_none() {
+                                status = "warn".into();
+                                issues.push(format!(
+                                    "Zephyr token env var not set: {token_env} (plugin will fail when run)"
+                                ));
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    if !json {
+                        let label = if job.enabled { "enabled" } else { "disabled" };
+                        if issues.is_empty() {
+                            eprintln!("  - {} ({}) [{}] OK", job.id, manifest.plugin_id, label);
+                        } else {
+                            eprintln!(
+                                "  - {} ({}) [{}] {}: {}",
+                                job.id,
+                                manifest.plugin_id,
+                                label,
+                                status.to_uppercase(),
+                                issues.join("; ")
+                            );
+                        }
+                    }
+
+                    report.plugin_jobs.push(DoctorPluginJobStatus {
+                        id: job.id.clone(),
+                        enabled: job.enabled,
+                        manifest: job.manifest.display().to_string(),
+                        plugin_id: Some(manifest.plugin_id),
+                        runtime: Some(manifest.runtime),
+                        entrypoint: Some(manifest.entrypoint),
+                        status,
+                        issues,
+                    });
+                }
+            }
+
+            // 1c. Migrations
             if !json {
                 eprint!("\nMigrations ... ");
             }
