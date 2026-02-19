@@ -82,9 +82,9 @@ pub async fn run(
     }
 
     if include_envelopes {
-        eprintln!("\nEnvelope IDs:");
+        eprintln!("\nEnvelopes (JSONL on stdout):");
         for env in &report.envelopes {
-            eprintln!("  - {}", env.document.doc_id);
+            println!("{}", serde_json::to_string(env)?);
         }
     } else {
         eprintln!("\nUse --include-envelopes to print envelope payloads.");

@@ -8,12 +8,23 @@ Supported extensions:
 
 Quality-first conversion backends (uses locally-installed tools):
 - PDF: `docling` (CLI)
-- EPUB/DOCX/PPTX: `pandoc` (CLI)
+- EPUB/DOCX: `pandoc` (CLI)
+- PPTX (configurable via `pptx_backend`):
+  - `soffice_pdf_docling` (default): `soffice` → PDF → `docling`
+  - `pandoc`: `pandoc` directly
+  - `python_pptx`: `python-pptx` (text-only, fast, no layout)
+  - `markitdown`: `markitdown` (quality varies by deck)
 
 Optional enrichment:
 - Extracts a small text summary from fenced `plantuml` blocks to improve semantic retrieval.
 
 ## Run
+
+Bootstrap the local venv (needed for optional Python backends `python_pptx` and `markitdown`):
+
+```bash
+plugins/examples/filesystem_documents/bootstrap.sh
+```
 
 ```bash
 colibri plugins run \
@@ -41,6 +52,9 @@ Install the converters if missing:
 
 ```bash
 brew install pandoc
-pipx install docling  # or: python3 -m pip install --user docling
-```
+brew install poppler
+brew install --cask libreoffice   # provides `soffice` used by the default PPTX backend
 
+# docling CLI (must be on PATH, install method up to you)
+pipx install docling
+```

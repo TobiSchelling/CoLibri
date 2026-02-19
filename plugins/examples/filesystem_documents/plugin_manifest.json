@@ -2,8 +2,8 @@
   "schema_version": 1,
   "plugin_id": "filesystem_documents",
   "version": "0.1.0",
-  "runtime": "python",
-  "entrypoint": "plugin.py",
+  "runtime": "external",
+  "entrypoint": "run.sh",
   "capabilities": {
     "snapshot": true,
     "incremental": true,
