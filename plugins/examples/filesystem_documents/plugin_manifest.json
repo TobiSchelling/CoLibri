@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "plugin_id": "filesystem_documents",
+  "version": "0.1.0",
+  "runtime": "python",
+  "entrypoint": "plugin.py",
+  "capabilities": {
+    "snapshot": true,
+    "incremental": true,
+    "webhook": false
+  },
+  "auth": [
+    "none"
+  ],
+  "config_schema": {
+    "type": "object",
+    "required": [
+      "root_path"
+    ],
+    "properties": {
+      "root_path": {
+        "type": "string"
+      },
+      "classification": {
+        "type": "string",
+        "enum": [
+          "restricted",
+          "confidential",
+          "internal",
+          "public"
+        ],
+        "default": "internal"
+      },
+      "include_extensions": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          ".md",
+          ".markdown",
+          ".pdf",
+          ".epub",
+          ".docx",
+          ".pptx"
+        ]
+      },
+      "exclude_globs": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "**/.git/**",
+          "**/node_modules/**",
+          "**/target/**"
+        ]
+      },
+      "plantuml_summaries": {
+        "type": "boolean",
+        "default": true
+      },
+      "mode": {
+        "type": "string",
+        "enum": [
+          "snapshot",
+          "incremental"
+        ],
+        "default": "snapshot"
+      },
+      "doc_type_by_extension": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        }
+      }
+    },
+    "additionalProperties": false
+  },
+  "cursor_strategy": "timestamp",
+  "retry_policy": {
+    "max_attempts": 1,
+    "backoff_ms": 0
+  }
+}
+
