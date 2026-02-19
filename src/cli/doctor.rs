@@ -108,6 +108,26 @@ fn tool_on_path(tool: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn tool_available(spec: &str) -> bool {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let path = PathBuf::from(trimmed);
+    if path.is_absolute() || trimmed.contains('/') {
+        return path.exists();
+    }
+    tool_on_path(trimmed)
+}
+
+fn config_string(config: &serde_json::Value, key: &str) -> Option<String> {
+    config
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
     if !json {
         eprintln!("CoLibri Doctor");
@@ -274,60 +294,64 @@ pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
                         }
                     }
 
-                    // Known tool dependencies (best-effort; manifests do not declare them yet).
-                    match manifest.plugin_id.as_str() {
-                        "filesystem_documents" => {
-                            if !tool_on_path("pandoc") {
-                                status = "warn".into();
-                                issues
-                                    .push("pandoc not found on PATH (brew install pandoc)".into());
-                            }
-                            if !tool_on_path("docling") {
-                                status = "warn".into();
-                                issues.push(
-                                    "docling not found on PATH (pipx install docling)".into(),
-                                );
-                            }
-                            if !tool_on_path("soffice") {
-                                status = "warn".into();
-                                issues.push(
-                                    "soffice not found on PATH (install LibreOffice; used by default PPTX backend)"
-                                        .into(),
-                                );
-                            }
-                        }
-                        "zephyr_scale" => {
-                            let zephyr_cmd = job
-                                .config
-                                .get("zephyr_export_cmd")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("zephyr-export");
-                            let token_env = job
-                                .config
-                                .get("token_env")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("ZEPHYR_API_TOKEN");
+                    if let Some(req) = &manifest.requirements {
+                        // Tools
+                        if let Some(tools) = &req.tools {
+                            for tool in tools {
+                                let optional = tool.optional.unwrap_or(false);
+                                let spec = if let Some(key) = tool.check_from_config.as_deref() {
+                                    config_string(&job.config, key).or_else(|| tool.default.clone())
+                                } else {
+                                    tool.check.clone()
+                                };
 
-                            let cmd_path = PathBuf::from(zephyr_cmd);
-                            let cmd_ok = if cmd_path.is_absolute() {
-                                cmd_path.exists()
-                            } else {
-                                tool_on_path(zephyr_cmd)
-                            };
-                            if !cmd_ok {
-                                status = "warn".into();
-                                issues.push(format!(
-                                    "zephyr-export not found (set config.zephyr_export_cmd). Missing: {zephyr_cmd}"
-                                ));
-                            }
-                            if std::env::var(token_env).ok().is_none() {
-                                status = "warn".into();
-                                issues.push(format!(
-                                    "Zephyr token env var not set: {token_env} (plugin will fail when run)"
-                                ));
+                                let Some(spec) = spec else {
+                                    continue;
+                                };
+                                if !tool_available(&spec) {
+                                    status = "warn".into();
+                                    let mut msg = format!("missing tool: {spec}");
+                                    if let Some(hint) = tool.install_hint.as_deref() {
+                                        msg.push_str(&format!(" ({hint})"));
+                                    } else if let Some(formula) = tool.brew.as_deref() {
+                                        msg.push_str(&format!(" (brew install {formula})"));
+                                    } else if let Some(cask) = tool.brew_cask.as_deref() {
+                                        msg.push_str(&format!(" (brew install --cask {cask})"));
+                                    } else if let Some(pkg) = tool.pipx.as_deref() {
+                                        msg.push_str(&format!(" (pipx install {pkg})"));
+                                    }
+                                    if optional {
+                                        msg = format!("optional {msg}");
+                                    }
+                                    issues.push(msg);
+                                }
                             }
                         }
-                        _ => {}
+
+                        // Env vars
+                        if let Some(env) = &req.env {
+                            for var in env {
+                                let required = var.required;
+                                let name = if let Some(key) = var.name_from_config.as_deref() {
+                                    config_string(&job.config, key).or_else(|| var.default.clone())
+                                } else {
+                                    var.name.clone()
+                                };
+                                let Some(name) = name else {
+                                    continue;
+                                };
+                                let present =
+                                    std::env::var(&name).ok().is_some_and(|v| !v.is_empty());
+                                if required && !present {
+                                    status = "warn".into();
+                                    let mut msg = format!("required env var not set: {name}");
+                                    if let Some(hint) = var.hint.as_deref() {
+                                        msg.push_str(&format!(" ({hint})"));
+                                    }
+                                    issues.push(msg);
+                                }
+                            }
+                        }
                     }
 
                     if !json {
