@@ -1,0 +1,13 @@
+[project]
+name = "colibri-plugin-sdk"
+version = "0.1.0"
+description = "CoLibri ingestion plugin SDK skeleton"
+requires-python = ">=3.10"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]

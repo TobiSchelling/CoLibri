@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://colibri.dev/schemas/document-envelope.v1.json",
+  "title": "CoLibri Document Envelope v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "source",
+    "document",
+    "metadata"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "plugin_id",
+        "connector_instance",
+        "external_id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "plugin_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "connector_instance": {
+          "type": "string",
+          "minLength": 1
+        },
+        "external_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "uri": {
+          "type": "string"
+        }
+      }
+    },
+    "document": {
+      "type": "object",
+      "required": [
+        "doc_id",
+        "title",
+        "markdown",
+        "content_hash",
+        "source_updated_at",
+        "deleted"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "doc_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string"
+        },
+        "markdown": {
+          "type": "string"
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "source_updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "deleted": {
+          "type": "boolean"
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "required": [
+        "doc_type",
+        "classification"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "doc_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "language": {
+          "type": "string"
+        },
+        "classification": {
+          "type": "string",
+          "enum": [
+            "restricted",
+            "confidential",
+            "internal",
+            "public"
+          ]
+        },
+        "acl_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "plugin_id": "filesystem_markdown",
+  "version": "0.1.0",
+  "runtime": "python",
+  "entrypoint": "plugin.py",
+  "capabilities": {
+    "snapshot": true,
+    "incremental": false,
+    "webhook": false
+  },
+  "auth": [
+    "none"
+  ],
+  "config_schema": {
+    "type": "object",
+    "required": [
+      "root_path"
+    ],
+    "properties": {
+      "root_path": {
+        "type": "string"
+      },
+      "classification": {
+        "type": "string",
+        "enum": [
+          "restricted",
+          "confidential",
+          "internal",
+          "public"
+        ],
+        "default": "internal"
+      }
+    },
+    "additionalProperties": false
+  },
+  "cursor_strategy": "none",
+  "retry_policy": {
+    "max_attempts": 1,
+    "backoff_ms": 0
+  }
+}

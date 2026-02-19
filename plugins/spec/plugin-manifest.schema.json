@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://colibri.dev/schemas/plugin-manifest.v1.json",
+  "title": "CoLibri Plugin Manifest v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "plugin_id",
+    "version",
+    "runtime",
+    "entrypoint",
+    "capabilities",
+    "auth",
+    "config_schema"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "plugin_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9._-]+$"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runtime": {
+      "type": "string",
+      "enum": [
+        "python",
+        "rust",
+        "wasm",
+        "external"
+      ]
+    },
+    "entrypoint": {
+      "type": "string",
+      "minLength": 1
+    },
+    "capabilities": {
+      "type": "object",
+      "required": [
+        "snapshot",
+        "incremental",
+        "webhook"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "snapshot": {
+          "type": "boolean"
+        },
+        "incremental": {
+          "type": "boolean"
+        },
+        "webhook": {
+          "type": "boolean"
+        }
+      }
+    },
+    "auth": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "none",
+          "oauth2",
+          "token",
+          "basic",
+          "service_account"
+        ]
+      },
+      "minItems": 1
+    },
+    "config_schema": {
+      "type": "object"
+    },
+    "cursor_strategy": {
+      "type": "string",
+      "enum": [
+        "none",
+        "timestamp",
+        "opaque_token",
+        "delta_api"
+      ]
+    },
+    "retry_policy": {
+      "type": "object",
+      "required": [
+        "max_attempts",
+        "backoff_ms"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "backoff_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}
