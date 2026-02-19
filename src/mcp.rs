@@ -3,17 +3,14 @@
 //! Implements the Model Context Protocol for Claude integration.
 //! Supports `search_library` and `list_books` tools.
 
-use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
 use serde::Serialize;
 use serde_json::{json, Value};
 use tracing::{debug, info};
 
-use crate::config::{AppConfig, SCHEMA_VERSION};
+use crate::config::AppConfig;
 use crate::error::ColibriError;
-use crate::index_meta::read_index_meta;
-use crate::metadata_store::MetadataStore;
 use crate::query::SearchEngine;
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,69 +115,15 @@ pub async fn run_server(config: &AppConfig) -> Result<(), ColibriError> {
 }
 
 pub fn startup_report(config: &AppConfig) -> Result<StartupReport, ColibriError> {
-    let generation_status = load_generation_status(config)?;
-    let mut profile_ids: Vec<String> = config.embedding_profiles.keys().cloned().collect();
-    profile_ids.sort();
-
-    let mut profiles = Vec::new();
-
-    for profile_id in profile_ids {
-        let profile = config.embedding_profile(&profile_id)?;
-        let mut profile_issues = Vec::new();
-
-        if !generation_status.is_empty() {
-            match generation_status.get(&profile_id).map(String::as_str) {
-                Some("ready") => {}
-                Some(status) => profile_issues.push(format!(
-                    "lifecycle status for generation '{}' is '{}'",
-                    config.active_generation, status
-                )),
-                None => profile_issues.push(format!(
-                    "missing generation metadata row for '{}'",
-                    config.active_generation
-                )),
-            }
-        }
-
-        let lancedb_dir = config.lancedb_dir_for_profile(&profile_id);
-        let meta = read_index_meta(&lancedb_dir)?;
-        if meta.is_empty() {
-            profile_issues.push(format!(
-                "index metadata missing at {}",
-                lancedb_dir.display()
-            ));
-        } else {
-            let stored_version = meta
-                .get("schema_version")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
-            if stored_version != SCHEMA_VERSION {
-                profile_issues.push(format!(
-                    "schema outdated (index v{}, expected v{})",
-                    stored_version, SCHEMA_VERSION
-                ));
-            }
-
-            let model = meta
-                .get("embedding_model")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if model.is_empty() {
-                profile_issues.push("embedding_model missing in index metadata".into());
-            } else if model != profile.model {
-                profile_issues.push(format!(
-                    "embedding model mismatch (index='{}', config='{}')",
-                    model, profile.model
-                ));
-            }
-        }
-
-        profiles.push(StartupProfileCheck {
-            profile_id,
-            queryable: profile_issues.is_empty(),
-            issues: profile_issues,
-        });
-    }
+    let checks = crate::serve_ready::profile_checks(config)?;
+    let profiles = checks
+        .iter()
+        .map(|c| StartupProfileCheck {
+            profile_id: c.profile_id.clone(),
+            queryable: c.queryable,
+            issues: c.issues.clone(),
+        })
+        .collect::<Vec<_>>();
 
     let queryable_profiles = profiles.iter().filter(|p| p.queryable).count();
     let mut issues = Vec::new();
@@ -197,21 +140,6 @@ pub fn startup_report(config: &AppConfig) -> Result<StartupReport, ColibriError>
         issues,
         profiles,
     })
-}
-
-fn load_generation_status(config: &AppConfig) -> Result<HashMap<String, String>, ColibriError> {
-    if !config.metadata_db_path.exists() {
-        return Ok(HashMap::new());
-    }
-    let store = MetadataStore::open(&config.metadata_db_path)?;
-    let rows = store.list_generation_entries()?;
-    let mut out = HashMap::new();
-    for row in rows {
-        if row.generation_id == config.active_generation {
-            out.insert(row.embedding_profile_id, row.status);
-        }
-    }
-    Ok(out)
 }
 
 fn handle_initialize(id: Option<Value>) -> Value {

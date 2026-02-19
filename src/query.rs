@@ -13,11 +13,9 @@ use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use serde::Serialize;
 use tracing::warn;
 
-use crate::config::{AppConfig, SCHEMA_VERSION};
+use crate::config::AppConfig;
 use crate::embedding::embed_texts;
 use crate::error::ColibriError;
-use crate::index_meta::read_index_meta;
-use crate::metadata_store::MetadataStore;
 
 /// A single search result.
 #[derive(Debug, Clone, Serialize)]
@@ -63,33 +61,21 @@ impl SearchEngine {
     /// Create a new search engine, verifying schema version.
     pub async fn new(config: &AppConfig) -> Result<Self, ColibriError> {
         let mut backends = Vec::new();
-        let generation_status = load_generation_status(config)?;
-        let mut profile_ids: Vec<String> = config.embedding_profiles.keys().cloned().collect();
-        profile_ids.sort();
+        let checks = crate::serve_ready::profile_checks(config)?;
 
-        for profile_id in profile_ids {
+        for check in checks {
+            if !check.queryable {
+                warn!(
+                    "Skipping profile '{}' for active generation (not serve-ready): {}",
+                    check.profile_id,
+                    check.issues.join("; ")
+                );
+                continue;
+            }
+
+            let profile_id = check.profile_id;
             let profile = config.embedding_profile(&profile_id)?;
-            if !profile_enabled_for_active_generation(&profile_id, &generation_status) {
-                continue;
-            }
             let lancedb_dir = config.lancedb_dir_for_profile(&profile_id);
-            let meta = read_index_meta(&lancedb_dir)?;
-
-            if meta.is_empty() {
-                continue;
-            }
-
-            let stored_version = meta
-                .get("schema_version")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
-            if stored_version != SCHEMA_VERSION {
-                return Err(ColibriError::Query(format!(
-                    "Index schema outdated for profile '{profile_id}' (v{stored_version}, need v{SCHEMA_VERSION}). \
-                     Run `colibri index --force` to rebuild."
-                )));
-            }
-            validate_embedding_model_alignment(config, &profile_id, &meta, &profile.model)?;
 
             let db = match lancedb::connect(lancedb_dir.to_string_lossy().as_ref())
                 .execute()
@@ -120,7 +106,7 @@ impl SearchEngine {
 
         if backends.is_empty() {
             return Err(ColibriError::Query(
-                "No indexed embedding profiles found. Run `colibri index` first.".into(),
+                "No searchable embedding profile is currently available. Run `colibri doctor` and rebuild/activate a ready generation.".into(),
             ));
         }
 
@@ -422,77 +408,6 @@ impl SearchEngine {
         Ok(topics)
     }
 }
-
-fn load_generation_status(config: &AppConfig) -> Result<HashMap<String, String>, ColibriError> {
-    if !config.metadata_db_path.exists() {
-        return Ok(HashMap::new());
-    }
-    let store = MetadataStore::open(&config.metadata_db_path)?;
-    let rows = store.list_generation_entries()?;
-    let mut out = HashMap::new();
-    for row in rows {
-        if row.generation_id == config.active_generation {
-            out.insert(row.embedding_profile_id, row.status);
-        }
-    }
-    Ok(out)
-}
-
-fn profile_enabled_for_active_generation(
-    profile_id: &str,
-    generation_status: &HashMap<String, String>,
-) -> bool {
-    if generation_status.is_empty() {
-        return true;
-    }
-    match generation_status.get(profile_id) {
-        Some(status) if status == "ready" => true,
-        Some(status) => {
-            warn!(
-                "Skipping profile '{}' for active generation (status={})",
-                profile_id, status
-            );
-            false
-        }
-        None => {
-            warn!(
-                "Skipping profile '{}' for active generation (no generation metadata row)",
-                profile_id
-            );
-            false
-        }
-    }
-}
-
-fn validate_embedding_model_alignment(
-    config: &AppConfig,
-    profile_id: &str,
-    meta: &serde_json::Map<String, serde_json::Value>,
-    expected_model: &str,
-) -> Result<(), ColibriError> {
-    let Some(index_model) = meta.get("embedding_model").and_then(|v| v.as_str()) else {
-        return Err(ColibriError::Query(format!(
-            "Index metadata missing embedding_model for profile '{}' in generation '{}'. \
-             Rebuild with `colibri index --generation {} --force`.",
-            profile_id, config.active_generation, config.active_generation
-        )));
-    };
-
-    if index_model != expected_model {
-        return Err(ColibriError::Query(format!(
-            "Embedding model mismatch for profile '{}' in generation '{}': index='{}', config='{}'. \
-             Rebuild with `colibri index --generation {} --force`.",
-            profile_id,
-            config.active_generation,
-            index_model,
-            expected_model,
-            config.active_generation
-        )));
-    }
-
-    Ok(())
-}
-
 fn collect_search_results(
     batches: &[RecordBatch],
     similarity_threshold: f64,
@@ -548,27 +463,5 @@ fn collect_search_results(
                 score: (score * 10000.0).round() / 10000.0,
             });
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::profile_enabled_for_active_generation;
-    use std::collections::HashMap;
-
-    #[test]
-    fn profile_enabled_when_generation_state_empty() {
-        let m = HashMap::new();
-        assert!(profile_enabled_for_active_generation("local_default", &m));
-    }
-
-    #[test]
-    fn profile_enabled_only_when_ready() {
-        let mut m = HashMap::new();
-        m.insert("local_default".to_string(), "building".to_string());
-        assert!(!profile_enabled_for_active_generation("local_default", &m));
-
-        m.insert("local_default".to_string(), "ready".to_string());
-        assert!(profile_enabled_for_active_generation("local_default", &m));
     }
 }

@@ -5,8 +5,6 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use crate::config::{load_config, EmbeddingLocality, SCHEMA_VERSION};
-use crate::index_meta::read_index_meta;
-use crate::metadata_store::MetadataStore;
 
 #[derive(Debug, Clone, Serialize)]
 struct ProfileStatusRow {
@@ -43,19 +41,11 @@ struct ProfilesReport {
 
 pub async fn run(json: bool) -> anyhow::Result<()> {
     let config = load_config()?;
-    let generation_status = if config.metadata_db_path.exists() {
-        let store = MetadataStore::open(&config.metadata_db_path)?;
-        let rows = store.list_generation_entries()?;
-        let mut map = HashMap::new();
-        for row in rows {
-            if row.generation_id == config.active_generation {
-                map.insert(row.embedding_profile_id, row.status);
-            }
-        }
-        map
-    } else {
-        HashMap::new()
-    };
+    let checks = crate::serve_ready::profile_checks(&config)?;
+    let check_map: HashMap<String, crate::serve_ready::ServeReadyProfileCheck> = checks
+        .into_iter()
+        .map(|c| (c.profile_id.clone(), c))
+        .collect();
 
     let mut profile_ids: Vec<String> = config.embedding_profiles.keys().cloned().collect();
     profile_ids.sort();
@@ -63,18 +53,19 @@ pub async fn run(json: bool) -> anyhow::Result<()> {
     let mut profiles = Vec::new();
     for profile_id in profile_ids {
         let profile = config.embedding_profile(&profile_id)?;
-        let index_path = config.lancedb_dir_for_profile(&profile_id);
-        let meta = read_index_meta(&index_path)?;
+        let check = check_map.get(&profile_id);
+        let index_path = check.map(|c| c.index_path.clone()).unwrap_or_else(|| {
+            config
+                .lancedb_dir_for_profile(&profile_id)
+                .display()
+                .to_string()
+        });
 
-        let schema_version = meta
-            .get("schema_version")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
-        let file_count = meta.get("file_count").and_then(|v| v.as_u64());
-        let chunk_count = meta.get("chunk_count").and_then(|v| v.as_u64());
-        let index_model = meta.get("embedding_model").and_then(|v| v.as_str());
+        let schema_version = check.and_then(|c| c.schema_version);
+        let file_count = check.and_then(|c| c.file_count);
+        let chunk_count = check.and_then(|c| c.chunk_count);
 
-        let status = if meta.is_empty() {
+        let status = if schema_version.is_none() {
             "not_indexed".to_string()
         } else if schema_version != Some(SCHEMA_VERSION) {
             format!(
@@ -85,14 +76,8 @@ pub async fn run(json: bool) -> anyhow::Result<()> {
         } else {
             "ready".to_string()
         };
-        let lifecycle_status = generation_status.get(&profile_id).cloned();
-        let model_aligned = index_model.is_some_and(|m| m == profile.model);
-        let lifecycle_ready = if generation_status.is_empty() {
-            true
-        } else {
-            lifecycle_status.as_deref() == Some("ready")
-        };
-        let serve_ready = status == "ready" && model_aligned && lifecycle_ready;
+        let lifecycle_status = check.and_then(|c| c.lifecycle_status.clone());
+        let serve_ready = check.is_some_and(|c| c.queryable);
 
         profiles.push(ProfileStatusRow {
             id: profile.id.clone(),
@@ -103,7 +88,7 @@ pub async fn run(json: bool) -> anyhow::Result<()> {
             },
             model: profile.model.clone(),
             endpoint: profile.endpoint.clone(),
-            index_path: index_path.display().to_string(),
+            index_path,
             status,
             lifecycle_status,
             serve_ready,

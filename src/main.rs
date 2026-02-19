@@ -12,6 +12,7 @@ mod mcp;
 mod metadata_store;
 mod plugin_host;
 mod query;
+mod serve_ready;
 mod sources;
 
 use clap::Parser;
