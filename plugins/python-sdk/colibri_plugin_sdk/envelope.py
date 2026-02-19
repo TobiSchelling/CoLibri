@@ -29,6 +29,7 @@ def build_envelope(
     tags: list[str] | None = None,
     acl_tags: list[str] | None = None,
     deleted: bool = False,
+    source_updated_at: str | None = None,
 ) -> dict:
     source = {
         "plugin_id": plugin_id,
@@ -55,7 +56,7 @@ def build_envelope(
             "title": title,
             "markdown": markdown,
             "content_hash": sha256_content_hash(markdown),
-            "source_updated_at": utc_now_iso(),
+            "source_updated_at": source_updated_at or utc_now_iso(),
             "deleted": deleted,
         },
         "metadata": metadata,

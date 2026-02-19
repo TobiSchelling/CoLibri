@@ -66,6 +66,9 @@ def main() -> int:
                 continue
         rel = md_file.relative_to(root).as_posix()
         markdown = md_file.read_text(encoding="utf-8", errors="replace")
+        source_updated_at = datetime.fromtimestamp(
+            md_file.stat().st_mtime, tz=timezone.utc
+        ).isoformat()
         title = md_file.stem.replace("_", " ").replace("-", " ").strip() or rel
         envelope = build_envelope(
             plugin_id="filesystem_markdown",
@@ -77,6 +80,7 @@ def main() -> int:
             doc_type="note",
             classification=classification,
             uri=str(md_file),
+            source_updated_at=source_updated_at,
         )
         print(json.dumps(envelope, ensure_ascii=False))
 
