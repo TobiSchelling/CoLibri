@@ -9,9 +9,7 @@
     "version",
     "runtime",
     "entrypoint",
-    "capabilities",
-    "auth",
-    "config_schema"
+    "capabilities"
   ],
   "additionalProperties": false,
   "properties": {
@@ -57,50 +55,6 @@
         },
         "webhook": {
           "type": "boolean"
-        }
-      }
-    },
-    "auth": {
-      "type": "array",
-      "items": {
-        "type": "string",
-        "enum": [
-          "none",
-          "oauth2",
-          "token",
-          "basic",
-          "service_account"
-        ]
-      },
-      "minItems": 1
-    },
-    "config_schema": {
-      "type": "object"
-    },
-    "cursor_strategy": {
-      "type": "string",
-      "enum": [
-        "none",
-        "timestamp",
-        "opaque_token",
-        "delta_api"
-      ]
-    },
-    "retry_policy": {
-      "type": "object",
-      "required": [
-        "max_attempts",
-        "backoff_ms"
-      ],
-      "additionalProperties": false,
-      "properties": {
-        "max_attempts": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "backoff_ms": {
-          "type": "integer",
-          "minimum": 0
         }
       }
     },

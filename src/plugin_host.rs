@@ -19,6 +19,7 @@ use crate::error::ColibriError;
 static CONTENT_HASH_RE: OnceLock<Regex> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginCapabilities {
     snapshot: bool,
     incremental: bool,
@@ -26,12 +27,7 @@ pub struct PluginCapabilities {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct RetryPolicy {
-    max_attempts: u32,
-    backoff_ms: u64,
-}
-
-#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RequiredTool {
     pub check: Option<String>,
     pub check_from_config: Option<String>,
@@ -44,6 +40,7 @@ pub struct RequiredTool {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RequiredEnvVar {
     pub name: Option<String>,
     pub name_from_config: Option<String>,
@@ -53,12 +50,14 @@ pub struct RequiredEnvVar {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginRequirements {
     pub tools: Option<Vec<RequiredTool>>,
     pub env: Option<Vec<RequiredEnvVar>>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginManifest {
     pub schema_version: u32,
     pub plugin_id: String,
@@ -66,10 +65,6 @@ pub struct PluginManifest {
     pub runtime: String,
     pub entrypoint: String,
     pub capabilities: PluginCapabilities,
-    pub auth: Vec<String>,
-    pub config_schema: Value,
-    pub cursor_strategy: Option<String>,
-    pub retry_policy: Option<RetryPolicy>,
     pub requirements: Option<PluginRequirements>,
 }
 
@@ -162,345 +157,9 @@ fn env_usize(key: &str) -> Option<usize> {
 
 pub fn load_plugin_manifest(manifest_path: &Path) -> Result<PluginManifest, ColibriError> {
     let manifest_text = std::fs::read_to_string(manifest_path)?;
-    let manifest_value: Value = serde_json::from_str(&manifest_text)?;
-    validate_manifest_value(&manifest_value)?;
-    let manifest: PluginManifest = serde_json::from_value(manifest_value)?;
+    let manifest: PluginManifest = serde_json::from_str(&manifest_text)?;
     validate_manifest(&manifest)?;
     Ok(manifest)
-}
-
-fn validate_manifest_value(value: &Value) -> Result<(), ColibriError> {
-    let Some(obj) = value.as_object() else {
-        return Err(ColibriError::Config(
-            "plugin_manifest must be a JSON object".into(),
-        ));
-    };
-
-    let allowed = [
-        "schema_version",
-        "plugin_id",
-        "version",
-        "runtime",
-        "entrypoint",
-        "capabilities",
-        "auth",
-        "config_schema",
-        "cursor_strategy",
-        "retry_policy",
-        "requirements",
-    ];
-    for key in obj.keys() {
-        if !allowed.contains(&key.as_str()) {
-            return Err(ColibriError::Config(format!(
-                "plugin_manifest has unknown field '{key}'"
-            )));
-        }
-    }
-
-    let schema_version = obj
-        .get("schema_version")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| ColibriError::Config("plugin_manifest.schema_version missing".into()))?;
-    if schema_version != 1 {
-        return Err(ColibriError::Config(format!(
-            "Unsupported plugin manifest schema_version {schema_version} (expected 1)"
-        )));
-    }
-
-    let plugin_id = obj
-        .get("plugin_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ColibriError::Config("plugin_manifest.plugin_id missing".into()))?;
-    if !is_valid_plugin_id(plugin_id) {
-        return Err(ColibriError::Config(format!(
-            "Invalid plugin_id '{}'. Allowed characters: [a-z0-9._-]",
-            plugin_id
-        )));
-    }
-
-    let version = obj.get("version").and_then(Value::as_str).unwrap_or("");
-    if version.trim().is_empty() {
-        return Err(ColibriError::Config(
-            "plugin_manifest.version cannot be empty".into(),
-        ));
-    }
-
-    let runtime = obj.get("runtime").and_then(Value::as_str).unwrap_or("");
-    match runtime {
-        "python" | "rust" | "external" | "wasm" => {}
-        other => {
-            return Err(ColibriError::Config(format!(
-                "plugin_manifest.runtime invalid: '{other}'"
-            )))
-        }
-    }
-
-    let entrypoint = obj.get("entrypoint").and_then(Value::as_str).unwrap_or("");
-    if entrypoint.trim().is_empty() {
-        return Err(ColibriError::Config(
-            "plugin_manifest.entrypoint cannot be empty".into(),
-        ));
-    }
-
-    let Some(cap) = obj.get("capabilities").and_then(Value::as_object) else {
-        return Err(ColibriError::Config(
-            "plugin_manifest.capabilities must be an object".into(),
-        ));
-    };
-    let cap_allowed = ["snapshot", "incremental", "webhook"];
-    for key in cap.keys() {
-        if !cap_allowed.contains(&key.as_str()) {
-            return Err(ColibriError::Config(format!(
-                "plugin_manifest.capabilities has unknown field '{key}'"
-            )));
-        }
-    }
-    for key in cap_allowed {
-        if !cap.get(key).is_some_and(Value::is_boolean) {
-            return Err(ColibriError::Config(format!(
-                "plugin_manifest.capabilities.{key} must be boolean"
-            )));
-        }
-    }
-
-    let Some(auth) = obj.get("auth").and_then(Value::as_array) else {
-        return Err(ColibriError::Config(
-            "plugin_manifest.auth must be an array".into(),
-        ));
-    };
-    if auth.is_empty() {
-        return Err(ColibriError::Config(
-            "plugin_manifest.auth must be non-empty".into(),
-        ));
-    }
-    for mode in auth {
-        let Some(mode) = mode.as_str() else {
-            return Err(ColibriError::Config(
-                "plugin_manifest.auth entries must be strings".into(),
-            ));
-        };
-        match mode {
-            "none" | "oauth2" | "token" | "basic" | "service_account" => {}
-            other => {
-                return Err(ColibriError::Config(format!(
-                    "plugin_manifest.auth contains unsupported mode '{other}'"
-                )))
-            }
-        }
-    }
-
-    if !obj.get("config_schema").is_some_and(Value::is_object) {
-        return Err(ColibriError::Config(
-            "plugin_manifest.config_schema must be an object".into(),
-        ));
-    }
-
-    if let Some(strategy) = obj.get("cursor_strategy") {
-        if strategy.is_null() {
-            return Err(ColibriError::Config(
-                "plugin_manifest.cursor_strategy cannot be null".into(),
-            ));
-        }
-        let Some(strategy) = strategy.as_str() else {
-            return Err(ColibriError::Config(
-                "plugin_manifest.cursor_strategy must be a string".into(),
-            ));
-        };
-        match strategy {
-            "none" | "timestamp" | "opaque_token" | "delta_api" => {}
-            other => {
-                return Err(ColibriError::Config(format!(
-                    "plugin_manifest.cursor_strategy invalid: '{other}'"
-                )))
-            }
-        }
-    }
-
-    if let Some(policy) = obj.get("retry_policy") {
-        if policy.is_null() {
-            return Err(ColibriError::Config(
-                "plugin_manifest.retry_policy cannot be null".into(),
-            ));
-        }
-        let Some(policy) = policy.as_object() else {
-            return Err(ColibriError::Config(
-                "plugin_manifest.retry_policy must be an object".into(),
-            ));
-        };
-        for key in policy.keys() {
-            if key != "max_attempts" && key != "backoff_ms" {
-                return Err(ColibriError::Config(format!(
-                    "plugin_manifest.retry_policy has unknown field '{key}'"
-                )));
-            }
-        }
-        let max_attempts = policy
-            .get("max_attempts")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| {
-                ColibriError::Config("plugin_manifest.retry_policy.max_attempts missing".into())
-            })?;
-        if max_attempts < 1 {
-            return Err(ColibriError::Config(
-                "plugin_manifest.retry_policy.max_attempts must be >= 1".into(),
-            ));
-        }
-        if !policy
-            .get("backoff_ms")
-            .is_some_and(|v| v.as_u64().is_some())
-        {
-            return Err(ColibriError::Config(
-                "plugin_manifest.retry_policy.backoff_ms missing".into(),
-            ));
-        }
-    }
-
-    if let Some(req) = obj.get("requirements") {
-        if !req.is_object() {
-            return Err(ColibriError::Config(
-                "plugin_manifest.requirements must be an object".into(),
-            ));
-        }
-        let req_obj = req.as_object().expect("requirements is object");
-        let allowed_req = ["tools", "env"];
-        for key in req_obj.keys() {
-            if !allowed_req.contains(&key.as_str()) {
-                return Err(ColibriError::Config(format!(
-                    "plugin_manifest.requirements has unknown field '{key}'"
-                )));
-            }
-        }
-
-        if let Some(tools) = req_obj.get("tools") {
-            let Some(arr) = tools.as_array() else {
-                return Err(ColibriError::Config(
-                    "plugin_manifest.requirements.tools must be an array".into(),
-                ));
-            };
-            for (idx, tool) in arr.iter().enumerate() {
-                let Some(obj) = tool.as_object() else {
-                    return Err(ColibriError::Config(format!(
-                        "plugin_manifest.requirements.tools[{idx}] must be an object"
-                    )));
-                };
-                let allowed_tool = [
-                    "check",
-                    "check_from_config",
-                    "default",
-                    "brew",
-                    "brew_cask",
-                    "pipx",
-                    "install_hint",
-                    "optional",
-                ];
-                for key in obj.keys() {
-                    if !allowed_tool.contains(&key.as_str()) {
-                        return Err(ColibriError::Config(format!(
-                            "plugin_manifest.requirements.tools[{idx}] has unknown field '{key}'"
-                        )));
-                    }
-                }
-                let check = obj
-                    .get("check")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim();
-                let check_from_config = obj
-                    .get("check_from_config")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim();
-                if check.is_empty() && check_from_config.is_empty() {
-                    return Err(ColibriError::Config(format!(
-                        "plugin_manifest.requirements.tools[{idx}] must set 'check' or 'check_from_config'"
-                    )));
-                }
-                for k in [
-                    "check",
-                    "check_from_config",
-                    "default",
-                    "brew",
-                    "brew_cask",
-                    "pipx",
-                ] {
-                    if let Some(v) = obj.get(k) {
-                        if !v.is_string() {
-                            return Err(ColibriError::Config(format!(
-                                "plugin_manifest.requirements.tools[{idx}].{k} must be a string"
-                            )));
-                        }
-                    }
-                }
-                for k in ["install_hint"] {
-                    if let Some(v) = obj.get(k) {
-                        if !v.is_string() {
-                            return Err(ColibriError::Config(format!(
-                                "plugin_manifest.requirements.tools[{idx}].{k} must be a string"
-                            )));
-                        }
-                    }
-                }
-                if let Some(v) = obj.get("optional") {
-                    if !v.is_boolean() {
-                        return Err(ColibriError::Config(format!(
-                            "plugin_manifest.requirements.tools[{idx}].optional must be boolean"
-                        )));
-                    }
-                }
-            }
-        }
-
-        if let Some(env) = req_obj.get("env") {
-            let Some(arr) = env.as_array() else {
-                return Err(ColibriError::Config(
-                    "plugin_manifest.requirements.env must be an array".into(),
-                ));
-            };
-            for (idx, item) in arr.iter().enumerate() {
-                let Some(obj) = item.as_object() else {
-                    return Err(ColibriError::Config(format!(
-                        "plugin_manifest.requirements.env[{idx}] must be an object"
-                    )));
-                };
-                let allowed_env = ["name", "name_from_config", "default", "required", "hint"];
-                for key in obj.keys() {
-                    if !allowed_env.contains(&key.as_str()) {
-                        return Err(ColibriError::Config(format!(
-                            "plugin_manifest.requirements.env[{idx}] has unknown field '{key}'"
-                        )));
-                    }
-                }
-                let required = obj.get("required");
-                if required.is_none() || !required.is_some_and(Value::is_boolean) {
-                    return Err(ColibriError::Config(format!(
-                        "plugin_manifest.requirements.env[{idx}].required must be boolean"
-                    )));
-                }
-                let name = obj.get("name").and_then(Value::as_str).unwrap_or("").trim();
-                let name_from_config = obj
-                    .get("name_from_config")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim();
-                if name.is_empty() && name_from_config.is_empty() {
-                    return Err(ColibriError::Config(format!(
-                        "plugin_manifest.requirements.env[{idx}] must set 'name' or 'name_from_config'"
-                    )));
-                }
-                for k in ["name", "name_from_config", "default", "hint"] {
-                    if let Some(v) = obj.get(k) {
-                        if !v.is_string() {
-                            return Err(ColibriError::Config(format!(
-                                "plugin_manifest.requirements.env[{idx}].{k} must be a string"
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
 }
 
 fn validate_document_envelope_value(
@@ -761,48 +420,6 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), ColibriError> {
         manifest.capabilities.incremental,
         manifest.capabilities.webhook,
     );
-
-    if manifest.auth.is_empty() {
-        return Err(ColibriError::Config(
-            "Plugin manifest auth must have at least one entry".into(),
-        ));
-    }
-    for auth in &manifest.auth {
-        match auth.as_str() {
-            "none" | "oauth2" | "token" | "basic" | "service_account" => {}
-            other => {
-                return Err(ColibriError::Config(format!(
-                    "Unsupported auth mode '{other}' in plugin manifest"
-                )));
-            }
-        }
-    }
-
-    if !manifest.config_schema.is_object() {
-        return Err(ColibriError::Config(
-            "Plugin manifest config_schema must be a JSON object".into(),
-        ));
-    }
-
-    if let Some(strategy) = manifest.cursor_strategy.as_deref() {
-        match strategy {
-            "none" | "timestamp" | "opaque_token" | "delta_api" => {}
-            other => {
-                return Err(ColibriError::Config(format!(
-                    "Unsupported cursor_strategy '{other}' in plugin manifest"
-                )));
-            }
-        }
-    }
-
-    if let Some(retry) = &manifest.retry_policy {
-        if retry.max_attempts == 0 {
-            return Err(ColibriError::Config(
-                "Plugin manifest retry_policy.max_attempts must be >= 1".into(),
-            ));
-        }
-        let _ = retry.backoff_ms;
-    }
 
     Ok(())
 }
@@ -1197,7 +814,6 @@ fn validate_envelope(
 #[cfg(test)]
 mod manifest_tests {
     use super::{is_valid_plugin_id, validate_manifest, PluginCapabilities, PluginManifest};
-    use serde_json::json;
 
     fn base_manifest() -> PluginManifest {
         PluginManifest {
@@ -1211,10 +827,6 @@ mod manifest_tests {
                 incremental: true,
                 webhook: false,
             },
-            auth: vec!["none".into()],
-            config_schema: json!({"type":"object"}),
-            cursor_strategy: Some("none".into()),
-            retry_policy: None,
             requirements: None,
         }
     }
@@ -1229,27 +841,11 @@ mod manifest_tests {
     }
 
     #[test]
-    fn manifest_rejects_empty_auth() {
-        let mut m = base_manifest();
-        m.auth.clear();
-        let err = validate_manifest(&m).unwrap_err().to_string();
-        assert!(err.contains("auth"));
-    }
-
-    #[test]
     fn manifest_rejects_unsupported_runtime() {
         let mut m = base_manifest();
         m.runtime = "wasm".into();
         let err = validate_manifest(&m).unwrap_err().to_string();
         assert!(err.contains("not supported"));
-    }
-
-    #[test]
-    fn manifest_rejects_non_object_config_schema() {
-        let mut m = base_manifest();
-        m.config_schema = json!(true);
-        let err = validate_manifest(&m).unwrap_err().to_string();
-        assert!(err.contains("config_schema"));
     }
 }
 

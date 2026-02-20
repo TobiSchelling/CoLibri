@@ -8,35 +8,5 @@
     "snapshot": true,
     "incremental": true,
     "webhook": false
-  },
-  "auth": [
-    "none"
-  ],
-  "config_schema": {
-    "type": "object",
-    "required": [
-      "root_path"
-    ],
-    "properties": {
-      "root_path": {
-        "type": "string"
-      },
-      "classification": {
-        "type": "string",
-        "enum": [
-          "restricted",
-          "confidential",
-          "internal",
-          "public"
-        ],
-        "default": "internal"
-      }
-    },
-    "additionalProperties": false
-  },
-  "cursor_strategy": "timestamp",
-  "retry_policy": {
-    "max_attempts": 1,
-    "backoff_ms": 0
   }
 }
