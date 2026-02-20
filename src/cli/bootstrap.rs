@@ -18,7 +18,7 @@ const DEFAULT_OLLAMA_MODEL: &str = "bge-m3";
 pub struct BootstrapOptions {
     pub config_path: Option<PathBuf>,
     pub data_dir: Option<PathBuf>,
-    pub init_filesystem_markdown: Option<PathBuf>,
+    pub init_path: Option<PathBuf>,
     pub classification: String,
     pub non_interactive: bool,
     pub json: bool,
@@ -324,12 +324,13 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
     let mut config_path = opts.config_path.unwrap_or_else(default_config_path);
     let mut data_dir = opts.data_dir.unwrap_or_else(default_data_dir);
 
-    let init_job = if let Some(root) = opts.init_filesystem_markdown.clone() {
+    let init_job = if let Some(root) = opts.init_path.clone() {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("plugins/examples/filesystem_markdown/plugin_manifest.json");
+            .join("plugins/bundled/filesystem_documents/plugin_manifest.json");
         let job_config = serde_json::json!({
             "root_path": root.display().to_string(),
-            "classification": opts.classification
+            "classification": opts.classification,
+            "include_extensions": [".md", ".markdown"]
         });
         Some(YamlPluginJob {
             id: "docs".to_string(),
@@ -350,14 +351,14 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
         data_dir = PathBuf::from(prompt_line("Data directory (COLIBRI_HOME)", &dir_default)?);
 
         let init = if init_job.is_none() {
-            prompt_yes_no("Initialize a markdown folder plugin job?", true)?
+            prompt_yes_no("Initialize a folder sync job (markdown-only)?", true)?
         } else {
             true
         };
 
         let job = if init {
             let root_default = opts
-                .init_filesystem_markdown
+                .init_path
                 .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| {
@@ -367,20 +368,21 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
                         .display()
                         .to_string()
                 });
-            let root = prompt_line("Markdown root_path", &root_default)?;
+            let root = prompt_line("Root path", &root_default)?;
             let class = prompt_line(
                 "Classification (restricted/confidential/internal/public)",
                 "internal",
             )?;
             let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("plugins/examples/filesystem_markdown/plugin_manifest.json");
+                .join("plugins/bundled/filesystem_documents/plugin_manifest.json");
             Some(YamlPluginJob {
                 id: "docs".to_string(),
                 manifest: manifest.display().to_string(),
                 enabled: true,
                 config: serde_json::json!({
                     "root_path": root,
-                    "classification": class
+                    "classification": class,
+                    "include_extensions": [".md", ".markdown"]
                 }),
             })
         } else {

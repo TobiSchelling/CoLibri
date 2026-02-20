@@ -818,7 +818,7 @@ mod manifest_tests {
     fn base_manifest() -> PluginManifest {
         PluginManifest {
             schema_version: 1,
-            plugin_id: "filesystem_markdown".into(),
+            plugin_id: "filesystem_documents".into(),
             version: "0.1.0".into(),
             runtime: "python".into(),
             entrypoint: "plugin.py".into(),
@@ -855,7 +855,7 @@ mod tests {
     use tokio::io::{AsyncWriteExt, BufReader};
 
     fn envelope_line() -> String {
-        r##"{"schema_version":1,"source":{"plugin_id":"filesystem_markdown","connector_instance":"x","external_id":"y"},"document":{"doc_id":"d1","title":"t","markdown":"# x","content_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source_updated_at":"2026-02-18T00:00:00Z","deleted":false},"metadata":{"doc_type":"note","classification":"internal"}}"##.to_string()
+        r##"{"schema_version":1,"source":{"plugin_id":"filesystem_documents","connector_instance":"x","external_id":"y"},"document":{"doc_id":"d1","title":"t","markdown":"# x","content_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source_updated_at":"2026-02-18T00:00:00Z","deleted":false},"metadata":{"doc_type":"note","classification":"internal"}}"##.to_string()
     }
 
     #[test]
@@ -866,7 +866,7 @@ mod tests {
             r#"{"type":"cursor","cursor":{"last_scan_at":"2026-02-18T00:00:00Z"}}"#
         );
         let (envelopes, cursor) =
-            parse_plugin_stdout(&stdout, "filesystem_markdown").expect("parse should succeed");
+            parse_plugin_stdout(&stdout, "filesystem_documents").expect("parse should succeed");
         assert_eq!(envelopes.len(), 1);
         assert!(cursor.is_some());
     }
@@ -874,7 +874,7 @@ mod tests {
     #[test]
     fn parse_stdout_rejects_cursor_without_payload() {
         let stdout = r#"{"type":"cursor"}"#;
-        let err = parse_plugin_stdout(stdout, "filesystem_markdown")
+        let err = parse_plugin_stdout(stdout, "filesystem_documents")
             .err()
             .expect("expected parse error");
         assert!(
@@ -901,7 +901,7 @@ mod tests {
             max_stdout_line_bytes: 1024 * 1024,
             max_stderr_bytes: 1024,
         };
-        let out = read_plugin_stdout(BufReader::new(rx), "filesystem_markdown".into(), limits)
+        let out = read_plugin_stdout(BufReader::new(rx), "filesystem_documents".into(), limits)
             .await
             .unwrap();
         assert_eq!(out.envelopes.len(), 1);
@@ -912,7 +912,7 @@ mod tests {
     async fn streaming_parser_rejects_schema_invalid_envelope() {
         let (mut tx, rx) = tokio::io::duplex(64 * 1024);
         // `uri` cannot be null per schema (if present).
-        tx.write_all(br##"{"schema_version":1,"source":{"plugin_id":"filesystem_markdown","connector_instance":"x","external_id":"y","uri":null},"document":{"doc_id":"d1","title":"t","markdown":"# x","content_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source_updated_at":"2026-02-18T00:00:00Z","deleted":false},"metadata":{"doc_type":"note","classification":"internal"}}"##)
+        tx.write_all(br##"{"schema_version":1,"source":{"plugin_id":"filesystem_documents","connector_instance":"x","external_id":"y","uri":null},"document":{"doc_id":"d1","title":"t","markdown":"# x","content_hash":"sha256:0000000000000000000000000000000000000000000000000000000000000000","source_updated_at":"2026-02-18T00:00:00Z","deleted":false},"metadata":{"doc_type":"note","classification":"internal"}}"##)
             .await
             .unwrap();
         tx.write_all(b"\n").await.unwrap();
@@ -925,7 +925,7 @@ mod tests {
             max_stdout_line_bytes: 1024 * 1024,
             max_stderr_bytes: 1024,
         };
-        let err = read_plugin_stdout(BufReader::new(rx), "filesystem_markdown".into(), limits)
+        let err = read_plugin_stdout(BufReader::new(rx), "filesystem_documents".into(), limits)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("uri"));

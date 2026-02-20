@@ -273,7 +273,7 @@ Deliverables:
 - Plugin manifest spec and loader.
 - JSONL stdio protocol host<->plugin.
 - Python SDK + example plugins:
-  - `filesystem_markdown`
+  - `filesystem_documents` (markdown + office/pdf/epub)
   - one SaaS connector (recommend Confluence or Jira)
 
 Acceptance:
@@ -325,7 +325,7 @@ Priority 3:
 - Create `plugins/` workspace:
   - `plugins/spec/` (manifest + envelope JSON schemas)
   - `plugins/python-sdk/`
-  - `plugins/examples/filesystem_markdown/`
+  - `plugins/bundled/filesystem_documents/`
 
 Priority 4:
 - Add CLI commands:
@@ -358,5 +358,5 @@ Start implementation only after these are confirmed:
 - Finalized data classification taxonomy (`restricted/confidential/internal/public`).
 - Approved embedding profiles (`local_secure`, `cloud_fast`) and default models.
 - Agreed benchmark KPIs for tooling bake-off (quality, p95 latency, ops complexity, portability).
-- Chosen initial source connectors for v1 (`filesystem_markdown` + one SaaS connector).
+- Chosen initial source connectors for v1 (`filesystem_documents` + one SaaS connector).
 - Ownership assigned for Phase 0 and Phase 1.5 deliverables.

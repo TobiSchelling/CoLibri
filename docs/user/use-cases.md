@@ -10,12 +10,13 @@ Config:
 plugins:
   jobs:
     - id: arch_repo
-      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/examples/filesystem_markdown/plugin_manifest.json
+      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/bundled/filesystem_documents/plugin_manifest.json
       enabled: true
       config:
         root_path: ~/repos/architecture-docs
         classification: internal
         mode: incremental
+        include_extensions: [".md", ".markdown"]
 ```
 
 Daily workflow:
@@ -35,7 +36,7 @@ Config:
 plugins:
   jobs:
     - id: library
-      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/examples/filesystem_documents/plugin_manifest.json
+      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/bundled/filesystem_documents/plugin_manifest.json
       enabled: true
       config:
         root_path: ~/Library/Books
@@ -59,7 +60,7 @@ Config:
 plugins:
   jobs:
     - id: drop_zone
-      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/examples/filesystem_documents/plugin_manifest.json
+      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/bundled/filesystem_documents/plugin_manifest.json
       enabled: true
       config:
         root_path: ~/Documents/drop-zone
@@ -78,7 +79,7 @@ Config:
 plugins:
   jobs:
     - id: zephyr_ctslab
-      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/examples/zephyr_scale/plugin_manifest.json
+      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/bundled/zephyr_scale/plugin_manifest.json
       enabled: true
       config:
         project_key: CTSLAB

@@ -23,12 +23,12 @@ Optional enrichment:
 Bootstrap the local venv (needed for optional Python backends `python_pptx` and `markitdown`):
 
 ```bash
-plugins/examples/filesystem_documents/bootstrap.sh
+plugins/bundled/filesystem_documents/bootstrap.sh
 ```
 
 ```bash
 colibri plugins run \
-  --manifest plugins/examples/filesystem_documents/plugin_manifest.json \
+  --manifest plugins/bundled/filesystem_documents/plugin_manifest.json \
   --config-json '{"root_path":"/path/to/folder","classification":"internal"}'
 ```
 
@@ -36,7 +36,7 @@ colibri plugins run \
 
 ```bash
 colibri plugins ingest \
-  --manifest plugins/examples/filesystem_documents/plugin_manifest.json \
+  --manifest plugins/bundled/filesystem_documents/plugin_manifest.json \
   --config-json '{"root_path":"/path/to/folder","classification":"internal"}'
 ```
 

@@ -51,14 +51,15 @@ Example:
 plugins:
   jobs:
     - id: fs_repo
-      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/examples/filesystem_markdown/plugin_manifest.json
+      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/bundled/filesystem_documents/plugin_manifest.json
       enabled: true
       config:
         root_path: ~/repos/architecture-docs
         classification: internal
+        include_extensions: [".md", ".markdown"]
 
     - id: books
-      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/examples/filesystem_documents/plugin_manifest.json
+      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/bundled/filesystem_documents/plugin_manifest.json
       enabled: true
       config:
         root_path: ~/Library/Books

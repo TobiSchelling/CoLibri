@@ -29,9 +29,9 @@ pub enum Commands {
         #[arg(long)]
         data_dir: Option<PathBuf>,
 
-        /// Initialize a filesystem_markdown plugin job with this root_path
-        #[arg(long)]
-        init_filesystem_markdown: Option<PathBuf>,
+        /// Initialize a filesystem_documents job scanning this path
+        #[arg(long = "init-path", alias = "init-filesystem-markdown")]
+        init_path: Option<PathBuf>,
 
         /// Classification for the initialized job (default: internal)
         #[arg(long, default_value = "internal")]

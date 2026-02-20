@@ -17,7 +17,7 @@ markdown representation (which already contains rich YAML frontmatter metadata).
 export ZEPHYR_API_TOKEN="…"
 
 colibri plugins run \
-  --manifest plugins/examples/zephyr_scale/plugin_manifest.json \
+  --manifest plugins/bundled/zephyr_scale/plugin_manifest.json \
   --config-json '{"project_key":"CTSLAB","classification":"internal"}'
 ```
 
@@ -27,7 +27,7 @@ colibri plugins run \
 export ZEPHYR_API_TOKEN="…"
 
 colibri plugins ingest \
-  --manifest plugins/examples/zephyr_scale/plugin_manifest.json \
+  --manifest plugins/bundled/zephyr_scale/plugin_manifest.json \
   --config-json '{"project_key":"CTSLAB","classification":"internal"}'
 ```
 

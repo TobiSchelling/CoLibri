@@ -256,13 +256,13 @@ mod tests {
         DocumentEnvelope {
             schema_version: 1,
             source: EnvelopeSource {
-                plugin_id: "filesystem_markdown".into(),
+                plugin_id: "filesystem_documents".into(),
                 connector_instance: "/tmp/My Folder".into(),
                 external_id: "docs/readme.md".into(),
                 uri: None,
             },
             document: EnvelopeDocument {
-                doc_id: "filesystem_markdown:docs/readme.md".into(),
+                doc_id: "filesystem_documents:docs/readme.md".into(),
                 title: "Readme".into(),
                 markdown: "# Hi".into(),
                 content_hash:
@@ -290,7 +290,7 @@ mod tests {
     fn canonical_path_is_stable_and_scoped() {
         let path = canonical_rel_path(&sample_envelope());
         let path_str = path.to_string_lossy();
-        assert!(path_str.starts_with("internal/filesystem_markdown/"));
+        assert!(path_str.starts_with("internal/filesystem_documents/"));
         assert!(path_str.ends_with(".md"));
     }
 }

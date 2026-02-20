@@ -1022,7 +1022,7 @@ mod tests {
 
         let row = DocumentUpsert {
             doc_id: "doc_1".into(),
-            plugin_id: "filesystem_markdown".into(),
+            plugin_id: "filesystem_documents".into(),
             connector_instance: "local".into(),
             external_id: "docs/a.md".into(),
             title: "Doc A".into(),
@@ -1032,7 +1032,7 @@ mod tests {
             deleted: false,
             classification: "internal".into(),
             doc_type: "note".into(),
-            markdown_path: "internal/filesystem_markdown/local/doc-a.md".into(),
+            markdown_path: "internal/filesystem_documents/local/doc-a.md".into(),
             uri: None,
             tags_json: "[]".into(),
             acl_tags_json: "[]".into(),
@@ -1049,7 +1049,7 @@ mod tests {
         assert!(!found.deleted);
         assert_eq!(
             found.markdown_path,
-            "internal/filesystem_markdown/local/doc-a.md"
+            "internal/filesystem_documents/local/doc-a.md"
         );
 
         store
@@ -1060,7 +1060,7 @@ mod tests {
                 "indexed",
                 Some(7),
                 Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-                Some("internal/filesystem_markdown/local/doc-a.md"),
+                Some("internal/filesystem_documents/local/doc-a.md"),
             )
             .expect("upsert indexed state");
         store
@@ -1071,7 +1071,7 @@ mod tests {
                 "deleted",
                 None,
                 None,
-                Some("internal/filesystem_markdown/local/doc-a.md"),
+                Some("internal/filesystem_documents/local/doc-a.md"),
             )
             .expect("upsert deleted state");
 
@@ -1087,7 +1087,7 @@ mod tests {
         assert!(rows[0]["chunk_count"].is_null());
         assert_eq!(
             rows[0]["indexed_markdown_path"],
-            json!("internal/filesystem_markdown/local/doc-a.md")
+            json!("internal/filesystem_documents/local/doc-a.md")
         );
 
         let _ = std::fs::remove_file(db_path);

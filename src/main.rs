@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
         cli::Commands::Bootstrap {
             config_path,
             data_dir,
-            init_filesystem_markdown,
+            init_path,
             classification,
             non_interactive,
             json,
@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
             cli::bootstrap::run(cli::bootstrap::BootstrapOptions {
                 config_path,
                 data_dir,
-                init_filesystem_markdown,
+                init_path,
                 classification,
                 non_interactive,
                 json,

@@ -38,11 +38,12 @@ Start with a single plugin job (recommended path):
 plugins:
   jobs:
     - id: my_docs
-      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/examples/filesystem_markdown/plugin_manifest.json
+      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/bundled/filesystem_documents/plugin_manifest.json
       enabled: true
       config:
         root_path: ~/Documents/knowledge
         classification: internal
+        include_extensions: [".md", ".markdown"]
 ```
 
 ## 3) Ingest + index + search

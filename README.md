@@ -121,11 +121,12 @@ routing:
 plugins:
   jobs:
     - id: fs_docs
-      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/examples/filesystem_markdown/plugin_manifest.json
+      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/bundled/filesystem_documents/plugin_manifest.json
       enabled: true
       config:
         root_path: ~/Documents/knowledge
         classification: internal
+        include_extensions: [".md", ".markdown"]
 ```
 
 `colibri search` and `colibri serve` federate results across all indexed embedding profiles, so clients use one interface regardless of local/cloud profile routing.
