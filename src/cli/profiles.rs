@@ -15,7 +15,6 @@ struct ProfileStatusRow {
     endpoint: String,
     index_path: String,
     status: String,
-    lifecycle_status: Option<String>,
     serve_ready: bool,
     schema_version: Option<u32>,
     file_count: Option<u64>,
@@ -68,7 +67,6 @@ pub async fn run(json: bool) -> anyhow::Result<()> {
         } else {
             "ready".to_string()
         };
-        let lifecycle_status = check.and_then(|c| c.lifecycle_status.clone());
         let serve_ready = check.is_some_and(|c| c.queryable);
 
         profiles.push(ProfileStatusRow {
@@ -82,7 +80,6 @@ pub async fn run(json: bool) -> anyhow::Result<()> {
             endpoint: profile.endpoint.clone(),
             index_path,
             status,
-            lifecycle_status,
             serve_ready,
             schema_version,
             file_count,
@@ -115,16 +112,12 @@ pub async fn run(json: bool) -> anyhow::Result<()> {
     eprintln!("\nEmbedding Profiles:");
     for profile in &report.profiles {
         eprintln!(
-            "  - {} [{}] provider={} model={} status={} lifecycle={} serve_ready={}",
+            "  - {} [{}] provider={} model={} status={} serve_ready={}",
             profile.id,
             profile.locality,
             profile.provider,
             profile.model,
             profile.status,
-            profile
-                .lifecycle_status
-                .clone()
-                .unwrap_or_else(|| "-".into()),
             profile.serve_ready
         );
         eprintln!("    endpoint: {}", profile.endpoint);

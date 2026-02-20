@@ -122,25 +122,14 @@ impl CliProgress {
     }
 }
 
-pub async fn run(generation: Option<String>, activate: bool, force: bool) -> anyhow::Result<()> {
-    let base_config = load_config()?;
-    if activate && generation.is_none() {
-        anyhow::bail!("`--activate` requires `--generation <id>`");
-    }
-    let config = if let Some(generation) = generation {
-        base_config.with_generation(&generation)?
-    } else {
-        base_config.clone()
-    };
+pub async fn run(force: bool) -> anyhow::Result<()> {
+    let config = load_config()?;
 
     // Print header
     eprintln!("Indexing: canonical store");
     eprintln!("Generation: {}", config.active_generation);
     if force {
         eprintln!("Mode: full rebuild");
-    }
-    if activate {
-        eprintln!("Will activate generation on success");
     }
 
     let progress = CliProgress::new();
@@ -149,11 +138,6 @@ pub async fn run(generation: Option<String>, activate: bool, force: bool) -> any
         progress.handle(e);
     })
     .await?;
-
-    if activate {
-        base_config.set_active_generation(&config.active_generation)?;
-        eprintln!("Activated generation: {}", config.active_generation);
-    }
 
     // Print summary
     let mut summary_parts = vec![format!(

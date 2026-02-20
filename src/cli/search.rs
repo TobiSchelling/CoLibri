@@ -8,14 +8,19 @@ pub async fn run(
     limit: usize,
     json: bool,
     doc_type: Option<String>,
-    folder: Option<String>,
+    classification: Option<String>,
 ) -> anyhow::Result<()> {
     let config = load_config()?;
     let engine = SearchEngine::new(&config).await?;
 
     let limit = limit.min(10);
     let results = engine
-        .search(&query, folder.as_deref(), doc_type.as_deref(), limit)
+        .search(
+            &query,
+            classification.as_deref(),
+            doc_type.as_deref(),
+            limit,
+        )
         .await?;
 
     if json {
@@ -34,8 +39,8 @@ pub async fn run(
         for (i, result) in results.iter().enumerate() {
             println!("{}. {} (score: {:.4})", i + 1, result.title, result.score);
             println!("   File: {}", result.file);
-            if !result.folder.is_empty() {
-                println!("   Folder: {}", result.folder);
+            if !result.classification.is_empty() {
+                println!("   Classification: {}", result.classification);
             }
             // Show truncated text preview
             let preview: String = result.text.chars().take(200).collect();

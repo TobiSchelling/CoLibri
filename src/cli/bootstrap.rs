@@ -9,7 +9,7 @@ use serde::Serialize;
 use crate::config::{load_config, AppConfig};
 use crate::embedding::check_ollama;
 use crate::error::ColibriError;
-use crate::plugin_host::{load_plugin_manifest, PluginManifest, RequiredEnvVar, RequiredTool};
+use crate::plugin_host::{load_plugin_manifest, RequiredEnvVar, RequiredTool};
 
 const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434";
 const DEFAULT_OLLAMA_MODEL: &str = "bge-m3";
@@ -21,7 +21,6 @@ pub struct BootstrapOptions {
     pub init_filesystem_markdown: Option<PathBuf>,
     pub classification: String,
     pub non_interactive: bool,
-    pub install: bool,
     pub json: bool,
 }
 
@@ -321,75 +320,6 @@ fn write_config(
     Ok(wrote)
 }
 
-fn install_brew(formula: &str) -> anyhow::Result<()> {
-    let status = Command::new("brew").arg("install").arg(formula).status()?;
-    if !status.success() {
-        anyhow::bail!("brew install {formula} failed");
-    }
-    Ok(())
-}
-
-fn install_brew_cask(cask: &str) -> anyhow::Result<()> {
-    let status = Command::new("brew")
-        .args(["install", "--cask"])
-        .arg(cask)
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("brew install --cask {cask} failed");
-    }
-    Ok(())
-}
-
-fn install_pipx(pkg: &str) -> anyhow::Result<()> {
-    let status = Command::new("pipx").arg("install").arg(pkg).status()?;
-    if !status.success() {
-        anyhow::bail!("pipx install {pkg} failed");
-    }
-    Ok(())
-}
-
-fn try_install_manifest_requirements(
-    manifests: &[(PathBuf, serde_json::Value)],
-) -> anyhow::Result<()> {
-    for (manifest_path, job_config) in manifests {
-        let manifest: PluginManifest = load_plugin_manifest(manifest_path)?;
-        let Some(req) = &manifest.requirements else {
-            continue;
-        };
-        let Some(tools) = &req.tools else {
-            continue;
-        };
-        for tool in tools {
-            let spec = resolve_required_tool_spec(tool, job_config).unwrap_or_default();
-            if spec.is_empty() || tool_available(&spec) {
-                continue;
-            }
-            if let Some(formula) = tool.brew.as_deref() {
-                if tool_on_path("brew") {
-                    install_brew(formula)?;
-                }
-            } else if let Some(cask) = tool.brew_cask.as_deref() {
-                if tool_on_path("brew") {
-                    install_brew_cask(cask)?;
-                }
-            } else if let Some(pkg) = tool.pipx.as_deref() {
-                if tool_on_path("pipx") {
-                    install_pipx(pkg)?;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn pull_ollama_model(model: &str) -> anyhow::Result<()> {
-    let status = Command::new("ollama").arg("pull").arg(model).status()?;
-    if !status.success() {
-        anyhow::bail!("ollama pull {model} failed");
-    }
-    Ok(())
-}
-
 pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
     let mut config_path = opts.config_path.unwrap_or_else(default_config_path);
     let mut data_dir = opts.data_dir.unwrap_or_else(default_data_dir);
@@ -509,11 +439,6 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
             suggested.insert(cmd.to_string());
         }
 
-        if opts.install {
-            // Best-effort installation of declared plugin tools.
-            let _ = try_install_manifest_requirements(&manifests);
-        }
-
         if let Some(prev) = _prev {
             std::env::set_var("COLIBRI_CONFIG_PATH", prev);
         } else {
@@ -521,17 +446,6 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
         }
         (check.missing_tools, check.missing_env)
     };
-
-    if opts.install {
-        if !ollama_installed && tool_on_path("brew") {
-            let _ = install_brew("ollama");
-        }
-        if ollama_installed && ollama_reachable {
-            if let Some(false) = model_present {
-                let _ = pull_ollama_model(&model);
-            }
-        }
-    }
 
     let report = BootstrapReport {
         config_path: config_path.display().to_string(),
@@ -617,7 +531,7 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
 
     eprintln!("\nNext:");
     eprintln!("  colibri doctor");
-    eprintln!("  colibri plugins sync-all --index");
+    eprintln!("  colibri sync");
 
     Ok(())
 }

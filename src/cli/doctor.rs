@@ -35,7 +35,6 @@ struct DoctorReport {
     colibri_home: Option<String>,
     active_generation: Option<String>,
     migration_up_to_date: Option<bool>,
-    generation_count: Option<usize>,
     ollama_reachable: Option<bool>,
     ollama_error: Option<String>,
     index_status: Option<String>,
@@ -62,7 +61,6 @@ impl DoctorReport {
             colibri_home: None,
             active_generation: None,
             migration_up_to_date: None,
-            generation_count: None,
             ollama_reachable: None,
             ollama_error: None,
             index_status: None,
@@ -396,27 +394,6 @@ pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
                     }
                     if !json {
                         eprintln!("  Run `colibri migrate` to apply pending migrations.");
-                    }
-                }
-                Err(e) => {
-                    if !json {
-                        eprintln!("ERROR: {e}");
-                    }
-                }
-            }
-
-            // 1c. Generations
-            if !json {
-                eprint!("\nGenerations ... ");
-            }
-            match config.list_generations() {
-                Ok(gens) => {
-                    report.generation_count = Some(gens.len());
-                    if !json {
-                        eprintln!("OK ({})", gens.len());
-                    }
-                    if !json && !gens.is_empty() {
-                        eprintln!("  {}", gens.join(", "));
                     }
                 }
                 Err(e) => {

@@ -7,7 +7,6 @@ mod embedding;
 mod error;
 mod index_meta;
 mod indexer;
-mod manifest;
 mod mcp;
 mod metadata_store;
 mod plugin_host;
@@ -45,7 +44,6 @@ async fn main() -> anyhow::Result<()> {
             init_filesystem_markdown,
             classification,
             non_interactive,
-            install,
             json,
         } => {
             cli::bootstrap::run(cli::bootstrap::BootstrapOptions {
@@ -54,7 +52,6 @@ async fn main() -> anyhow::Result<()> {
                 init_filesystem_markdown,
                 classification,
                 non_interactive,
-                install,
                 json,
             })
             .await
@@ -91,8 +88,6 @@ async fn main() -> anyhow::Result<()> {
                 include_disabled,
                 fail_fast,
                 index,
-                generation,
-                activate,
                 index_force,
                 dry_run,
                 json,
@@ -102,8 +97,6 @@ async fn main() -> anyhow::Result<()> {
                     include_disabled,
                     fail_fast,
                     index,
-                    generation,
-                    activate,
                     index_force,
                     dry_run,
                     json,
@@ -131,27 +124,27 @@ async fn main() -> anyhow::Result<()> {
                 } => cli::plugins::state_reset(manifest, config_json, config_file, yes, json).await,
             },
         },
-        cli::Commands::Generations { command } => match command {
-            cli::GenerationCommands::Create {
-                generation,
-                activate,
-            } => cli::generations::create(generation, activate).await,
-            cli::GenerationCommands::List { json } => cli::generations::list(json).await,
-            cli::GenerationCommands::Activate {
-                generation,
-                allow_unready,
-            } => cli::generations::activate(generation, allow_unready).await,
-            cli::GenerationCommands::Delete {
-                generation,
-                confirm,
-                force,
-            } => cli::generations::delete(generation, confirm, force).await,
-        },
-        cli::Commands::Index {
-            generation,
-            activate,
+        cli::Commands::Index { force } => cli::index::run(force).await,
+        cli::Commands::Sync {
+            jobs,
+            include_disabled,
+            fail_fast,
+            no_index,
             force,
-        } => cli::index::run(generation, activate, force).await,
+            dry_run,
+            json,
+        } => {
+            cli::sync::run(
+                jobs,
+                include_disabled,
+                fail_fast,
+                no_index,
+                force,
+                dry_run,
+                json,
+            )
+            .await
+        }
         cli::Commands::Instructions { output } => cli::instructions::run(output).await,
         cli::Commands::Tour { topic } => cli::tour::run(topic).await,
         cli::Commands::Search {
@@ -159,8 +152,8 @@ async fn main() -> anyhow::Result<()> {
             limit,
             json,
             doc_type,
-            folder,
-        } => cli::search::run(query, limit, json, doc_type, folder).await,
+            classification,
+        } => cli::search::run(query, limit, json, doc_type, classification).await,
         cli::Commands::Serve { check, json } => cli::serve::run(check, json).await,
         cli::Commands::Import {
             input,

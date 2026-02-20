@@ -610,8 +610,6 @@ struct SyncAllReport {
 #[derive(Debug, Serialize)]
 struct SyncAllIndexReport {
     status: String,
-    generation: String,
-    activated: bool,
     force: bool,
     files_indexed: Option<usize>,
     files_skipped: Option<usize>,
@@ -776,8 +774,6 @@ pub struct SyncAllOptions {
     pub include_disabled: bool,
     pub fail_fast: bool,
     pub index: bool,
-    pub generation: Option<String>,
-    pub activate: bool,
     pub index_force: bool,
     pub dry_run: bool,
     pub json: bool,
@@ -786,9 +782,6 @@ pub struct SyncAllOptions {
 pub async fn sync_all(opts: SyncAllOptions) -> anyhow::Result<()> {
     if opts.dry_run && opts.index {
         anyhow::bail!("`--index` cannot be used with `--dry-run`");
-    }
-    if opts.activate && opts.generation.is_none() {
-        anyhow::bail!("`--activate` requires `--generation <id>`");
     }
 
     let app_config = if opts.dry_run {
@@ -890,16 +883,9 @@ pub async fn sync_all(opts: SyncAllOptions) -> anyhow::Result<()> {
 
     let mut index_failed = false;
     if opts.index {
-        let generation_label = opts
-            .generation
-            .clone()
-            .unwrap_or_else(|| app_config.active_generation.clone());
-
         if report.jobs_failed > 0 {
             report.index = Some(SyncAllIndexReport {
                 status: "skipped_due_job_failures".into(),
-                generation: generation_label,
-                activated: false,
                 force: opts.index_force,
                 files_indexed: None,
                 files_skipped: None,
@@ -909,51 +895,28 @@ pub async fn sync_all(opts: SyncAllOptions) -> anyhow::Result<()> {
                 error: None,
             });
         } else {
-            let index_config = if let Some(generation) = opts.generation.as_deref() {
-                app_config.with_generation(generation)?
-            } else {
-                app_config.clone()
-            };
-
-            match index_library(&index_config, opts.index_force, |_e| {}).await {
+            match index_library(&app_config, opts.index_force, |_e| {}).await {
                 Ok(index_result) => {
-                    let mut activated = false;
-                    let mut activation_error: Option<String> = None;
-                    if opts.activate {
-                        match app_config.set_active_generation(&index_config.active_generation) {
-                            Ok(_) => {
-                                activated = true;
-                            }
-                            Err(e) => {
-                                activation_error = Some(e.to_string());
-                            }
-                        }
-                    }
-
-                    let has_errors = index_result.errors > 0 || activation_error.is_some();
+                    let has_errors = index_result.errors > 0;
                     if has_errors {
                         index_failed = true;
                     }
 
                     report.index = Some(SyncAllIndexReport {
                         status: if has_errors { "error" } else { "ok" }.into(),
-                        generation: index_config.active_generation.clone(),
-                        activated,
                         force: opts.index_force,
                         files_indexed: Some(index_result.files_indexed),
                         files_skipped: Some(index_result.files_skipped),
                         files_deleted: Some(index_result.files_deleted),
                         total_chunks: Some(index_result.total_chunks),
                         errors: Some(index_result.errors),
-                        error: activation_error,
+                        error: None,
                     });
                 }
                 Err(e) => {
                     index_failed = true;
                     report.index = Some(SyncAllIndexReport {
                         status: "error".into(),
-                        generation: index_config.active_generation.clone(),
-                        activated: false,
                         force: opts.index_force,
                         files_indexed: None,
                         files_skipped: None,
@@ -983,10 +946,8 @@ pub async fn sync_all(opts: SyncAllOptions) -> anyhow::Result<()> {
         );
         if let Some(index) = &report.index {
             eprintln!(
-                "Index: status={} generation={} activated={} force={} indexed={} skipped={} removed={} chunks={} errors={}",
+                "Index: status={} force={} indexed={} skipped={} removed={} chunks={} errors={}",
                 index.status,
-                index.generation,
-                index.activated,
                 index.force,
                 index.files_indexed.unwrap_or(0),
                 index.files_skipped.unwrap_or(0),

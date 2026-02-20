@@ -2,7 +2,6 @@
 
 pub mod bootstrap;
 pub mod doctor;
-pub mod generations;
 pub mod import;
 pub mod index;
 pub mod instructions;
@@ -11,6 +10,7 @@ pub mod plugins;
 pub mod profiles;
 pub mod search;
 pub mod serve;
+pub mod sync;
 pub mod tour;
 
 use std::path::PathBuf;
@@ -40,10 +40,6 @@ pub enum Commands {
         /// Do not prompt; require flags for paths/init and only print actions
         #[arg(long)]
         non_interactive: bool,
-
-        /// Attempt to install missing tools (brew/pipx) and pull Ollama model
-        #[arg(long)]
-        install: bool,
 
         /// Output as JSON
         #[arg(long)]
@@ -80,27 +76,45 @@ pub enum Commands {
     },
 
     /// Run plugin commands
+    #[command(hide = true)]
     Plugins {
         #[command(subcommand)]
         command: PluginCommands,
     },
 
-    /// Manage index generations
-    Generations {
-        #[command(subcommand)]
-        command: GenerationCommands,
+    /// Sync configured sources into canonical store (and optionally index)
+    Sync {
+        /// Restrict to specific job id(s); may be repeated
+        #[arg(long = "job")]
+        jobs: Vec<String>,
+
+        /// Also run jobs marked as disabled in config
+        #[arg(long)]
+        include_disabled: bool,
+
+        /// Stop on first failed job
+        #[arg(long)]
+        fail_fast: bool,
+
+        /// Skip indexing step (default is to index after a successful sync)
+        #[arg(long)]
+        no_index: bool,
+
+        /// Force full rebuild for index step
+        #[arg(long)]
+        force: bool,
+
+        /// Validate and report writes without mutating canonical storage/state
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Index markdown corpus into LanceDB
     Index {
-        /// Target generation id (defaults to active generation)
-        #[arg(long)]
-        generation: Option<String>,
-
-        /// Activate target generation after successful indexing
-        #[arg(long)]
-        activate: bool,
-
         /// Force full re-index regardless of mode
         #[arg(long)]
         force: bool,
@@ -136,9 +150,9 @@ pub enum Commands {
         #[arg(long)]
         doc_type: Option<String>,
 
-        /// Filter by folder
+        /// Filter by classification
         #[arg(long)]
-        folder: Option<String>,
+        classification: Option<String>,
     },
 
     /// Start MCP stdio server
@@ -176,50 +190,6 @@ pub enum Commands {
         /// Index the canonical corpus after import
         #[arg(long)]
         reindex: bool,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum GenerationCommands {
-    /// Create a generation layout for all embedding profiles
-    Create {
-        /// Generation id (example: gen_2026_02_18_bge-m3_v1)
-        generation: String,
-
-        /// Activate generation after creation
-        #[arg(long)]
-        activate: bool,
-    },
-
-    /// List known generations and profile index status
-    List {
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Activate (or create) an index generation
-    Activate {
-        /// Generation id (example: gen_2026_02_18_bge-m3_v1)
-        generation: String,
-
-        /// Allow activating a generation even if no profile is serve-ready
-        #[arg(long)]
-        allow_unready: bool,
-    },
-
-    /// Delete a generation directory
-    Delete {
-        /// Generation id to delete
-        generation: String,
-
-        /// Required confirmation token; must exactly match generation id
-        #[arg(long)]
-        confirm: String,
-
-        /// Allow deleting currently active generation
-        #[arg(long)]
-        force: bool,
     },
 }
 
@@ -311,14 +281,6 @@ pub enum PluginCommands {
         /// Index canonical corpus after successful sync run
         #[arg(long)]
         index: bool,
-
-        /// Target generation id for optional index step
-        #[arg(long)]
-        generation: Option<String>,
-
-        /// Activate target generation after successful optional index step
-        #[arg(long)]
-        activate: bool,
 
         /// Force full rebuild for optional index step
         #[arg(long)]
