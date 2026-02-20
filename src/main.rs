@@ -10,6 +10,7 @@ mod indexer;
 mod mcp;
 mod metadata_store;
 mod plugin_host;
+mod plugin_requirements;
 mod query;
 mod serve_ready;
 

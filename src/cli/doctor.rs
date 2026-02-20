@@ -10,6 +10,7 @@ use crate::embedding::check_ollama;
 use crate::index_meta::read_index_meta;
 use crate::mcp;
 use crate::plugin_host::load_plugin_manifest;
+use crate::plugin_requirements::tool_checks_relevant_for_job;
 
 #[derive(Debug, Serialize)]
 struct DoctorPluginJobStatus {
@@ -276,6 +277,8 @@ pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
                     }
 
                     if let Some(req) = &manifest.requirements {
+                        let relevant_tool_checks =
+                            tool_checks_relevant_for_job(&manifest.plugin_id, &job.config);
                         // Tools
                         if let Some(tools) = &req.tools {
                             for tool in tools {
@@ -289,6 +292,17 @@ pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
                                 let Some(spec) = spec else {
                                     continue;
                                 };
+                                if let Some(filter) = &relevant_tool_checks {
+                                    if let Some(check) = tool.check.as_deref() {
+                                        if matches!(
+                                            check,
+                                            "pandoc" | "docling" | "soffice" | "pdftotext"
+                                        ) && !filter.contains(check)
+                                        {
+                                            continue;
+                                        }
+                                    }
+                                }
                                 if !tool_available(&spec) {
                                     status = "warn".into();
                                     let mut msg = format!("missing tool: {spec}");

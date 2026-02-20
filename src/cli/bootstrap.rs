@@ -232,9 +232,22 @@ fn gather_plugin_requirements(
 
     for (manifest_path, job_config) in jobs {
         let manifest = load_plugin_manifest(manifest_path)?;
+        let relevant_tool_checks = crate::plugin_requirements::tool_checks_relevant_for_job(
+            &manifest.plugin_id,
+            job_config,
+        );
         if let Some(req) = &manifest.requirements {
             if let Some(tools) = &req.tools {
                 for tool in tools {
+                    if let Some(filter) = &relevant_tool_checks {
+                        if let Some(check) = tool.check.as_deref() {
+                            if matches!(check, "pandoc" | "docling" | "soffice" | "pdftotext")
+                                && !filter.contains(check)
+                            {
+                                continue;
+                            }
+                        }
+                    }
                     let spec = resolve_required_tool_spec(tool, job_config);
                     let Some(spec) = spec else {
                         continue;
@@ -351,7 +364,10 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
         data_dir = PathBuf::from(prompt_line("Data directory (COLIBRI_HOME)", &dir_default)?);
 
         let init = if init_job.is_none() {
-            prompt_yes_no("Initialize a folder sync job (markdown-only)?", true)?
+            prompt_yes_no(
+                "Initialize a folder sync job (filesystem_documents; default: Markdown only)?",
+                true,
+            )?
         } else {
             true
         };
