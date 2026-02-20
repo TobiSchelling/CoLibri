@@ -5,8 +5,8 @@ This guide explains the smallest “happy path” to get from **raw documents** 
 ## Mental model (3 steps)
 
 1. **Ingest**: bring content in and convert it to canonical Markdown (usually via plugins).
-2. **Index**: chunk + embed canonical Markdown into an index generation.
-3. **Serve/Search**: query that active generation via CLI or MCP.
+2. **Index**: chunk + embed canonical Markdown into the vector index.
+3. **Serve/Search**: query the index via CLI or MCP.
 
 ## 1) Install prerequisites
 
@@ -50,16 +50,6 @@ plugins:
 Run incremental ingestion for all enabled plugin jobs, then index canonical store:
 
 ```bash
-colibri plugins sync-all --index --index-force
+colibri sync --force
 colibri search "what is this repo about?"
-```
-
-## Optional: generations (safe cutovers)
-
-Create and build a new generation without switching traffic:
-
-```bash
-colibri generations create gen_candidate
-colibri index --generation gen_candidate --force
-colibri generations activate gen_candidate
 ```

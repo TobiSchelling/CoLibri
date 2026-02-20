@@ -125,9 +125,7 @@ Rules:
 Each plugin ships a manifest with:
 - `plugin_id`, `version`, `runtime`, `entrypoint`
 - capabilities: `snapshot`, `incremental`, `webhook`
-- auth modes: oauth/token/basic/service-account
-- cursor strategy and retry policy
-- config schema for validation
+- optional `requirements` describing external tools/env vars needed by the plugin
 
 ## 3.3 Canonical Storage Model
 

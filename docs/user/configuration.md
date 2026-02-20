@@ -12,7 +12,7 @@ export COLIBRI_CONFIG_PATH=/path/to/config.yaml
 
 CoLibri indexes a **managed canonical markdown store** under `COLIBRI_HOME/canonical`.
 
-To bring content in, configure ingestion **plugin jobs** under `plugins.jobs` and run `colibri plugins sync-all`.
+To bring content in, configure ingestion **plugin jobs** under `plugins.jobs` and run `colibri sync`.
 
 ## Embeddings + routing
 
@@ -36,9 +36,9 @@ routing:
     public: local_secure
 ```
 
-## Plugins (recommended ingestion path)
+## Sync jobs (recommended ingestion path)
 
-Plugin jobs are configured under `plugins.jobs`.
+Sync jobs are configured under `plugins.jobs` (each job references a plugin manifest).
 
 Notes:
 - If `id` is omitted, CoLibri assigns `job_1`, `job_2`, ...
@@ -69,8 +69,8 @@ plugins:
 Inspect jobs:
 
 ```bash
-colibri plugins jobs
-colibri plugins jobs --validate-manifests
+colibri sync --dry-run --json
+colibri doctor --json
 ```
 
 ## Secrets

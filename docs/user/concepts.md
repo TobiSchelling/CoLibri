@@ -1,15 +1,15 @@
 # Concepts
 
-## Import vs ingest (plugins)
+## Import vs sync
 
 - **Import**: a convenience command for turning a *single file* into Markdown and ingesting it into the canonical store (one-off).
-- **Ingest (plugins)**: a repeatable sync process that produces **canonical Markdown** and tracks **incremental state** (cursor) per source.
+- **Sync**: a repeatable ingestion process (via configured jobs/plugins) that produces **canonical Markdown** and tracks **incremental state** (cursor) per source.
 
 ## Canonical store
 
 The canonical store is CoLibri’s managed, markdown-only representation of your corpus.
 
-- Written by `colibri plugins ingest|sync|sync-all`
+- Written by `colibri sync` (and `colibri import` for one-off files)
 - Read by `colibri index`
 - Designed for portability (`COLIBRI_HOME` can be copied/moved)
 
@@ -26,13 +26,10 @@ Your “corpus” is the set of canonical Markdown documents CoLibri considers i
 Safety rule:
 - `restricted` and `confidential` must route to **local** embedding profiles.
 
-## Generations
+## Generations (internal)
 
-A **generation** is a versioned index layout.
-
-- Build a new generation in parallel (shadow build)
-- Activate when ready (atomic switch)
-- Keep older generations for rollback
+CoLibri stores index data under a generation identifier internally.
+For normal usage you don’t need to create, activate, or manage generations.
 
 ## Serve
 

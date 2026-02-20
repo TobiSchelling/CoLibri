@@ -7,7 +7,7 @@
 
 ## Plugins fail with “manifest missing” or “invalid manifest”
 
-- Run `colibri plugins jobs --validate-manifests`.
+- Run `colibri sync --dry-run --json` to see which job fails and why.
 - Confirm `plugins.jobs[].manifest` paths (absolute or relative to your `config.yaml` directory).
 
 ## Converters missing (pandoc/docling/soffice)
@@ -17,6 +17,5 @@
 
 ## Nothing is queryable / serve refuses to start
 
-- Run `colibri profiles` and `colibri generations list`.
-- Ensure the active generation has at least one profile in a serve-ready lifecycle state.
-
+- Run `colibri profiles`.
+- If a profile shows a schema/model mismatch, run `colibri index --force` to rebuild the index.
