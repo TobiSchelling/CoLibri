@@ -5,17 +5,17 @@
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 
 use arrow_array::{Float32Array, RecordBatch, StringArray};
 use futures::TryStreamExt;
-use lancedb::query::{ExecutableQuery, QueryBase, Select};
+use lancedb::query::{ExecutableQuery, QueryBase};
 use serde::Serialize;
 use tracing::warn;
 
 use crate::config::AppConfig;
 use crate::embedding::embed_texts;
 use crate::error::ColibriError;
+use crate::metadata_store::MetadataStore;
 
 /// A single search result.
 #[derive(Debug, Clone, Serialize)]
@@ -25,7 +25,7 @@ pub struct SearchResult {
     pub title: String,
     #[serde(rename = "type")]
     pub doc_type: String,
-    pub folder: String,
+    pub classification: String,
     pub score: f64,
 }
 
@@ -48,6 +48,13 @@ pub struct TopicEntry {
 pub struct SearchEngine {
     backends: Vec<ProfileBackend>,
     config: AppConfig,
+}
+
+#[derive(Debug, Clone)]
+struct SearchHit {
+    doc_id: String,
+    text: String,
+    score: f64,
 }
 
 struct ProfileBackend {
@@ -106,7 +113,7 @@ impl SearchEngine {
 
         if backends.is_empty() {
             return Err(ColibriError::Query(
-                "No searchable embedding profile is currently available. Run `colibri doctor` and rebuild/activate a ready generation.".into(),
+                "No searchable embedding profile is currently available. Run `colibri doctor`, then `colibri index --force`.".into(),
             ));
         }
 
@@ -120,12 +127,18 @@ impl SearchEngine {
     pub async fn search(
         &self,
         query: &str,
-        folder: Option<&str>,
+        classification: Option<&str>,
         doc_type: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SearchResult>, ColibriError> {
-        let mut merged = Vec::new();
+        let mut merged: Vec<SearchHit> = Vec::new();
         let mut succeeded = 0usize;
+        let per_backend_limit = self
+            .config
+            .top_k
+            .saturating_mul(5)
+            .max(limit.saturating_mul(5))
+            .min(500);
 
         for backend in &self.backends {
             let query_vector = match embed_texts(
@@ -152,22 +165,11 @@ impl SearchEngine {
                 }
             };
 
-            let mut search = backend
+            let search = backend
                 .table
                 .vector_search(query_vector[0].clone())
                 .map_err(|e| ColibriError::Query(format!("Vector search failed: {e}")))?
-                .limit(self.config.top_k);
-
-            if let Some(folder) = folder {
-                let escaped = folder.replace('\'', "''");
-                search = search.only_if(format!(
-                    "folder = '{escaped}' OR source_file LIKE '{escaped}/%'"
-                ));
-            }
-            if let Some(dt) = doc_type {
-                let escaped = dt.replace('\'', "''");
-                search = search.only_if(format!("doc_type = '{escaped}'"));
-            }
+                .limit(per_backend_limit);
 
             let raw_results = match search.execute().await {
                 Ok(r) => r,
@@ -192,7 +194,7 @@ impl SearchEngine {
             };
 
             succeeded += 1;
-            collect_search_results(&batches, self.config.similarity_threshold, &mut merged);
+            collect_search_hits(&batches, self.config.similarity_threshold, &mut merged);
         }
 
         if succeeded == 0 {
@@ -203,9 +205,44 @@ impl SearchEngine {
 
         merged.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
 
+        let mut doc_ids_set = HashSet::new();
+        for hit in &merged {
+            doc_ids_set.insert(hit.doc_id.clone());
+        }
+        let doc_ids: Vec<String> = doc_ids_set.into_iter().collect();
+        let store = MetadataStore::open(&self.config.metadata_db_path)?;
+        let docs_by_id = store.get_documents_by_ids(&doc_ids)?;
+
         let mut deduped = Vec::new();
         let mut seen = HashSet::new();
-        for result in merged {
+        for hit in merged {
+            let Some(doc) = docs_by_id.get(&hit.doc_id) else {
+                continue;
+            };
+            if doc.deleted {
+                continue;
+            }
+
+            if let Some(dt) = doc_type {
+                if doc.doc_type != dt {
+                    continue;
+                }
+            }
+            if let Some(classification) = classification {
+                if doc.classification != classification {
+                    continue;
+                }
+            }
+
+            let result = SearchResult {
+                text: hit.text,
+                file: doc.markdown_path.clone(),
+                title: doc.title.clone(),
+                doc_type: doc.doc_type.clone(),
+                classification: doc.classification.clone(),
+                score: hit.score,
+            };
+
             let key = format!("{}:{}", result.file, result.text);
             if seen.insert(key) {
                 deduped.push(result);
@@ -238,73 +275,29 @@ impl SearchEngine {
 
     /// List all indexed books with metadata.
     pub async fn list_books(&self) -> Result<Vec<BookEntry>, ColibriError> {
-        let mut book_map: HashMap<String, (usize, String)> = HashMap::new();
-        let mut succeeded = 0usize;
+        let store = MetadataStore::open(&self.config.metadata_db_path)?;
+        let docs = store.list_documents()?;
+        let chunk_counts =
+            store.indexed_chunk_counts_for_generation(&self.config.active_generation)?;
 
-        for backend in &self.backends {
-            let results = match backend
-                .table
-                .query()
-                .only_if("doc_type = 'book'")
-                .select(Select::columns(&["title", "source_file"]))
-                .execute()
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!(
-                        "Skipping profile '{}' for list_books query error: {e}",
-                        backend.profile_id
-                    );
-                    continue;
-                }
-            };
-
-            let batches: Vec<RecordBatch> = match results.try_collect().await {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!(
-                        "Skipping profile '{}' while collecting list_books: {e}",
-                        backend.profile_id
-                    );
-                    continue;
-                }
-            };
-            succeeded += 1;
-
-            for batch in &batches {
-                let title_col = batch
-                    .column_by_name("title")
-                    .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-                let file_col = batch
-                    .column_by_name("source_file")
-                    .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-
-                for i in 0..batch.num_rows() {
-                    let title = title_col
-                        .map(|c| c.value(i).to_string())
-                        .unwrap_or_default();
-                    let file = file_col.map(|c| c.value(i).to_string()).unwrap_or_default();
-                    let entry = book_map.entry(title).or_insert((0, file));
-                    entry.0 += 1;
-                }
+        let mut books = Vec::new();
+        for doc in docs {
+            if doc.deleted || doc.doc_type != "book" {
+                continue;
             }
-        }
-
-        if succeeded == 0 {
-            return Err(ColibriError::Query(
-                "No searchable embedding profile is currently available.".into(),
-            ));
-        }
-
-        let mut books: Vec<BookEntry> = book_map
-            .into_iter()
-            .map(|(title, (chunks, file))| BookEntry {
-                title,
+            let profile_id = self
+                .config
+                .resolve_embedding_profile_id(&doc.classification);
+            let chunks = chunk_counts
+                .get(&(doc.doc_id.clone(), profile_id))
+                .copied()
+                .unwrap_or(0) as usize;
+            books.push(BookEntry {
+                title: doc.title,
                 chunks,
-                file,
-            })
-            .collect();
+                file: doc.markdown_path,
+            });
+        }
 
         books.sort_by(|a, b| a.title.cmp(&b.title));
         Ok(books)
@@ -313,86 +306,37 @@ impl SearchEngine {
     /// List all topics (tags) with document counts.
     pub async fn browse_topics(
         &self,
-        folder: Option<&str>,
+        classification: Option<&str>,
     ) -> Result<Vec<TopicEntry>, ColibriError> {
-        // Deduplicate by source_file, then count tags
-        let mut seen_files: HashSet<String> = HashSet::new();
+        let store = MetadataStore::open(&self.config.metadata_db_path)?;
+        let docs = store.list_documents()?;
         let mut tag_counter: HashMap<String, usize> = HashMap::new();
-        let mut succeeded = 0usize;
 
-        for backend in &self.backends {
-            let query = if let Some(folder) = folder {
-                let escaped = folder.replace('\'', "''");
-                backend
-                    .table
-                    .query()
-                    .only_if(format!("folder = '{escaped}'"))
-                    .select(Select::columns(&["source_file", "tags"]))
-                    .execute()
-                    .await
-            } else {
-                backend
-                    .table
-                    .query()
-                    .select(Select::columns(&["source_file", "tags"]))
-                    .execute()
-                    .await
-            };
-
-            let results = match query {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!(
-                        "Skipping profile '{}' for browse_topics query error: {e}",
-                        backend.profile_id
-                    );
+        for doc in docs {
+            if doc.deleted {
+                continue;
+            }
+            if let Some(classification) = classification {
+                if doc.classification != classification {
                     continue;
-                }
-            };
-
-            let batches: Vec<RecordBatch> = match results.try_collect().await {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!(
-                        "Skipping profile '{}' while collecting browse_topics: {e}",
-                        backend.profile_id
-                    );
-                    continue;
-                }
-            };
-            succeeded += 1;
-
-            for batch in &batches {
-                let file_col = batch
-                    .column_by_name("source_file")
-                    .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-                let tags_col = batch
-                    .column_by_name("tags")
-                    .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-
-                for i in 0..batch.num_rows() {
-                    let file = file_col.map(|c| c.value(i).to_string()).unwrap_or_default();
-                    if !seen_files.insert(file) {
-                        continue; // already counted this file
-                    }
-                    let tags_str = tags_col.map(|c| c.value(i).to_string()).unwrap_or_default();
-                    if tags_str.is_empty() {
-                        continue;
-                    }
-                    for tag in tags_str.split(',') {
-                        let tag = tag.trim();
-                        if !tag.is_empty() {
-                            *tag_counter.entry(tag.to_string()).or_default() += 1;
-                        }
-                    }
                 }
             }
-        }
 
-        if succeeded == 0 {
-            return Err(ColibriError::Query(
-                "No searchable embedding profile is currently available.".into(),
-            ));
+            let tags: Result<Vec<String>, _> = serde_json::from_str(&doc.tags_json);
+            let tags = match tags {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let mut seen = HashSet::new();
+            for tag in tags {
+                let tag = tag.trim().to_string();
+                if tag.is_empty() {
+                    continue;
+                }
+                if seen.insert(tag.clone()) {
+                    *tag_counter.entry(tag).or_default() += 1;
+                }
+            }
         }
 
         let mut topics: Vec<TopicEntry> = tag_counter
@@ -408,28 +352,20 @@ impl SearchEngine {
         Ok(topics)
     }
 }
-fn collect_search_results(
+
+fn collect_search_hits(
     batches: &[RecordBatch],
     similarity_threshold: f64,
-    out: &mut Vec<SearchResult>,
+    out: &mut Vec<SearchHit>,
 ) {
     for batch in batches {
         let num_rows = batch.num_rows();
 
+        let doc_id_col = batch
+            .column_by_name("doc_id")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
         let text_col = batch
             .column_by_name("text")
-            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-        let file_col = batch
-            .column_by_name("source_file")
-            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-        let title_col = batch
-            .column_by_name("title")
-            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-        let type_col = batch
-            .column_by_name("doc_type")
-            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
-        let folder_col = batch
-            .column_by_name("folder")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
         let dist_col = batch
             .column_by_name("_distance")
@@ -442,24 +378,10 @@ fn collect_search_results(
                 continue;
             }
 
-            let source_file = file_col.map(|c| c.value(i)).unwrap_or("");
-            let title = title_col.map(|c| c.value(i)).unwrap_or_else(|| {
-                Path::new(source_file)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-            });
-
-            out.push(SearchResult {
+            let doc_id = doc_id_col.map(|c| c.value(i)).unwrap_or("");
+            out.push(SearchHit {
+                doc_id: doc_id.to_string(),
                 text: text_col.map(|c| c.value(i).to_string()).unwrap_or_default(),
-                file: source_file.to_string(),
-                title: title.to_string(),
-                doc_type: type_col
-                    .map(|c| c.value(i).to_string())
-                    .unwrap_or_else(|| "note".to_string()),
-                folder: folder_col
-                    .map(|c| c.value(i).to_string())
-                    .unwrap_or_default(),
                 score: (score * 10000.0).round() / 10000.0,
             });
         }

@@ -217,13 +217,13 @@ fn handle_tools_list(id: Option<Value>) -> Value {
                 },
                 {
                     "name": "browse_topics",
-                    "description": "List all topics (tags) with document counts. Optionally filter by folder.",
+                    "description": "List all topics (tags) with document counts. Optionally filter by classification.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "folder": {
+                            "classification": {
                                 "type": "string",
-                                "description": "Optional folder to filter by (e.g. 'Books', 'Notes')."
+                                "description": "Optional classification to filter by (restricted/confidential/internal/public)."
                             }
                         }
                     }
@@ -296,8 +296,8 @@ async fn handle_tools_call(id: Option<Value>, request: &Value, engine: &SearchEn
             Err(e) => Err(format!("{e}")),
         },
         "browse_topics" => {
-            let folder = arguments.get("folder").and_then(|f| f.as_str());
-            match engine.browse_topics(folder).await {
+            let classification = arguments.get("classification").and_then(|f| f.as_str());
+            match engine.browse_topics(classification).await {
                 Ok(topics) => {
                     let output = json!({
                         "total_topics": topics.len(),
@@ -362,8 +362,6 @@ mod tests {
         AppConfig, EmbeddingLocality, EmbeddingProfile, DEFAULT_ACTIVE_GENERATION,
     };
     use crate::index_meta::write_index_meta;
-    use crate::metadata_store::MetadataStore;
-    use serde_json::json;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
@@ -455,17 +453,6 @@ mod tests {
         std::fs::create_dir_all(&cfg.lancedb_dir).expect("create lancedb dir");
         write_index_meta(&cfg.lancedb_dir, "bge-m3", &serde_json::Map::new())
             .expect("write index meta");
-
-        // Mark generation/profile as ready.
-        let store = MetadataStore::open(&cfg.metadata_db_path).expect("open store");
-        store
-            .upsert_generation_status(
-                &cfg.active_generation,
-                "local_default",
-                &json!({"pipeline_schema_version": 1}),
-                "ready",
-            )
-            .expect("upsert generation status");
 
         let report = startup_report(&cfg).expect("startup report");
         assert_eq!(report.queryable_profiles, 1);

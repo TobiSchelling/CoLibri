@@ -2,7 +2,7 @@
 //!
 //! Uses the system `sqlite3` binary to avoid adding new Rust crate dependencies.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -73,9 +73,8 @@ pub struct DocumentUpsert {
 #[derive(Debug, Clone)]
 pub struct DocumentRow {
     pub doc_id: String,
-    pub plugin_id: String,
-    pub connector_instance: String,
     pub title: String,
+    pub content_hash: String,
     pub doc_type: String,
     pub classification: String,
     pub markdown_path: String,
@@ -88,6 +87,8 @@ pub struct DocumentIndexStateRow {
     pub doc_id: String,
     pub embedding_profile_id: String,
     pub status: String,
+    pub indexed_content_hash: Option<String>,
+    pub indexed_markdown_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,21 +103,6 @@ pub struct SyncStateEntry {
     pub last_error: Option<String>,
     pub envelope_count_last_run: Option<u64>,
     pub updated_at: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct GenerationStateEntry {
-    pub generation_id: String,
-    pub embedding_profile_id: String,
-    pub status: String,
-    pub activated_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct DocumentIndexStateCounts {
-    pub indexed: u64,
-    pub error: u64,
-    pub deleted: u64,
 }
 
 pub struct MetadataStore {
@@ -220,6 +206,8 @@ CREATE TABLE IF NOT EXISTS document_index_state (
     embedding_profile_id TEXT NOT NULL,
     status TEXT NOT NULL,
     chunk_count INTEGER,
+    indexed_content_hash TEXT,
+    indexed_markdown_path TEXT,
     embedded_at TEXT,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (doc_id, generation_id, embedding_profile_id)
@@ -308,7 +296,45 @@ CREATE TABLE IF NOT EXISTS migration_log (
 
         sql.push_str("COMMIT;\n");
         self.exec_script(&sql)?;
+        self.ensure_document_index_state_columns()?;
         Ok(())
+    }
+
+    fn ensure_document_index_state_columns(&self) -> Result<(), ColibriError> {
+        self.ensure_columns(
+            "document_index_state",
+            &[
+                ("indexed_content_hash", "TEXT"),
+                ("indexed_markdown_path", "TEXT"),
+            ],
+        )
+    }
+
+    fn ensure_columns(&self, table: &str, columns: &[(&str, &str)]) -> Result<(), ColibriError> {
+        let existing = self.table_columns(table)?;
+        let mut sql = String::new();
+        for (name, ty) in columns {
+            if !existing.contains(*name) {
+                sql.push_str(&format!("ALTER TABLE {table} ADD COLUMN {name} {ty};\n"));
+            }
+        }
+        if sql.trim().is_empty() {
+            return Ok(());
+        }
+        self.exec_script(&sql)
+    }
+
+    fn table_columns(&self, table: &str) -> Result<HashSet<String>, ColibriError> {
+        // Table name is internal/constant; do not accept user-controlled input here.
+        let rows = self.query_json(&format!("PRAGMA table_info({table});"))?;
+        let mut out = HashSet::new();
+        for row in rows {
+            let Some(name) = row.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            out.insert(name.to_string());
+        }
+        Ok(out)
     }
 
     pub fn read_versions(&self) -> Result<(Option<u32>, HashMap<String, u32>), ColibriError> {
@@ -451,81 +477,9 @@ CREATE TABLE IF NOT EXISTS migration_log (
         ))
     }
 
-    pub fn upsert_generation_status(
-        &self,
-        generation_id: &str,
-        embedding_profile_id: &str,
-        pipeline_version_json: &Value,
-        status: &str,
-    ) -> Result<(), ColibriError> {
-        let now = Utc::now().to_rfc3339();
-        let pipeline_json = serde_json::to_string(pipeline_version_json)?;
-        let sql = format!(
-            "INSERT INTO index_generations(\
-                generation_id, embedding_profile_id, pipeline_version_json, status, created_at, activated_at, updated_at\
-             ) VALUES ({generation_id}, {embedding_profile_id}, {pipeline_json}, {status}, {created_at}, NULL, {updated_at}) \
-             ON CONFLICT(generation_id, embedding_profile_id) DO UPDATE SET \
-                pipeline_version_json=excluded.pipeline_version_json,\
-                status=excluded.status,\
-                updated_at=excluded.updated_at;",
-            generation_id = q(generation_id),
-            embedding_profile_id = q(embedding_profile_id),
-            pipeline_json = q(&pipeline_json),
-            status = q(status),
-            created_at = q(&now),
-            updated_at = q(&now),
-        );
-        self.exec_script(&sql)
-    }
-
-    pub fn ensure_generation_profile(
-        &self,
-        generation_id: &str,
-        embedding_profile_id: &str,
-        pipeline_version_json: &Value,
-        status: &str,
-    ) -> Result<(), ColibriError> {
-        let now = Utc::now().to_rfc3339();
-        let pipeline_json = serde_json::to_string(pipeline_version_json)?;
-        let sql = format!(
-            "INSERT INTO index_generations(\
-                generation_id, embedding_profile_id, pipeline_version_json, status, created_at, activated_at, updated_at\
-             ) VALUES ({generation_id}, {embedding_profile_id}, {pipeline_json}, {status}, {created_at}, NULL, {updated_at}) \
-             ON CONFLICT(generation_id, embedding_profile_id) DO NOTHING;",
-            generation_id = q(generation_id),
-            embedding_profile_id = q(embedding_profile_id),
-            pipeline_json = q(&pipeline_json),
-            status = q(status),
-            created_at = q(&now),
-            updated_at = q(&now),
-        );
-        self.exec_script(&sql)
-    }
-
-    pub fn mark_generation_activated(&self, generation_id: &str) -> Result<(), ColibriError> {
-        let now = Utc::now().to_rfc3339();
-        let sql = format!(
-            "UPDATE index_generations SET activated_at=NULL WHERE activated_at IS NOT NULL;\
-             UPDATE index_generations SET activated_at={activated_at}, updated_at={updated_at} \
-               WHERE generation_id={generation_id};",
-            activated_at = q(&now),
-            updated_at = q(&now),
-            generation_id = q(generation_id),
-        );
-        self.exec_script(&sql)
-    }
-
-    pub fn delete_generation_rows(&self, generation_id: &str) -> Result<(), ColibriError> {
-        self.exec_script(&format!(
-            "DELETE FROM document_index_state WHERE generation_id={generation};\
-             DELETE FROM index_generations WHERE generation_id={generation};",
-            generation = q(generation_id),
-        ))
-    }
-
     pub fn list_documents(&self) -> Result<Vec<DocumentRow>, ColibriError> {
         let rows = self.query_json(
-            "SELECT doc_id, plugin_id, connector_instance, title, doc_type, classification, markdown_path, tags_json, deleted \
+            "SELECT doc_id, title, content_hash, doc_type, classification, markdown_path, tags_json, deleted \
              FROM documents ORDER BY doc_id",
         )?;
         let mut out = Vec::new();
@@ -536,14 +490,10 @@ CREATE TABLE IF NOT EXISTS migration_log (
             let Some(doc_id) = obj.get("doc_id").and_then(Value::as_str) else {
                 continue;
             };
-            let Some(plugin_id) = obj.get("plugin_id").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(connector_instance) = obj.get("connector_instance").and_then(Value::as_str)
-            else {
-                continue;
-            };
             let Some(title) = obj.get("title").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(content_hash) = obj.get("content_hash").and_then(Value::as_str) else {
                 continue;
             };
             let Some(doc_type) = obj.get("doc_type").and_then(Value::as_str) else {
@@ -564,9 +514,8 @@ CREATE TABLE IF NOT EXISTS migration_log (
 
             out.push(DocumentRow {
                 doc_id: doc_id.to_string(),
-                plugin_id: plugin_id.to_string(),
-                connector_instance: connector_instance.to_string(),
                 title: title.to_string(),
+                content_hash: content_hash.to_string(),
                 doc_type: doc_type.to_string(),
                 classification: classification.to_string(),
                 markdown_path: markdown_path.to_string(),
@@ -577,12 +526,106 @@ CREATE TABLE IF NOT EXISTS migration_log (
         Ok(out)
     }
 
+    pub fn get_documents_by_ids(
+        &self,
+        doc_ids: &[String],
+    ) -> Result<HashMap<String, DocumentRow>, ColibriError> {
+        if doc_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let in_list = doc_ids.iter().map(|id| q(id)).collect::<Vec<_>>().join(",");
+        let rows = self.query_json(&format!(
+            "SELECT doc_id, title, content_hash, doc_type, classification, markdown_path, tags_json, deleted \
+             FROM documents WHERE doc_id IN ({in_list})"
+        ))?;
+
+        let mut out = HashMap::new();
+        for row in rows {
+            let Some(obj) = row.as_object() else {
+                continue;
+            };
+            let Some(doc_id) = obj.get("doc_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(title) = obj.get("title").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(content_hash) = obj.get("content_hash").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(doc_type) = obj.get("doc_type").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(classification) = obj.get("classification").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(markdown_path) = obj.get("markdown_path").and_then(Value::as_str) else {
+                continue;
+            };
+            let tags_json = obj
+                .get("tags_json")
+                .and_then(Value::as_str)
+                .unwrap_or("[]")
+                .to_string();
+            let deleted = obj.get("deleted").and_then(Value::as_i64).unwrap_or(0) != 0;
+
+            out.insert(
+                doc_id.to_string(),
+                DocumentRow {
+                    doc_id: doc_id.to_string(),
+                    title: title.to_string(),
+                    content_hash: content_hash.to_string(),
+                    doc_type: doc_type.to_string(),
+                    classification: classification.to_string(),
+                    markdown_path: markdown_path.to_string(),
+                    tags_json,
+                    deleted,
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    pub fn indexed_chunk_counts_for_generation(
+        &self,
+        generation_id: &str,
+    ) -> Result<HashMap<(String, String), u64>, ColibriError> {
+        let rows = self.query_json(&format!(
+            "SELECT doc_id, embedding_profile_id, chunk_count \
+             FROM document_index_state \
+             WHERE generation_id={} AND status='indexed' AND chunk_count IS NOT NULL",
+            q(generation_id)
+        ))?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let Some(obj) = row.as_object() else {
+                continue;
+            };
+            let Some(doc_id) = obj.get("doc_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(profile_id) = obj.get("embedding_profile_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(chunk_count) = obj.get("chunk_count").and_then(Value::as_i64) else {
+                continue;
+            };
+            if chunk_count >= 0 {
+                out.insert(
+                    (doc_id.to_string(), profile_id.to_string()),
+                    chunk_count as u64,
+                );
+            }
+        }
+        Ok(out)
+    }
+
     pub fn list_document_index_state_for_generation(
         &self,
         generation_id: &str,
     ) -> Result<Vec<DocumentIndexStateRow>, ColibriError> {
         let rows = self.query_json(&format!(
-            "SELECT doc_id, embedding_profile_id, status \
+            "SELECT doc_id, embedding_profile_id, status, indexed_content_hash, indexed_markdown_path \
              FROM document_index_state WHERE generation_id={} \
              ORDER BY doc_id, embedding_profile_id",
             q(generation_id)
@@ -607,11 +650,20 @@ CREATE TABLE IF NOT EXISTS migration_log (
                 doc_id: doc_id.to_string(),
                 embedding_profile_id: embedding_profile_id.to_string(),
                 status: status.to_string(),
+                indexed_content_hash: obj
+                    .get("indexed_content_hash")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                indexed_markdown_path: obj
+                    .get("indexed_markdown_path")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
             });
         }
         Ok(out)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_document_index_state(
         &self,
         doc_id: &str,
@@ -619,15 +671,19 @@ CREATE TABLE IF NOT EXISTS migration_log (
         embedding_profile_id: &str,
         status: &str,
         chunk_count: Option<u64>,
+        indexed_content_hash: Option<&str>,
+        indexed_markdown_path: Option<&str>,
     ) -> Result<(), ColibriError> {
         let now = Utc::now().to_rfc3339();
         let sql = format!(
             "INSERT INTO document_index_state(\
-                doc_id, generation_id, embedding_profile_id, status, chunk_count, embedded_at, updated_at\
-             ) VALUES ({doc_id}, {generation_id}, {embedding_profile_id}, {status}, {chunk_count}, {embedded_at}, {updated_at}) \
+                doc_id, generation_id, embedding_profile_id, status, chunk_count, indexed_content_hash, indexed_markdown_path, embedded_at, updated_at\
+             ) VALUES ({doc_id}, {generation_id}, {embedding_profile_id}, {status}, {chunk_count}, {indexed_content_hash}, {indexed_markdown_path}, {embedded_at}, {updated_at}) \
              ON CONFLICT(doc_id, generation_id, embedding_profile_id) DO UPDATE SET \
                 status=excluded.status,\
                 chunk_count=excluded.chunk_count,\
+                indexed_content_hash=excluded.indexed_content_hash,\
+                indexed_markdown_path=excluded.indexed_markdown_path,\
                 embedded_at=excluded.embedded_at,\
                 updated_at=excluded.updated_at;",
             doc_id = q(doc_id),
@@ -637,44 +693,12 @@ CREATE TABLE IF NOT EXISTS migration_log (
             chunk_count = chunk_count
                 .map(|n| (n as i64).to_string())
                 .unwrap_or_else(|| "NULL".into()),
+            indexed_content_hash = q_opt(indexed_content_hash),
+            indexed_markdown_path = q_opt(indexed_markdown_path),
             embedded_at = q(&now),
             updated_at = q(&now),
         );
         self.exec_script(&sql)
-    }
-
-    pub fn document_index_state_counts(
-        &self,
-        generation_id: &str,
-        embedding_profile_id: &str,
-    ) -> Result<DocumentIndexStateCounts, ColibriError> {
-        let rows = self.query_json(&format!(
-            "SELECT status, COUNT(*) AS c \
-             FROM document_index_state \
-             WHERE generation_id={generation_id} AND embedding_profile_id={embedding_profile_id} \
-             GROUP BY status",
-            generation_id = q(generation_id),
-            embedding_profile_id = q(embedding_profile_id),
-        ))?;
-
-        let mut counts = DocumentIndexStateCounts::default();
-        for row in rows {
-            let Some(obj) = row.as_object() else {
-                continue;
-            };
-            let Some(status) = obj.get("status").and_then(Value::as_str) else {
-                continue;
-            };
-            let count = obj.get("c").and_then(Value::as_i64).unwrap_or(0);
-            let count = if count < 0 { 0 } else { count as u64 };
-            match status {
-                "indexed" => counts.indexed = count,
-                "error" => counts.error = count,
-                "deleted" => counts.deleted = count,
-                _ => {}
-            }
-        }
-        Ok(counts)
     }
 
     pub fn append_migration_log(
@@ -698,41 +722,6 @@ CREATE TABLE IF NOT EXISTS migration_log (
             notes = q_opt(notes),
         );
         self.exec_script(&sql)
-    }
-
-    pub fn list_generation_entries(&self) -> Result<Vec<GenerationStateEntry>, ColibriError> {
-        let rows = self.query_json(
-            "SELECT generation_id, embedding_profile_id, status, activated_at \
-             FROM index_generations ORDER BY generation_id, embedding_profile_id",
-        )?;
-        let mut out = Vec::new();
-        for row in rows {
-            let obj = row.as_object().ok_or_else(|| {
-                ColibriError::Config("Invalid index_generations row shape".into())
-            })?;
-            out.push(GenerationStateEntry {
-                generation_id: obj
-                    .get("generation_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                embedding_profile_id: obj
-                    .get("embedding_profile_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                status: obj
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                activated_at: obj
-                    .get("activated_at")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned),
-            });
-        }
-        Ok(out)
     }
 
     pub fn touch_updated_at(&self) -> Result<(), ColibriError> {
@@ -1064,15 +1053,31 @@ mod tests {
         );
 
         store
-            .upsert_document_index_state("doc_1", "gen_a", "local_default", "indexed", Some(7))
+            .upsert_document_index_state(
+                "doc_1",
+                "gen_a",
+                "local_default",
+                "indexed",
+                Some(7),
+                Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                Some("internal/filesystem_markdown/local/doc-a.md"),
+            )
             .expect("upsert indexed state");
         store
-            .upsert_document_index_state("doc_1", "gen_a", "local_default", "deleted", None)
+            .upsert_document_index_state(
+                "doc_1",
+                "gen_a",
+                "local_default",
+                "deleted",
+                None,
+                None,
+                Some("internal/filesystem_markdown/local/doc-a.md"),
+            )
             .expect("upsert deleted state");
 
         let rows = store
             .query_json(
-                "SELECT status, chunk_count FROM document_index_state \
+                "SELECT status, chunk_count, indexed_markdown_path FROM document_index_state \
                  WHERE doc_id='doc_1' AND generation_id='gen_a' AND embedding_profile_id='local_default' \
                  LIMIT 1",
             )
@@ -1080,6 +1085,10 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["status"], json!("deleted"));
         assert!(rows[0]["chunk_count"].is_null());
+        assert_eq!(
+            rows[0]["indexed_markdown_path"],
+            json!("internal/filesystem_markdown/local/doc-a.md")
+        );
 
         let _ = std::fs::remove_file(db_path);
     }

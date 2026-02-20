@@ -17,7 +17,7 @@ use crate::metadata_store::{
 };
 
 /// Schema version — must match Python's `SCHEMA_VERSION` for cross-compat.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// Canonical storage schema version.
 pub const CANONICAL_SCHEMA_VERSION: u32 = 1;
@@ -35,7 +35,7 @@ pub const METADATA_DB_FORMAT_VERSION: u32 = 1;
 pub const DEFAULT_ACTIVE_GENERATION: &str = "gen_default";
 
 /// Root manifest schema version.
-pub const ROOT_MANIFEST_VERSION: u32 = 3;
+pub const ROOT_MANIFEST_VERSION: u32 = 4;
 
 /// Migration check row.
 #[derive(Debug, Clone, Serialize)]
@@ -313,13 +313,6 @@ fn normalize_generation_id(raw: &str) -> String {
         return trimmed.to_string();
     }
     DEFAULT_ACTIVE_GENERATION.to_string()
-}
-
-fn is_valid_generation_id(raw: &str) -> bool {
-    !raw.trim().is_empty()
-        && raw
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
 fn active_generation_from_manifest(colibri_home: &std::path::Path) -> String {
@@ -622,12 +615,11 @@ fn ensure_root_manifest(
         obj.insert("version".into(), Value::from(ROOT_MANIFEST_VERSION as u64));
         changed = true;
     }
-    if obj.get("indexed_at").and_then(|v| v.as_str()).is_none() {
-        obj.insert("indexed_at".into(), Value::String(String::new()));
+    // Legacy keys from the old manifest-based indexer; keep the root manifest minimal.
+    if obj.remove("indexed_at").is_some() {
         changed = true;
     }
-    if !matches!(obj.get("files"), Some(Value::Object(_))) {
-        obj.insert("files".into(), Value::Object(Map::new()));
+    if obj.remove("files").is_some() {
         changed = true;
     }
 
@@ -750,101 +742,6 @@ impl AppConfig {
             .join(&self.index_dir_name)
     }
 
-    /// Resolve directory path for a generation.
-    pub fn generation_dir(&self, generation_id: &str) -> PathBuf {
-        self.indexes_dir.join(generation_id)
-    }
-
-    /// Validate a generation identifier.
-    pub fn validate_generation_id(&self, raw: &str) -> Result<String, ColibriError> {
-        let trimmed = raw.trim();
-        if is_valid_generation_id(trimmed) {
-            Ok(trimmed.to_string())
-        } else {
-            Err(ColibriError::Config(format!(
-                "Invalid generation id '{raw}'. Allowed characters: [A-Za-z0-9._-]"
-            )))
-        }
-    }
-
-    /// List available generation directories under the index root.
-    pub fn list_generations(&self) -> Result<Vec<String>, ColibriError> {
-        let mut generations = Vec::new();
-        if self.indexes_dir.exists() {
-            for entry in std::fs::read_dir(&self.indexes_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                    continue;
-                };
-                if is_valid_generation_id(name) {
-                    generations.push(name.to_string());
-                }
-            }
-        }
-        generations.sort();
-        Ok(generations)
-    }
-
-    /// Update active generation pointer in the root manifest.
-    pub fn set_active_generation(&self, generation_id: &str) -> Result<String, ColibriError> {
-        let generation_id = self.validate_generation_id(generation_id)?;
-        std::fs::create_dir_all(self.indexes_dir.join(&generation_id))?;
-        for profile_id in self.embedding_profiles.keys() {
-            std::fs::create_dir_all(
-                self.lancedb_dir_for_generation_profile(&generation_id, profile_id),
-            )?;
-        }
-        self.ensure_generation_metadata(&generation_id, "prepared")?;
-        ensure_root_manifest(&self.colibri_home, &generation_id)?;
-        let store = MetadataStore::open(&self.metadata_db_path)?;
-        store.mark_generation_activated(&generation_id)?;
-        store.touch_updated_at()?;
-        Ok(generation_id)
-    }
-
-    /// Ensure metadata rows exist for generation/profile combinations.
-    pub fn ensure_generation_metadata(
-        &self,
-        generation_id: &str,
-        initial_status: &str,
-    ) -> Result<String, ColibriError> {
-        let generation_id = self.validate_generation_id(generation_id)?;
-        ensure_metadata_db(
-            &self.metadata_db_path,
-            &self.embedding_profiles,
-            &self.routing_policy,
-            &self.default_embedding_profile,
-        )?;
-        let store = MetadataStore::open(&self.metadata_db_path)?;
-
-        let mut profile_ids: Vec<String> = self.embedding_profiles.keys().cloned().collect();
-        profile_ids.sort();
-        for profile_id in profile_ids {
-            let profile = self.embedding_profile(&profile_id)?;
-            let pipeline_version = serde_json::json!({
-                "pipeline_schema_version": PIPELINE_SCHEMA_VERSION,
-                "index_schema_version": SCHEMA_VERSION,
-                "embedding_profile_id": profile.id.clone(),
-                "embedding_provider": profile.provider.clone(),
-                "embedding_model": profile.model.clone(),
-                "chunk_size_default": self.chunk_size,
-                "chunk_overlap_default": self.chunk_overlap
-            });
-            store.ensure_generation_profile(
-                &generation_id,
-                &profile_id,
-                &pipeline_version,
-                initial_status,
-            )?;
-        }
-        store.touch_updated_at()?;
-        Ok(generation_id)
-    }
-
     /// Resolve embedding profile id for a data classification.
     pub fn resolve_embedding_profile_id(&self, classification: &str) -> String {
         let class = normalize_classification(classification);
@@ -859,15 +756,6 @@ impl AppConfig {
         self.embedding_profiles
             .get(profile_id)
             .ok_or_else(|| ColibriError::Config(format!("Unknown embedding profile: {profile_id}")))
-    }
-
-    /// Return a config clone bound to a specific generation id.
-    pub fn with_generation(&self, generation_id: &str) -> Result<Self, ColibriError> {
-        let generation_id = self.validate_generation_id(generation_id)?;
-        let mut cloned = self.clone();
-        cloned.active_generation = generation_id;
-        cloned.lancedb_dir = cloned.lancedb_dir_for_profile(&cloned.default_embedding_profile);
-        Ok(cloned)
     }
 
     /// Ensure storage directories exist without mutating active generation pointer.
@@ -1208,9 +1096,9 @@ mod tests {
         set_env_opt("COLIBRI_DATA_DIR", None);
 
         set_env_opt("COLIBRI_HOME", Some(colibri_a.to_string_lossy().as_ref()));
-        let cfg = load_config().expect("load config");
         let gen = "gen_portable_test";
-        cfg.set_active_generation(gen).expect("set generation");
+        std::fs::create_dir_all(&colibri_a).expect("create colibri home");
+        super::ensure_root_manifest(&colibri_a, gen).expect("write root manifest");
 
         copy_dir_all(&colibri_a, &colibri_b).expect("copy colibri_home");
 
