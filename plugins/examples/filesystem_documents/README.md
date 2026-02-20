@@ -43,7 +43,7 @@ colibri plugins ingest \
 Then index:
 
 ```bash
-colibri index --canonical --force
+colibri index --force
 ```
 
 ## Tooling prerequisites

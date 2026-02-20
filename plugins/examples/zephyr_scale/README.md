@@ -34,7 +34,7 @@ colibri plugins ingest \
 Then index:
 
 ```bash
-colibri index --canonical --force
+colibri index --force
 ```
 
 ## Config notes
@@ -43,4 +43,3 @@ colibri index --canonical --force
   automatically to avoid deleting content outside the selected scope.
 - `emit_tombstones` only applies to full-project exports (no `folder`).
 - Prefer `token_env` over `token` to avoid storing secrets in config files.
-

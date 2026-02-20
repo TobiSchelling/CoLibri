@@ -80,8 +80,8 @@ colibri plugins sync --manifest plugins/examples/filesystem_markdown/plugin_mani
 colibri plugins jobs --validate-manifests
 colibri plugins sync-all
 colibri plugins sync-all --job fs_docs --dry-run --json
-colibri plugins sync-all --index-canonical --index-force
-colibri plugins sync-all --index-canonical --generation gen_2026_02_18_candidate --activate
+colibri plugins sync-all --index --index-force
+colibri plugins sync-all --index --generation gen_2026_02_18_candidate --activate
 
 # Plugin sync-state operations
 colibri plugins state list
@@ -103,8 +103,6 @@ colibri generations delete gen_2026_02_18_candidate --confirm gen_2026_02_18_can
 colibri index
 colibri index --generation gen_2026_02_18_candidate --force
 colibri index --generation gen_2026_02_18_candidate --force --activate
-colibri index --folder Books --force
-colibri index --canonical --force
 
 # Semantic search
 colibri search "microservices patterns"
@@ -132,13 +130,6 @@ Deleting the active generation requires both `--force` and `--confirm <generatio
 CoLibri reads configuration from `~/.config/colibri/config.yaml`:
 
 ```yaml
-sources:
-  - name: Books
-    path: ~/Library/Books
-    doc_type: book
-    mode: incremental
-    classification: confidential
-
 ollama:
   base_url: http://localhost:11434
   embedding_model: bge-m3
@@ -200,9 +191,9 @@ export COLIBRI_HOME=/path/to/portable/colibri
 `colibri plugins ingest` writes validated plugin envelopes to `canonical/` and records document metadata/tombstones in `metadata.db`.
 `colibri plugins sync` additionally persists and reuses a per-plugin cursor in `metadata.db.sync_state` for incremental ingestion.
 `colibri plugins sync-all` executes all configured `plugins.jobs` in one run.
-Use `--index-canonical` to chain indexing after a successful sync-all run.
+Use `--index` to chain indexing after a successful sync-all run.
 Use `colibri plugins state` to inspect or reset cursor entries.
-Use `colibri index --canonical` to index that managed corpus.
+Use `colibri index` to index that managed corpus.
 
 ## User Docs
 

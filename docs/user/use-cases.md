@@ -22,7 +22,7 @@ Daily workflow:
 
 ```bash
 cd ~/repos/architecture-docs && git pull
-colibri plugins sync-all --index-canonical
+colibri plugins sync-all --index
 ```
 
 ## 2) A local library of EPUB/PDF books (mostly static)
@@ -46,7 +46,7 @@ plugins:
 Initial build:
 
 ```bash
-colibri plugins sync-all --index-canonical --index-force
+colibri plugins sync-all --index --index-force
 ```
 
 ## 3) Single PPTX/DOCX files in a shared folder (mixed quality, frequently added)
@@ -91,6 +91,5 @@ Run:
 
 ```bash
 export ZEPHYR_API_TOKEN="..."
-colibri plugins sync-all --index-canonical
+colibri plugins sync-all --index
 ```
-

@@ -40,5 +40,4 @@ colibri serve --check
 
 - `colibri migrate` creates pre-migration copies of `manifest.json` and `metadata.db` under `$COLIBRI_HOME/backups/`.
 - If you restore without `indexes/`, you can rebuild on the target machine with:
-  - `colibri index --canonical --force`
-
+  - `colibri index --force`

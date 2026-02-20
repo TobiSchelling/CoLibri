@@ -50,7 +50,7 @@ plugins:
 Run incremental ingestion for all enabled plugin jobs, then index canonical store:
 
 ```bash
-colibri plugins sync-all --index-canonical --index-force
+colibri plugins sync-all --index --index-force
 colibri search "what is this repo about?"
 ```
 
@@ -60,6 +60,6 @@ Create and build a new generation without switching traffic:
 
 ```bash
 colibri generations create gen_candidate
-colibri index --canonical --generation gen_candidate --force
+colibri index --generation gen_candidate --force
 colibri generations activate gen_candidate
 ```

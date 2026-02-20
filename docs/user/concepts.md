@@ -2,7 +2,7 @@
 
 ## Import vs ingest (plugins)
 
-- **Import**: a convenience command for turning a *single file* into Markdown and placing it somewhere you manage.
+- **Import**: a convenience command for turning a *single file* into Markdown and ingesting it into the canonical store (one-off).
 - **Ingest (plugins)**: a repeatable sync process that produces **canonical Markdown** and tracks **incremental state** (cursor) per source.
 
 ## Canonical store
@@ -10,7 +10,7 @@
 The canonical store is CoLibri’s managed, markdown-only representation of your corpus.
 
 - Written by `colibri plugins ingest|sync|sync-all`
-- Read by `colibri index --canonical`
+- Read by `colibri index`
 - Designed for portability (`COLIBRI_HOME` can be copied/moved)
 
 ## Corpus
@@ -48,4 +48,3 @@ Typical plugin responsibilities:
 - convert to Markdown
 - attach metadata (classification, doc_type, tags)
 - emit tombstones for deletions (when possible)
-

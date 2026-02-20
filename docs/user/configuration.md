@@ -8,19 +8,11 @@ Override for experiments or multi-profile setups:
 export COLIBRI_CONFIG_PATH=/path/to/config.yaml
 ```
 
-## Sources (legacy / direct indexing)
+## Canonical corpus
 
-You can index Markdown folders directly via `sources:` and `colibri index --folder ...`.
-This path is convenient, but the recommended long-term approach is **plugins → canonical store → index --canonical**.
+CoLibri indexes a **managed canonical markdown store** under `COLIBRI_HOME/canonical`.
 
-```yaml
-sources:
-  - name: Architecture
-    path: ~/repos/architecture-docs
-    doc_type: note
-    mode: incremental
-    classification: internal
-```
+To bring content in, configure ingestion **plugin jobs** under `plugins.jobs` and run `colibri plugins sync-all`.
 
 ## Embeddings + routing
 
