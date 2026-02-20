@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use crate::config::{load_config, AppConfig};
-use crate::manifest::{get_manifest_path, Manifest};
+use crate::metadata_store::MetadataStore;
+use crate::plugin_host::load_plugin_manifest;
 
 /// Run the instructions command.
 pub async fn run(output: Option<PathBuf>) -> anyhow::Result<()> {
@@ -40,58 +41,50 @@ fn generate_instructions(config: &AppConfig) -> anyhow::Result<String> {
 
     // Available content
     md.push_str("## Available Content\n\n");
+    md.push_str("Content is ingested into CoLibri's managed canonical markdown store and indexed from there.\n\n");
 
-    let manifest_path = get_manifest_path(&config.data_dir);
-    let manifest = Manifest::load(&manifest_path).ok();
+    if config.metadata_db_path.exists() {
+        if let Ok(store) = MetadataStore::open(&config.metadata_db_path) {
+            if let Ok(rows) = store.list_documents() {
+                let mut total_live = 0usize;
+                let mut by_type: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for row in rows {
+                    if row.deleted {
+                        continue;
+                    }
+                    total_live += 1;
+                    *by_type.entry(row.doc_type).or_default() += 1;
+                }
 
-    for source in &config.sources {
-        let (file_count, _) = if let Some(ref m) = manifest {
-            count_source_files(m, &source.path)
-        } else {
-            (0, 0)
-        };
-
-        let description = get_source_description(&source.doc_type);
-
-        md.push_str(&format!(
-            "- **{}** (`--doc-type {}`): {} ({} files)\n",
-            source.display_name(),
-            source.doc_type,
-            description,
-            file_count
-        ));
-    }
-
-    Ok(md)
-}
-
-fn count_source_files(manifest: &Manifest, source_path: &str) -> (usize, usize) {
-    let source_id = crate::manifest::source_id_for_root(std::path::Path::new(source_path));
-    let prefix = format!("{source_id}:");
-
-    let mut file_count = 0;
-    let mut chunk_count = 0;
-
-    for (key, entry) in &manifest.files {
-        if key.starts_with(&prefix) {
-            file_count += 1;
-            chunk_count += entry.chunk_count;
+                md.push_str(&format!("- Total documents: {total_live}\n"));
+                if !by_type.is_empty() {
+                    md.push_str("- By type:\n");
+                    for (doc_type, n) in by_type {
+                        md.push_str(&format!("  - {doc_type}: {n}\n"));
+                    }
+                }
+                md.push('\n');
+            }
         }
     }
 
-    (file_count, chunk_count)
-}
-
-fn get_source_description(doc_type: &str) -> &'static str {
-    match doc_type.to_lowercase().as_str() {
-        "book" => "Technical books and reference materials",
-        "note" | "notes" => "Personal notes and documentation",
-        "article" => "Articles and blog posts",
-        "docs" | "documentation" => "Project documentation",
-        "reference" => "Reference materials",
-        "manual" => "User manuals and guides",
-        "paper" => "Academic papers and research",
-        "transcript" => "Meeting transcripts and recordings",
-        _ => "General content",
+    if config.plugin_jobs.is_empty() {
+        md.push_str("- Ingestion jobs: none configured\n");
+        md.push_str(
+            "  - Configure `plugins.jobs` in `config.yaml` and run `colibri plugins sync-all`.\n",
+        );
+    } else {
+        md.push_str("- Ingestion jobs (plugins):\n");
+        for job in &config.plugin_jobs {
+            let plugin_id = load_plugin_manifest(&job.manifest)
+                .ok()
+                .map(|m| m.plugin_id)
+                .unwrap_or_else(|| "unknown".into());
+            let enabled = if job.enabled { "enabled" } else { "disabled" };
+            md.push_str(&format!("  - {} ({plugin_id}) [{enabled}]\n", job.id));
+        }
     }
+
+    Ok(md)
 }

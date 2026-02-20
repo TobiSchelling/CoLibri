@@ -22,13 +22,6 @@ struct ProfileStatusRow {
     chunk_count: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct SourceRouteRow {
-    source: String,
-    classification: String,
-    profile_id: String,
-}
-
 #[derive(Debug, Serialize)]
 struct ProfilesReport {
     colibri_home: String,
@@ -36,7 +29,6 @@ struct ProfilesReport {
     default_embedding_profile: String,
     profiles: Vec<ProfileStatusRow>,
     routing_policy: HashMap<String, String>,
-    source_routes: Vec<SourceRouteRow>,
 }
 
 pub async fn run(json: bool) -> anyhow::Result<()> {
@@ -98,24 +90,12 @@ pub async fn run(json: bool) -> anyhow::Result<()> {
         });
     }
 
-    let mut source_routes = Vec::new();
-    for source in &config.sources {
-        source_routes.push(SourceRouteRow {
-            source: source.display_name().to_string(),
-            classification: source.classification.clone(),
-            profile_id: config.resolve_embedding_profile_id(&source.classification),
-        });
-    }
-
-    source_routes.sort_by(|a, b| a.source.cmp(&b.source));
-
     let report = ProfilesReport {
         colibri_home: config.colibri_home.display().to_string(),
         active_generation: config.active_generation.clone(),
         default_embedding_profile: config.default_embedding_profile.clone(),
         profiles,
         routing_policy: config.routing_policy.clone(),
-        source_routes,
     };
 
     if json {
@@ -165,14 +145,6 @@ pub async fn run(json: bool) -> anyhow::Result<()> {
     rules.sort_by(|a, b| a.0.cmp(b.0));
     for (classification, profile_id) in rules {
         eprintln!("  {} -> {}", classification, profile_id);
-    }
-
-    eprintln!("\nSource Routes:");
-    for row in &report.source_routes {
-        eprintln!(
-            "  {} ({}) -> {}",
-            row.source, row.classification, row.profile_id
-        );
     }
 
     Ok(())

@@ -111,11 +111,6 @@ impl Manifest {
         }
     }
 
-    /// Return `true` if the file path exists in the manifest.
-    pub fn is_file_known(&self, key: &str) -> bool {
-        self.files.contains_key(key)
-    }
-
     /// Record a file as indexed (or update an existing entry).
     pub fn record_file(
         &mut self,

@@ -402,7 +402,6 @@ mod tests {
             .join("local_default")
             .join("lancedb");
         AppConfig {
-            sources: Vec::new(),
             plugin_jobs: Vec::new(),
             colibri_home: colibri_home.clone(),
             data_dir: colibri_home.clone(),

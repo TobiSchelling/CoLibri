@@ -1,11 +1,11 @@
-//! Index content sources for semantic search.
+//! Index the canonical corpus for semantic search.
 //!
-//! Uses LanceDB Rust SDK and Ollama HTTP API. Supports two per-folder
-//! indexing modes: static and incremental.
-//! Mirrors the Python `indexer.py` module.
+//! CoLibri ingests content into a managed canonical markdown store (`COLIBRI_HOME/canonical`)
+//! and indexes *only* that store into LanceDB. Direct indexing of arbitrary user folders is not
+//! supported.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow_array::{
@@ -15,29 +15,23 @@ use arrow_schema::{DataType, Field, Schema};
 use lancedb::database::CreateTableMode;
 use tracing::info;
 
-use crate::config::{AppConfig, FolderProfile, IndexMode, PIPELINE_SCHEMA_VERSION, SCHEMA_VERSION};
+use crate::config::{AppConfig, PIPELINE_SCHEMA_VERSION, SCHEMA_VERSION};
 use crate::embedding::embed_texts_with_progress;
 use crate::error::ColibriError;
 use crate::index_meta::{read_index_meta, write_index_meta};
 use crate::manifest::{get_manifest_path, make_key, source_id_for_root, Manifest};
-use crate::metadata_store::MetadataStore;
-use crate::sources::markdown::MarkdownFolderSource;
-use crate::sources::ContentSource;
+use crate::metadata_store::{DocumentRow, MetadataStore};
 
 // ---------------------------------------------------------------------------
 // Progress events
 // ---------------------------------------------------------------------------
 
 /// Events emitted during indexing for progress reporting.
-///
-/// Each call site (CLI, TUI) provides its own handler to render these events
-/// appropriately — CLI uses indicatif progress bars, TUI sends them over a
-/// channel to update its ratatui gauge.
 #[derive(Debug, Clone)]
 pub enum IndexEvent {
-    /// A source folder is about to be indexed.
+    /// A profile is about to be indexed.
     SourceStart { name: String },
-    /// File reading progress within the current source.
+    /// File reading progress within the current profile.
     Reading { done: usize, total: usize },
     /// Embedding progress (chunks processed so far).
     Embedding {
@@ -46,9 +40,9 @@ pub enum IndexEvent {
     },
     /// Writing embedded chunks to LanceDB.
     Writing,
-    /// A source completed successfully.
+    /// A profile completed successfully.
     SourceComplete { name: String, result: IndexResult },
-    /// A source had no changes (all files skipped).
+    /// A profile had no changes (all files skipped).
     SourceUnchanged {
         name: String,
         skipped: usize,
@@ -56,8 +50,6 @@ pub enum IndexEvent {
     },
     /// A non-fatal warning (e.g. unreadable file).
     Warning { message: String },
-    /// Indexing finished (final event, carries the aggregate result or error).
-    Done(Result<IndexResult, String>),
 }
 
 /// Safety limit for chunk text length (bge-m3 context window ≈ 8192 tokens).
@@ -115,7 +107,7 @@ fn ceil_char_boundary(s: &str, mut idx: usize) -> usize {
 /// Split text into overlapping chunks on natural boundaries.
 ///
 /// Tries paragraph boundaries first, then sentence boundaries,
-/// and finally hard-breaks at `chunk_size`. Exact port of Python `_split_text()`.
+/// and finally hard-breaks at `chunk_size`.
 pub fn split_text(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -149,11 +141,9 @@ pub fn split_text(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<St
             if para_break > chunk_size / 4 {
                 end = start + para_break + 2; // include \n\n
             } else {
-                // Try sentence boundaries
                 end = try_sentence_break(segment, start, chunk_size, end);
             }
         } else {
-            // Try sentence boundaries
             end = try_sentence_break(segment, start, chunk_size, end);
         }
 
@@ -170,7 +160,6 @@ pub fn split_text(text: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<St
     chunks
 }
 
-/// Try to find a sentence boundary in the segment.
 fn try_sentence_break(segment: &str, start: usize, chunk_size: usize, default_end: usize) -> usize {
     let separators = [". ", ".\n", "? ", "!\n", "! ", "?\n"];
     for sep in &separators {
@@ -184,91 +173,9 @@ fn try_sentence_break(segment: &str, start: usize, chunk_size: usize, default_en
 }
 
 // ---------------------------------------------------------------------------
-// Source factory
+// Arrow / LanceDB helpers
 // ---------------------------------------------------------------------------
 
-/// Create a content source for a folder profile, with nested exclusions.
-pub fn create_source_for_profile(
-    profile: &FolderProfile,
-    all_profiles: &[FolderProfile],
-) -> MarkdownFolderSource {
-    // Compute nested exclusions: any other profile whose path is under this profile's path
-    let exclude_paths: Vec<String> = all_profiles
-        .iter()
-        .filter(|other| other.path != profile.path && other.path.starts_with(&profile.path))
-        .map(|other| other.path.clone())
-        .collect();
-
-    MarkdownFolderSource::new(
-        &profile.path,
-        true,
-        profile.name.clone(),
-        profile.extensions.clone(),
-        exclude_paths,
-    )
-}
-
-fn canonical_markdown_path_for_doc(
-    config: &AppConfig,
-    source_root: &Path,
-    rel_path: &Path,
-) -> Option<String> {
-    let class_root = source_root.strip_prefix(&config.canonical_dir).ok()?;
-    let joined = class_root.join(rel_path);
-    Some(joined.to_string_lossy().replace('\\', "/"))
-}
-
-// ---------------------------------------------------------------------------
-// Row building
-// ---------------------------------------------------------------------------
-
-/// Build chunk rows for a single document (without vectors).
-fn build_rows_for_doc(
-    source: &dyn ContentSource,
-    doc_path: &Path,
-    profile: &FolderProfile,
-    chunk_size: usize,
-    chunk_overlap: usize,
-) -> Result<Vec<ChunkRow>, ColibriError> {
-    let doc = source.read_document(doc_path)?;
-
-    // Frontmatter type takes precedence; profile doc_type is fallback
-    let doc_type = if doc.metadata.contains_key("type") {
-        doc.doc_type.clone()
-    } else {
-        profile.doc_type.clone()
-    };
-
-    let tags_str = if doc.tags.is_empty() {
-        String::new()
-    } else {
-        doc.tags.join(",")
-    };
-
-    let chunks = split_text(&doc.content, chunk_size, chunk_overlap);
-    let mut rows = Vec::with_capacity(chunks.len());
-
-    for mut chunk_text in chunks {
-        if chunk_text.len() > MAX_CHUNK_CHARS {
-            chunk_text.truncate(MAX_CHUNK_CHARS);
-            chunk_text.push_str("...");
-        }
-        rows.push(ChunkRow {
-            text: chunk_text,
-            source_file: doc.path.to_string_lossy().into_owned(),
-            title: doc.title.clone(),
-            doc_type: doc_type.clone(),
-            folder: doc.folder.clone(),
-            source_name: doc.source_name.clone(),
-            source_type: doc.source_type.clone(),
-            tags: tags_str.clone(),
-        });
-    }
-
-    Ok(rows)
-}
-
-/// Intermediate chunk row (before embedding).
 #[derive(Debug, Clone)]
 struct ChunkRow {
     text: String,
@@ -281,11 +188,6 @@ struct ChunkRow {
     tags: String,
 }
 
-// ---------------------------------------------------------------------------
-// Arrow / LanceDB helpers
-// ---------------------------------------------------------------------------
-
-/// Build an Arrow schema for the chunks table.
 fn chunks_schema(vector_dim: usize) -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("text", DataType::Utf8, false),
@@ -307,7 +209,6 @@ fn chunks_schema(vector_dim: usize) -> Arc<Schema> {
     ]))
 }
 
-/// Convert chunk rows + vectors into an Arrow RecordBatch.
 fn rows_to_batch(
     rows: &[ChunkRow],
     vectors: &[Vec<f32>],
@@ -346,7 +247,6 @@ fn rows_to_batch(
         rows.iter().map(|r| r.tags.as_str()).collect::<Vec<_>>(),
     ));
 
-    // Build FixedSizeList of Float32 for vectors
     let flat_values: Vec<f32> = vectors.iter().flat_map(|v| v.iter().copied()).collect();
     let values_arr: ArrayRef = Arc::new(Float32Array::from(flat_values));
     let field = Arc::new(Field::new("item", DataType::Float32, true));
@@ -373,233 +273,210 @@ fn rows_to_batch(
 }
 
 // ---------------------------------------------------------------------------
-// File classification
+// Canonical document helpers
 // ---------------------------------------------------------------------------
 
-/// Classify files: which need indexing, which are skipped.
-fn classify_files(
-    source: &dyn ContentSource,
-    profile: &FolderProfile,
-    manifest: &Manifest,
-    force: bool,
-    source_id: &str,
-) -> (Vec<std::path::PathBuf>, usize) {
-    let all_files = source.list_documents();
+fn read_lossy(path: &Path) -> Result<String, ColibriError> {
+    let bytes = std::fs::read(path)?;
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}
 
-    if force {
-        return (all_files, 0);
+fn tags_csv(tags_json: &str) -> String {
+    let parsed: Result<Vec<String>, _> = serde_json::from_str(tags_json);
+    match parsed {
+        Ok(tags) => tags.join(","),
+        Err(_) => String::new(),
     }
+}
 
-    let mut to_index = Vec::new();
-    let mut skipped = 0;
-
-    for fp in &all_files {
-        let rel = fp.to_string_lossy();
-        let key = make_key(source_id, &rel);
-
-        match profile.mode {
-            IndexMode::Static => {
-                if manifest.is_file_known(&key) {
-                    skipped += 1;
-                } else {
-                    to_index.push(fp.clone());
-                }
-            }
-            IndexMode::Incremental => {
-                let abs_path = source.root_path().join(fp);
-                if manifest.is_file_changed(&key, &abs_path) {
-                    to_index.push(fp.clone());
-                } else {
-                    skipped += 1;
-                }
-            }
-        }
-    }
-
-    (to_index, skipped)
+fn abs_markdown_path(config: &AppConfig, markdown_path: &str) -> PathBuf {
+    let rel = PathBuf::from(markdown_path);
+    config.canonical_dir.join(rel)
 }
 
 // ---------------------------------------------------------------------------
-// Deleted-file detection
+// Per-profile indexing
 // ---------------------------------------------------------------------------
 
-/// Remove index chunks and manifest entries for files no longer on disk.
-async fn detect_deleted_files(
-    manifest: &mut Manifest,
-    known_keys: &HashSet<String>,
-    current_keys: &HashSet<String>,
-    table: &lancedb::Table,
-) -> Result<Vec<String>, ColibriError> {
-    let mut deleted_rel_paths = Vec::new();
-
-    for key in known_keys {
-        if !current_keys.contains(key) {
-            let (_, rel_path) = crate::manifest::split_key(key);
-            let escaped = rel_path.replace('\'', "''");
-            table.delete(&format!("source_file = '{escaped}'")).await?;
-            manifest.remove_file(key);
-            deleted_rel_paths.push(rel_path.to_string());
-        }
-    }
-
-    Ok(deleted_rel_paths)
+#[derive(Debug, Clone)]
+struct IndexDoc<'a> {
+    row: &'a DocumentRow,
+    abs_path: PathBuf,
 }
 
-// ---------------------------------------------------------------------------
-// Per-folder indexing
-// ---------------------------------------------------------------------------
-
-/// Index a single folder according to its profile.
 #[allow(clippy::too_many_arguments)]
-async fn index_folder(
-    source: &dyn ContentSource,
-    profile: &FolderProfile,
-    manifest: &mut Manifest,
-    db: &lancedb::Connection,
-    table: &mut Option<lancedb::Table>,
+async fn index_profile(
+    profile_id: &str,
+    embedding_profile: &crate::config::EmbeddingProfile,
+    docs: &[IndexDoc<'_>],
     config: &AppConfig,
     metadata_store: &MetadataStore,
     generation_id: &str,
-    embedding_profile_id: &str,
-    canonical_doc_ids: &HashMap<String, String>,
-    chunk_size: usize,
-    chunk_overlap: usize,
-    force: bool,
-    overwrite_first: bool,
+    profile_force: bool,
+    profile_full_rebuild: bool,
+    manifest: &mut Manifest,
+    source_id: &str,
+    docs_to_delete: &[(String, String)],
+    moved_doc_ids: &HashSet<String>,
+    indexed_status: &HashMap<(String, String), String>,
     on_progress: &(impl Fn(IndexEvent) + Send + Sync),
 ) -> Result<IndexResult, ColibriError> {
-    let source_label = profile.display_name().to_string();
-    let src_id = source_id_for_root(source.root_path());
-    let source_root = source.root_path();
+    let name = format!("profile:{profile_id}");
+    on_progress(IndexEvent::SourceStart { name: name.clone() });
 
-    let all_files = source.list_documents();
-    let all_rel_paths: HashSet<String> = all_files
-        .iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
+    let db = lancedb::connect(
+        config
+            .lancedb_dir_for_profile(profile_id)
+            .to_string_lossy()
+            .as_ref(),
+    )
+    .execute()
+    .await?;
 
-    let (files_to_index, files_skipped) = classify_files(source, profile, manifest, force, &src_id);
+    let table: Option<lancedb::Table> = if profile_full_rebuild {
+        None
+    } else {
+        db.open_table(TABLE_NAME).execute().await.ok()
+    };
 
-    let prefix = format!("{src_id}:");
-    let manifest_keys_for_source: HashSet<String> = manifest
-        .files
-        .keys()
-        .filter(|k| k.starts_with(&prefix))
-        .cloned()
-        .collect();
-    let current_keys_for_source: HashSet<String> = all_rel_paths
-        .iter()
-        .map(|rel| make_key(&src_id, rel))
-        .collect();
-
-    if files_to_index.is_empty() {
-        // Detect deletions for all modes
-        let mut deleted = 0;
-        if !force {
-            if let Some(tbl) = table.as_ref() {
-                let deleted_rel_paths = detect_deleted_files(
-                    manifest,
-                    &manifest_keys_for_source,
-                    &current_keys_for_source,
-                    tbl,
-                )
-                .await?;
-                deleted = deleted_rel_paths.len();
-                for rel in deleted_rel_paths {
-                    let rel_path = Path::new(&rel);
-                    if let Some(canonical_path) =
-                        canonical_markdown_path_for_doc(config, source_root, rel_path)
-                    {
-                        if let Some(doc_id) = canonical_doc_ids.get(&canonical_path) {
-                            metadata_store.upsert_document_index_state(
-                                doc_id,
-                                generation_id,
-                                embedding_profile_id,
-                                "deleted",
-                                None,
-                            )?;
-                        }
-                    }
+    // If we are not rebuilding the table, apply deletions first.
+    let mut deleted = 0usize;
+    if !profile_full_rebuild && !docs_to_delete.is_empty() {
+        if let Some(tbl) = table.as_ref() {
+            for (_doc_id, markdown_path) in docs_to_delete {
+                let escaped = markdown_path.replace('\'', "''");
+                if let Err(e) = tbl.delete(&format!("source_file = '{escaped}'")).await {
+                    on_progress(IndexEvent::Warning {
+                        message: format!("Delete failed for {markdown_path}: {e}"),
+                    });
+                } else {
+                    deleted += 1;
                 }
             }
         }
-        if files_skipped > 0 || deleted > 0 {
-            on_progress(IndexEvent::SourceUnchanged {
-                name: source_label,
-                skipped: files_skipped,
-                deleted,
-            });
+    }
+
+    // We always update index state for deletions, even if the table is being rebuilt.
+    for (doc_id, _markdown_path) in docs_to_delete {
+        metadata_store.upsert_document_index_state(
+            doc_id,
+            generation_id,
+            profile_id,
+            "deleted",
+            None,
+        )?;
+    }
+
+    // Decide which documents to index.
+    let mut to_index: Vec<&IndexDoc<'_>> = Vec::new();
+    let mut skipped = 0usize;
+    for doc in docs {
+        let row = doc.row;
+        if row.deleted {
+            continue;
         }
+        let status_key = (row.doc_id.clone(), profile_id.to_string());
+        let already_indexed = indexed_status
+            .get(&status_key)
+            .map(|s| s.as_str() == "indexed")
+            .unwrap_or(false);
+
+        let key = make_key(source_id, &row.markdown_path);
+        let changed = profile_force
+            || moved_doc_ids.contains(&row.doc_id)
+            || !already_indexed
+            || manifest.is_file_changed(&key, &doc.abs_path);
+
+        if changed {
+            to_index.push(doc);
+        } else {
+            skipped += 1;
+        }
+    }
+
+    if to_index.is_empty() {
+        on_progress(IndexEvent::SourceUnchanged {
+            name,
+            skipped,
+            deleted,
+        });
         return Ok(IndexResult {
-            files_skipped,
+            total_chunks: 0,
+            files_indexed: 0,
+            files_skipped: skipped,
             files_deleted: deleted,
-            ..Default::default()
+            errors: 0,
         });
     }
 
-    on_progress(IndexEvent::SourceStart {
-        name: source_label.clone(),
-    });
-
-    // Read and chunk all files
-    let mut rows: Vec<ChunkRow> = Vec::new();
-    let mut files_indexed = 0;
-    let mut errors = 0;
+    // Read + chunk
+    let total_files = to_index.len();
+    let mut rows = Vec::new();
     let mut file_chunk_counts: HashMap<String, usize> = HashMap::new();
-    let total_files = files_to_index.len();
+    let mut errors = 0usize;
 
-    on_progress(IndexEvent::Reading {
-        done: 0,
-        total: total_files,
-    });
-
-    for (i, doc_path) in files_to_index.iter().enumerate() {
-        match build_rows_for_doc(source, doc_path, profile, chunk_size, chunk_overlap) {
-            Ok(doc_rows) => {
-                file_chunk_counts.insert(doc_path.to_string_lossy().into_owned(), doc_rows.len());
-                rows.extend(doc_rows);
-                files_indexed += 1;
-            }
-            Err(e) => {
-                if let Some(canonical_path) =
-                    canonical_markdown_path_for_doc(config, source_root, doc_path)
-                {
-                    if let Some(doc_id) = canonical_doc_ids.get(&canonical_path) {
-                        metadata_store.upsert_document_index_state(
-                            doc_id,
-                            generation_id,
-                            embedding_profile_id,
-                            "error",
-                            None,
-                        )?;
-                    }
-                }
-                on_progress(IndexEvent::Warning {
-                    message: format!(
-                        "Skipping {}: {e}",
-                        doc_path.file_name().unwrap_or_default().to_string_lossy()
-                    ),
-                });
-                errors += 1;
-            }
-        }
+    for (i, doc) in to_index.iter().enumerate() {
         on_progress(IndexEvent::Reading {
             done: i + 1,
             total: total_files,
         });
+
+        let row = doc.row;
+        let content = match read_lossy(&doc.abs_path) {
+            Ok(c) => c,
+            Err(e) => {
+                errors += 1;
+                on_progress(IndexEvent::Warning {
+                    message: format!("Failed to read {}: {e}", row.markdown_path),
+                });
+                continue;
+            }
+        };
+
+        let doc_tags = tags_csv(&row.tags_json);
+        let chunks = split_text(&content, config.chunk_size, config.chunk_overlap);
+        file_chunk_counts.insert(row.markdown_path.clone(), chunks.len());
+
+        for mut chunk_text in chunks {
+            if chunk_text.len() > MAX_CHUNK_CHARS {
+                chunk_text.truncate(MAX_CHUNK_CHARS);
+                chunk_text.push_str("...");
+            }
+            rows.push(ChunkRow {
+                text: chunk_text,
+                source_file: row.markdown_path.clone(),
+                title: row.title.clone(),
+                doc_type: row.doc_type.clone(),
+                folder: row.classification.clone(),
+                source_name: row.plugin_id.clone(),
+                source_type: row.connector_instance.clone(),
+                tags: doc_tags.clone(),
+            });
+        }
     }
 
     if rows.is_empty() {
+        on_progress(IndexEvent::SourceComplete {
+            name,
+            result: IndexResult {
+                total_chunks: 0,
+                files_indexed: 0,
+                files_skipped: skipped,
+                files_deleted: deleted,
+                errors,
+            },
+        });
         return Ok(IndexResult {
-            files_skipped,
+            total_chunks: 0,
+            files_indexed: 0,
+            files_skipped: skipped,
+            files_deleted: deleted,
             errors,
-            ..Default::default()
         });
     }
 
-    // Embed all chunks
+    // Embed
     let total_chunks = rows.len();
-
     on_progress(IndexEvent::Embedding {
         chunks_done: 0,
         total_chunks,
@@ -608,8 +485,8 @@ async fn index_folder(
     let texts: Vec<String> = rows.iter().map(|r| r.text.clone()).collect();
     let vectors = embed_texts_with_progress(
         &texts,
-        &config.embedding_model,
-        &config.ollama_base_url,
+        &embedding_profile.model,
+        &embedding_profile.endpoint,
         |done, _total| {
             on_progress(IndexEvent::Embedding {
                 chunks_done: done,
@@ -621,7 +498,7 @@ async fn index_folder(
 
     if vectors.is_empty() {
         return Err(ColibriError::Embedding(
-            "Ollama returned no embeddings".into(),
+            "Embedding provider returned no embeddings".into(),
         ));
     }
 
@@ -629,104 +506,69 @@ async fn index_folder(
     let batch = rows_to_batch(&rows, &vectors, vector_dim)?;
     let schema = chunks_schema(vector_dim);
 
-    // Write to LanceDB
+    // Write
     on_progress(IndexEvent::Writing);
 
-    if overwrite_first && table.is_none() {
-        // First folder in a full rebuild — create with overwrite
+    let profile_index_dir = config.lancedb_dir_for_profile(profile_id);
+    std::fs::create_dir_all(&profile_index_dir)?;
+
+    if profile_full_rebuild {
         let batches = RecordBatchIterator::new(vec![Ok(batch)], schema);
-        let new_table = db
+        let _new_table = db
             .create_table(TABLE_NAME, Box::new(batches))
             .mode(CreateTableMode::Overwrite)
             .execute()
             .await?;
-        *table = Some(new_table);
     } else if let Some(tbl) = table.as_ref() {
-        // Delete old chunks for files we're re-indexing
         let indexed_files: HashSet<&str> = rows.iter().map(|r| r.source_file.as_str()).collect();
         for sf in &indexed_files {
             let escaped = sf.replace('\'', "''");
             tbl.delete(&format!("source_file = '{escaped}'")).await?;
         }
-        // Add new rows
         let batches = RecordBatchIterator::new(vec![Ok(batch)], schema);
         tbl.add(Box::new(batches)).execute().await?;
     } else {
-        // Table doesn't exist yet — create it
         let batches = RecordBatchIterator::new(vec![Ok(batch)], schema);
-        let new_table = db
+        let _new_table = db
             .create_table(TABLE_NAME, Box::new(batches))
             .execute()
             .await?;
-        *table = Some(new_table);
     }
 
-    // Update manifest entries
-    for doc_path in &files_to_index {
-        let rel = doc_path.to_string_lossy();
-        let key = make_key(&src_id, &rel);
-        let abs_path = source.root_path().join(doc_path);
-        if abs_path.exists() {
-            if let Some(&count) = file_chunk_counts.get(rel.as_ref()) {
-                manifest.record_file(&key, &abs_path, count)?;
-                if let Some(canonical_path) =
-                    canonical_markdown_path_for_doc(config, source_root, doc_path)
-                {
-                    if let Some(doc_id) = canonical_doc_ids.get(&canonical_path) {
-                        metadata_store.upsert_document_index_state(
-                            doc_id,
-                            generation_id,
-                            embedding_profile_id,
-                            "indexed",
-                            Some(count as u64),
-                        )?;
-                    }
-                }
-            }
+    // Update manifest + index state.
+    let mut files_indexed = 0usize;
+    for doc in &to_index {
+        let row = doc.row;
+        if row.deleted {
+            continue;
         }
-    }
-
-    // Detect deleted files (all modes)
-    let mut deleted = 0;
-    if !force {
-        if let Some(tbl) = table.as_ref() {
-            let deleted_rel_paths = detect_deleted_files(
-                manifest,
-                &manifest_keys_for_source,
-                &current_keys_for_source,
-                tbl,
-            )
-            .await?;
-            deleted = deleted_rel_paths.len();
-            for rel in deleted_rel_paths {
-                let rel_path = Path::new(&rel);
-                if let Some(canonical_path) =
-                    canonical_markdown_path_for_doc(config, source_root, rel_path)
-                {
-                    if let Some(doc_id) = canonical_doc_ids.get(&canonical_path) {
-                        metadata_store.upsert_document_index_state(
-                            doc_id,
-                            generation_id,
-                            embedding_profile_id,
-                            "deleted",
-                            None,
-                        )?;
-                    }
-                }
-            }
+        let Some(chunk_count) = file_chunk_counts.get(&row.markdown_path).copied() else {
+            continue;
+        };
+        let key = make_key(source_id, &row.markdown_path);
+        if doc.abs_path.exists() {
+            manifest.record_file(&key, &doc.abs_path, chunk_count)?;
         }
+        metadata_store.upsert_document_index_state(
+            &row.doc_id,
+            generation_id,
+            profile_id,
+            "indexed",
+            Some(chunk_count as u64),
+        )?;
+        files_indexed += 1;
     }
 
     let result = IndexResult {
-        total_chunks: rows.len(),
+        total_chunks,
         files_indexed,
-        files_skipped,
+        files_skipped: skipped,
         files_deleted: deleted,
         errors,
     };
 
     on_progress(IndexEvent::SourceComplete {
-        name: source_label,
+        name,
         result: result.clone(),
     });
 
@@ -737,63 +579,109 @@ async fn index_folder(
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Index the library according to the loaded configuration.
+/// Index the managed canonical store into per-profile LanceDB indexes.
 pub async fn index_library(
     config: &AppConfig,
-    folder_filter: Option<&str>,
     force: bool,
     on_progress: impl Fn(IndexEvent) + Send + Sync,
 ) -> Result<IndexResult, ColibriError> {
-    // Indexing should never mutate the global active_generation pointer.
     config.ensure_storage_layout()?;
     let metadata_store = MetadataStore::open(&config.metadata_db_path)?;
-    let canonical_doc_ids = metadata_store.list_live_document_paths()?;
+    let docs = metadata_store.list_documents()?;
 
-    // Resolve source profiles for this run
-    let selected_profiles: Vec<&FolderProfile> = if let Some(filter) = folder_filter {
-        let matches: Vec<&FolderProfile> = config
-            .sources
-            .iter()
-            .filter(|p| p.display_name() == filter)
-            .collect();
-        if matches.is_empty() {
-            let names: Vec<&str> = config.sources.iter().map(|s| s.display_name()).collect();
-            return Err(ColibriError::Config(format!(
-                "Unknown source: {filter}. Configured: {}",
-                names.join(", ")
-            )));
+    // Build desired profile for each live doc based on classification routing.
+    let mut desired_profile: HashMap<String, String> = HashMap::new();
+    let mut live_doc_by_id: HashMap<String, &DocumentRow> = HashMap::new();
+    for row in &docs {
+        if row.deleted {
+            continue;
         }
-        matches
-    } else {
-        config.sources.iter().collect()
-    };
-
-    // Group sources by embedding profile resolved from classification routing.
-    let mut grouped_profiles: BTreeMap<String, Vec<&FolderProfile>> = BTreeMap::new();
-    for profile in &selected_profiles {
-        let embedding_profile_id = config.resolve_embedding_profile_id(&profile.classification);
-        config.embedding_profile(&embedding_profile_id)?;
-        grouped_profiles
-            .entry(embedding_profile_id)
-            .or_default()
-            .push(*profile);
+        let pid = config.resolve_embedding_profile_id(&row.classification);
+        config.embedding_profile(&pid)?;
+        desired_profile.insert(row.doc_id.clone(), pid);
+        live_doc_by_id.insert(row.doc_id.clone(), row);
     }
 
-    // Load manifest
+    // Index state for move/deletion reconciliation.
+    let index_state_rows =
+        metadata_store.list_document_index_state_for_generation(&config.active_generation)?;
+    let mut indexed_status: HashMap<(String, String), String> = HashMap::new();
+    let mut previously_indexed_profiles: HashMap<String, HashSet<String>> = HashMap::new();
+    for row in &index_state_rows {
+        indexed_status.insert(
+            (row.doc_id.clone(), row.embedding_profile_id.clone()),
+            row.status.clone(),
+        );
+        if row.status == "indexed" {
+            previously_indexed_profiles
+                .entry(row.doc_id.clone())
+                .or_default()
+                .insert(row.embedding_profile_id.clone());
+        }
+    }
+
+    // Docs that need to be re-indexed because they moved between embedding profiles.
+    let mut moved_doc_ids: HashSet<String> = HashSet::new();
+    // Per-profile deletions to apply before indexing.
+    let mut deletions_by_profile: HashMap<String, Vec<(String, String)>> = HashMap::new();
+
+    for (doc_id, prev_profiles) in &previously_indexed_profiles {
+        let desired = desired_profile.get(doc_id).cloned();
+        let row = docs.iter().find(|d| d.doc_id == *doc_id);
+        let markdown_path = row.map(|r| r.markdown_path.clone()).unwrap_or_default();
+        let is_deleted = row.map(|r| r.deleted).unwrap_or(true);
+
+        for prev in prev_profiles {
+            let should_remove = is_deleted || desired.as_deref() != Some(prev.as_str());
+            if should_remove && !markdown_path.is_empty() {
+                deletions_by_profile
+                    .entry(prev.clone())
+                    .or_default()
+                    .push((doc_id.clone(), markdown_path.clone()));
+            }
+        }
+
+        if !is_deleted {
+            if let Some(desired_profile_id) = desired {
+                if prev_profiles.iter().any(|p| p != &desired_profile_id) {
+                    moved_doc_ids.insert(doc_id.clone());
+                }
+            }
+        }
+    }
+
+    // Group live docs by embedding profile.
+    let mut grouped: BTreeMap<String, Vec<IndexDoc<'_>>> = BTreeMap::new();
+    for row in &docs {
+        if row.deleted {
+            continue;
+        }
+        let Some(profile_id) = desired_profile.get(&row.doc_id) else {
+            continue;
+        };
+        let abs_path = abs_markdown_path(config, &row.markdown_path);
+        grouped
+            .entry(profile_id.clone())
+            .or_default()
+            .push(IndexDoc { row, abs_path });
+    }
+
+    // Load manifest (per active generation).
     let manifest_path = get_manifest_path(&config.data_dir);
     let mut manifest = Manifest::load(&manifest_path)?;
-
-    let full_rebuild = force && folder_filter.is_none();
-
-    if full_rebuild {
+    if manifest.active_generation != config.active_generation {
+        manifest = Manifest::new_with_active_generation(&config.active_generation);
+    }
+    if force {
         manifest = Manifest::new_with_active_generation(&config.active_generation);
     }
 
+    let canonical_source_id = source_id_for_root(&config.canonical_dir);
+
     let mut aggregate = IndexResult::default();
 
-    for (embedding_profile_id, profiles) in grouped_profiles {
-        let embedding_profile = config.embedding_profile(&embedding_profile_id)?.clone();
-        let profile_config = config.with_embedding_profile(&embedding_profile);
+    for (profile_id, profile_docs) in grouped {
+        let embedding_profile = config.embedding_profile(&profile_id)?.clone();
         let pipeline_version = serde_json::json!({
             "pipeline_schema_version": PIPELINE_SCHEMA_VERSION,
             "index_schema_version": SCHEMA_VERSION,
@@ -805,15 +693,17 @@ pub async fn index_library(
         });
         metadata_store.upsert_generation_status(
             &config.active_generation,
-            &embedding_profile_id,
+            &profile_id,
             &pipeline_version,
             "building",
         )?;
-        std::fs::create_dir_all(&profile_config.lancedb_dir)?;
 
-        // Check schema version per profile-specific index and decide local rebuild mode.
+        let profile_index_dir = config.lancedb_dir_for_profile(&profile_id);
+        std::fs::create_dir_all(&profile_index_dir)?;
+
+        // Decide per-profile rebuild if schema is outdated.
         let mut profile_force = force;
-        let meta = read_index_meta(&profile_config.lancedb_dir)?;
+        let meta = read_index_meta(&profile_index_dir)?;
         let stored_version = meta
             .get("schema_version")
             .and_then(|v| v.as_u64())
@@ -821,63 +711,40 @@ pub async fn index_library(
         if stored_version != SCHEMA_VERSION && !profile_force {
             info!(
                 "Index schema outdated for profile '{}' (v{} -> v{}). Forcing rebuild for this profile.",
-                embedding_profile_id, stored_version, SCHEMA_VERSION
+                profile_id, stored_version, SCHEMA_VERSION
             );
             profile_force = true;
         }
+        let profile_full_rebuild = profile_force;
 
-        let profile_full_rebuild = full_rebuild || (profile_force && folder_filter.is_none());
+        let docs_to_delete = deletions_by_profile
+            .get(&profile_id)
+            .cloned()
+            .unwrap_or_default();
 
-        let profile_outcome: Result<IndexResult, ColibriError> = async {
-            let db = lancedb::connect(profile_config.lancedb_dir.to_string_lossy().as_ref())
-                .execute()
-                .await?;
-
-            let mut table: Option<lancedb::Table> = if profile_full_rebuild {
-                None
-            } else {
-                db.open_table(TABLE_NAME).execute().await.ok()
-            };
-
-            let mut profile_aggregate = IndexResult::default();
-
-            for (i, profile) in profiles.iter().enumerate() {
-                let source = create_source_for_profile(profile, &config.sources);
-                let chunk_size = profile.effective_chunk_size(config.chunk_size);
-                let chunk_overlap = profile.effective_chunk_overlap(config.chunk_overlap);
-
-                let result = index_folder(
-                    &source,
-                    profile,
-                    &mut manifest,
-                    &db,
-                    &mut table,
-                    &profile_config,
-                    &metadata_store,
-                    &config.active_generation,
-                    &embedding_profile_id,
-                    &canonical_doc_ids,
-                    chunk_size,
-                    chunk_overlap,
-                    profile_force,
-                    profile_full_rebuild && i == 0,
-                    &on_progress,
-                )
-                .await?;
-
-                profile_aggregate.accumulate(&result);
-                aggregate.accumulate(&result);
-            }
-            Ok(profile_aggregate)
-        }
-        .await;
-
-        let profile_aggregate = match profile_outcome {
-            Ok(v) => v,
+        let profile_result = match index_profile(
+            &profile_id,
+            &embedding_profile,
+            &profile_docs,
+            config,
+            &metadata_store,
+            &config.active_generation,
+            profile_force,
+            profile_full_rebuild,
+            &mut manifest,
+            &canonical_source_id,
+            &docs_to_delete,
+            &moved_doc_ids,
+            &indexed_status,
+            &on_progress,
+        )
+        .await
+        {
+            Ok(r) => r,
             Err(e) => {
                 let _ = metadata_store.upsert_generation_status(
                     &config.active_generation,
-                    &embedding_profile_id,
+                    &profile_id,
                     &pipeline_version,
                     "error",
                 );
@@ -885,10 +752,13 @@ pub async fn index_library(
             }
         };
 
+        aggregate.accumulate(&profile_result);
+
+        // Write index meta for this profile.
         let mut profile_extra = serde_json::Map::new();
         profile_extra.insert(
             "embedding_profile_id".into(),
-            serde_json::Value::String(embedding_profile_id.clone()),
+            serde_json::Value::String(profile_id.clone()),
         );
         profile_extra.insert(
             "embedding_provider".into(),
@@ -906,41 +776,37 @@ pub async fn index_library(
         );
         profile_extra.insert(
             "files_indexed_last_run".into(),
-            serde_json::Value::Number(profile_aggregate.files_indexed.into()),
+            serde_json::Value::Number(profile_result.files_indexed.into()),
         );
         profile_extra.insert(
             "file_count".into(),
             serde_json::Value::Number(
-                (profile_aggregate.files_indexed + profile_aggregate.files_skipped).into(),
+                (profile_result.files_indexed + profile_result.files_skipped).into(),
             ),
         );
         profile_extra.insert(
             "chunk_count".into(),
-            serde_json::Value::Number(profile_aggregate.total_chunks.into()),
+            serde_json::Value::Number(profile_result.total_chunks.into()),
         );
         profile_extra.insert(
             "files_skipped_last_run".into(),
-            serde_json::Value::Number(profile_aggregate.files_skipped.into()),
+            serde_json::Value::Number(profile_result.files_skipped.into()),
         );
         profile_extra.insert(
             "files_deleted_last_run".into(),
-            serde_json::Value::Number(profile_aggregate.files_deleted.into()),
+            serde_json::Value::Number(profile_result.files_deleted.into()),
         );
         profile_extra.insert(
             "errors_last_run".into(),
-            serde_json::Value::Number(profile_aggregate.errors.into()),
+            serde_json::Value::Number(profile_result.errors.into()),
         );
-        write_index_meta(
-            &profile_config.lancedb_dir,
-            &embedding_profile.model,
-            &profile_extra,
-        )?;
+        write_index_meta(&profile_index_dir, &embedding_profile.model, &profile_extra)?;
 
         metadata_store.upsert_generation_status(
             &config.active_generation,
-            &embedding_profile_id,
+            &profile_id,
             &pipeline_version,
-            if profile_aggregate.errors > 0 {
+            if profile_result.errors > 0 {
                 "error"
             } else {
                 "ready"
@@ -948,7 +814,26 @@ pub async fn index_library(
         )?;
     }
 
-    // Save manifest
+    // Clean up manifest entries for docs no longer present in metadata DB.
+    let known_paths: HashSet<String> = docs.iter().map(|d| d.markdown_path.clone()).collect();
+    let prefix = format!("{}:", canonical_source_id);
+    let to_remove: Vec<String> = manifest
+        .files
+        .keys()
+        .filter(|k| k.starts_with(&prefix))
+        .filter_map(|k| {
+            let (_src, rel) = crate::manifest::split_key(k);
+            if known_paths.contains(rel) {
+                None
+            } else {
+                Some(k.clone())
+            }
+        })
+        .collect();
+    for key in to_remove {
+        manifest.remove_file(&key);
+    }
+
     manifest.save(&manifest_path)?;
 
     Ok(aggregate)

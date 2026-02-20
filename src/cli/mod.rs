@@ -1,7 +1,6 @@
 //! CLI command definitions and handlers.
 
 pub mod bootstrap;
-pub mod config_tui;
 pub mod doctor;
 pub mod generations;
 pub mod import;
@@ -51,9 +50,6 @@ pub enum Commands {
         json: bool,
     },
 
-    /// Interactive TUI for managing configuration
-    Config,
-
     /// Check system health (Ollama, config, index)
     Doctor {
         /// Exit non-zero when serving alignment has any issue
@@ -97,14 +93,6 @@ pub enum Commands {
 
     /// Index markdown corpus into LanceDB
     Index {
-        /// Only index the source matching this name
-        #[arg(long)]
-        folder: Option<String>,
-
-        /// Index from managed canonical store (`COLIBRI_HOME/canonical`)
-        #[arg(long)]
-        canonical: bool,
-
         /// Target generation id (defaults to active generation)
         #[arg(long)]
         generation: Option<String>,
@@ -169,7 +157,7 @@ pub enum Commands {
         /// Input file path (PDF or EPUB)
         input: PathBuf,
 
-        /// Output directory (defaults to books source from config)
+        /// Working directory for conversion tools (defaults to a temp dir)
         #[arg(short, long)]
         output_dir: Option<PathBuf>,
 
@@ -181,11 +169,11 @@ pub enum Commands {
         #[arg(long, default_value = "placeholder", value_parser = clap::value_parser!(import::ImageMode))]
         image_mode: import::ImageMode,
 
-        /// Directory for extracted images (only used with --image-mode=referenced)
+        /// Directory for extracted images (not supported by `colibri import`)
         #[arg(long)]
         attachments_dir: Option<PathBuf>,
 
-        /// Re-index the books folder after import
+        /// Index the canonical corpus after import
         #[arg(long)]
         reindex: bool,
     },
@@ -322,7 +310,7 @@ pub enum PluginCommands {
 
         /// Index canonical corpus after successful sync run
         #[arg(long)]
-        index_canonical: bool,
+        index: bool,
 
         /// Target generation id for optional index step
         #[arg(long)]

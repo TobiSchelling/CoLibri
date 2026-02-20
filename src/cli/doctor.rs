@@ -12,13 +12,6 @@ use crate::mcp;
 use crate::plugin_host::load_plugin_manifest;
 
 #[derive(Debug, Serialize)]
-struct DoctorSourceStatus {
-    name: String,
-    path: String,
-    status: String,
-}
-
-#[derive(Debug, Serialize)]
 struct DoctorPluginJobStatus {
     id: String,
     enabled: bool,
@@ -53,7 +46,6 @@ struct DoctorReport {
     serving_queryable_profiles: Option<usize>,
     serving_total_profiles: Option<usize>,
     serving_issues: Vec<String>,
-    sources: Vec<DoctorSourceStatus>,
     plugin_jobs: Vec<DoctorPluginJobStatus>,
 }
 
@@ -81,13 +73,12 @@ impl DoctorReport {
             serving_queryable_profiles: None,
             serving_total_profiles: None,
             serving_issues: Vec::new(),
-            sources: Vec::new(),
             plugin_jobs: Vec::new(),
         }
     }
 }
 
-fn resolve_entrypoint(manifest_path: &PathBuf, entrypoint: &str) -> PathBuf {
+fn resolve_entrypoint(manifest_path: &std::path::Path, entrypoint: &str) -> PathBuf {
     let manifest_dir = manifest_path
         .parent()
         .map(PathBuf::from)
@@ -171,15 +162,6 @@ pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
             report.active_generation = Some(config.active_generation.clone());
             if !json {
                 eprintln!("OK ({})", config::AppConfig::config_path().display());
-                eprintln!(
-                    "  Sources: {}",
-                    config
-                        .sources
-                        .iter()
-                        .map(|s| s.display_name().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
                 eprintln!("  CoLibri home: {}", config.colibri_home.display());
                 eprintln!("  Data dir: {}", config.data_dir.display());
                 eprintln!("  Canonical dir: {}", config.canonical_dir.display());
@@ -249,7 +231,8 @@ pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
                         }
                     };
 
-                    let entrypoint_path = resolve_entrypoint(&job.manifest, &manifest.entrypoint);
+                    let entrypoint_path =
+                        resolve_entrypoint(job.manifest.as_path(), &manifest.entrypoint);
                     if !entrypoint_path.exists() {
                         status = "warn".into();
                         issues.push(format!(
@@ -567,23 +550,6 @@ pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
                     if strict {
                         strict_violation = true;
                     }
-                }
-            }
-
-            // 4. Source directories
-            if !json {
-                eprintln!("\nSources:");
-            }
-            for source in &config.sources {
-                let path = std::path::Path::new(&source.path);
-                let status = if path.exists() { "OK" } else { "MISSING" };
-                report.sources.push(DoctorSourceStatus {
-                    name: source.display_name().to_string(),
-                    path: source.path.clone(),
-                    status: status.to_string(),
-                });
-                if !json {
-                    eprintln!("  {} ({}) ... {status}", source.display_name(), source.path);
                 }
             }
         }

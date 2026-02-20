@@ -13,7 +13,6 @@ mod metadata_store;
 mod plugin_host;
 mod query;
 mod serve_ready;
-mod sources;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -60,7 +59,6 @@ async fn main() -> anyhow::Result<()> {
             })
             .await
         }
-        cli::Commands::Config => cli::config_tui::run().await,
         cli::Commands::Doctor { strict, json } => cli::doctor::run(strict, json).await,
         cli::Commands::Migrate { dry_run, json } => cli::migrate::run(dry_run, json).await,
         cli::Commands::Profiles { json } => cli::profiles::run(json).await,
@@ -92,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
                 jobs,
                 include_disabled,
                 fail_fast,
-                index_canonical,
+                index,
                 generation,
                 activate,
                 index_force,
@@ -103,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
                     requested_jobs: jobs,
                     include_disabled,
                     fail_fast,
-                    index_canonical,
+                    index,
                     generation,
                     activate,
                     index_force,
@@ -150,12 +148,10 @@ async fn main() -> anyhow::Result<()> {
             } => cli::generations::delete(generation, confirm, force).await,
         },
         cli::Commands::Index {
-            folder,
-            canonical,
             generation,
             activate,
             force,
-        } => cli::index::run(folder, canonical, generation, activate, force).await,
+        } => cli::index::run(generation, activate, force).await,
         cli::Commands::Instructions { output } => cli::instructions::run(output).await,
         cli::Commands::Tour { topic } => cli::tour::run(topic).await,
         cli::Commands::Search {

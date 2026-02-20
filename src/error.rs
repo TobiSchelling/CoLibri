@@ -21,9 +21,6 @@ pub enum ColibriError {
     #[allow(dead_code)]
     Manifest(String),
 
-    #[error("Source error: {0}")]
-    Source(String),
-
     #[error("MCP error: {0}")]
     Mcp(String),
 

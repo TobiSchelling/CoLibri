@@ -119,7 +119,6 @@ mod tests {
     #[test]
     fn generation_status_empty_when_db_missing() {
         let cfg = AppConfig {
-            sources: Vec::new(),
             plugin_jobs: Vec::new(),
             colibri_home: PathBuf::from("/tmp/colibri-test"),
             data_dir: PathBuf::from("/tmp/colibri-test"),

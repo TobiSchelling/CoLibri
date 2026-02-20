@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
-use crate::config::{load_config, FolderProfile, IndexMode};
+use crate::config::load_config;
 use crate::embedding::EMBED_BATCH_SIZE;
 use crate::indexer::{index_library, IndexEvent};
 
@@ -118,71 +118,25 @@ impl CliProgress {
             IndexEvent::Warning { message } => {
                 let _ = self.mp.println(format!("  ⚠ {message}"));
             }
-            IndexEvent::Done(_) => {}
         }
     }
 }
 
-pub async fn run(
-    folder: Option<String>,
-    canonical: bool,
-    generation: Option<String>,
-    activate: bool,
-    force: bool,
-) -> anyhow::Result<()> {
+pub async fn run(generation: Option<String>, activate: bool, force: bool) -> anyhow::Result<()> {
     let base_config = load_config()?;
     if activate && generation.is_none() {
         anyhow::bail!("`--activate` requires `--generation <id>`");
     }
-    let mut config = if let Some(generation) = generation {
+    let config = if let Some(generation) = generation {
         base_config.with_generation(&generation)?
     } else {
         base_config.clone()
     };
 
-    if canonical {
-        let canonical_sources = canonical_source_profiles(&config);
-        if canonical_sources.is_empty() {
-            anyhow::bail!(
-                "No canonical markdown sources found under {}",
-                config.canonical_dir.display()
-            );
-        }
-        config.sources = canonical_sources;
-    }
-
     // Print header
-    let profiles: Vec<_> = if let Some(ref filter) = folder {
-        config
-            .sources
-            .iter()
-            .filter(|p| p.display_name() == filter)
-            .collect()
-    } else {
-        config.sources.iter().collect()
-    };
-    let sources_str: Vec<String> = profiles
-        .iter()
-        .map(|p| {
-            format!(
-                "{} ({})",
-                p.display_name(),
-                match p.mode {
-                    crate::config::IndexMode::Static => "static",
-                    crate::config::IndexMode::Incremental => "incremental",
-                }
-            )
-        })
-        .collect();
-    if sources_str.is_empty() {
-        anyhow::bail!("No matching sources selected for indexing.");
-    }
-    eprintln!("Indexing: {}", sources_str.join(", "));
-    if canonical {
-        eprintln!("Source mode: canonical");
-    }
+    eprintln!("Indexing: canonical store");
     eprintln!("Generation: {}", config.active_generation);
-    if force && folder.is_none() {
+    if force {
         eprintln!("Mode: full rebuild");
     }
     if activate {
@@ -191,7 +145,7 @@ pub async fn run(
 
     let progress = CliProgress::new();
 
-    let result = index_library(&config, folder.as_deref(), force, |e| {
+    let result = index_library(&config, force, |e| {
         progress.handle(e);
     })
     .await?;
@@ -223,25 +177,4 @@ pub async fn run(
     }
 
     Ok(())
-}
-
-fn canonical_source_profiles(config: &crate::config::AppConfig) -> Vec<FolderProfile> {
-    let mut profiles = Vec::new();
-    for class in ["restricted", "confidential", "internal", "public"] {
-        let class_dir = config.canonical_dir.join(class);
-        if !class_dir.exists() || !class_dir.is_dir() {
-            continue;
-        }
-        profiles.push(FolderProfile {
-            path: class_dir.to_string_lossy().to_string(),
-            mode: IndexMode::Incremental,
-            doc_type: "note".into(),
-            chunk_size: None,
-            chunk_overlap: None,
-            extensions: vec![".md".into()],
-            name: Some(format!("canonical-{class}")),
-            classification: class.to_string(),
-        });
-    }
-    profiles
 }

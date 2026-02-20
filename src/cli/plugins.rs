@@ -8,9 +8,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::canonical_store::{ingest_envelopes, CanonicalIngestReport};
-use crate::config::{
-    load_config, load_config_no_bootstrap, AppConfig, FolderProfile, IndexMode, PluginJob,
-};
+use crate::config::{load_config, load_config_no_bootstrap, AppConfig, PluginJob};
 use crate::indexer::index_library;
 use crate::metadata_store::{MetadataStore, SyncStateEntry};
 use crate::plugin_host::{run_plugin_manifest, PluginRunReport};
@@ -151,7 +149,7 @@ pub async fn ingest(
 
     if !dry_run {
         plugin_report.envelopes.clear();
-        eprintln!("\nNext step: run `colibri index --canonical --force` to index updated canonical corpus.");
+        eprintln!("\nNext step: run `colibri index --force` to index updated canonical corpus.");
     } else {
         eprintln!("\nDry-run mode enabled. No files were written.");
     }
@@ -777,7 +775,7 @@ pub struct SyncAllOptions {
     pub requested_jobs: Vec<String>,
     pub include_disabled: bool,
     pub fail_fast: bool,
-    pub index_canonical: bool,
+    pub index: bool,
     pub generation: Option<String>,
     pub activate: bool,
     pub index_force: bool,
@@ -786,8 +784,8 @@ pub struct SyncAllOptions {
 }
 
 pub async fn sync_all(opts: SyncAllOptions) -> anyhow::Result<()> {
-    if opts.dry_run && opts.index_canonical {
-        anyhow::bail!("`--index-canonical` cannot be used with `--dry-run`");
+    if opts.dry_run && opts.index {
+        anyhow::bail!("`--index` cannot be used with `--dry-run`");
     }
     if opts.activate && opts.generation.is_none() {
         anyhow::bail!("`--activate` requires `--generation <id>`");
@@ -891,7 +889,7 @@ pub async fn sync_all(opts: SyncAllOptions) -> anyhow::Result<()> {
     let mut report = report;
 
     let mut index_failed = false;
-    if opts.index_canonical {
+    if opts.index {
         let generation_label = opts
             .generation
             .clone()
@@ -911,81 +909,59 @@ pub async fn sync_all(opts: SyncAllOptions) -> anyhow::Result<()> {
                 error: None,
             });
         } else {
-            let mut index_config = if let Some(generation) = opts.generation.as_deref() {
+            let index_config = if let Some(generation) = opts.generation.as_deref() {
                 app_config.with_generation(generation)?
             } else {
                 app_config.clone()
             };
-            let canonical_sources = canonical_source_profiles(&index_config);
-            if canonical_sources.is_empty() {
-                index_failed = true;
-                report.index = Some(SyncAllIndexReport {
-                    status: "error".into(),
-                    generation: index_config.active_generation.clone(),
-                    activated: false,
-                    force: opts.index_force,
-                    files_indexed: None,
-                    files_skipped: None,
-                    files_deleted: None,
-                    total_chunks: None,
-                    errors: None,
-                    error: Some(format!(
-                        "No canonical markdown sources found under {}",
-                        index_config.canonical_dir.display()
-                    )),
-                });
-            } else {
-                index_config.sources = canonical_sources;
 
-                match index_library(&index_config, None, opts.index_force, |_e| {}).await {
-                    Ok(index_result) => {
-                        let mut activated = false;
-                        let mut activation_error: Option<String> = None;
-                        if opts.activate {
-                            match app_config.set_active_generation(&index_config.active_generation)
-                            {
-                                Ok(_) => {
-                                    activated = true;
-                                }
-                                Err(e) => {
-                                    activation_error = Some(e.to_string());
-                                }
+            match index_library(&index_config, opts.index_force, |_e| {}).await {
+                Ok(index_result) => {
+                    let mut activated = false;
+                    let mut activation_error: Option<String> = None;
+                    if opts.activate {
+                        match app_config.set_active_generation(&index_config.active_generation) {
+                            Ok(_) => {
+                                activated = true;
+                            }
+                            Err(e) => {
+                                activation_error = Some(e.to_string());
                             }
                         }
-
-                        let has_errors = index_result.errors > 0 || activation_error.is_some();
-                        if has_errors {
-                            index_failed = true;
-                        }
-
-                        report.index = Some(SyncAllIndexReport {
-                            status: if has_errors { "error" } else { "ok" }.into(),
-                            generation: index_config.active_generation.clone(),
-                            activated,
-                            force: opts.index_force,
-                            files_indexed: Some(index_result.files_indexed),
-                            files_skipped: Some(index_result.files_skipped),
-                            files_deleted: Some(index_result.files_deleted),
-                            total_chunks: Some(index_result.total_chunks),
-                            errors: Some(index_result.errors),
-                            error: activation_error,
-                        });
                     }
-                    Err(e) => {
+
+                    let has_errors = index_result.errors > 0 || activation_error.is_some();
+                    if has_errors {
                         index_failed = true;
-                        report.index = Some(SyncAllIndexReport {
-                            status: "error".into(),
-                            generation: index_config.active_generation.clone(),
-                            activated: false,
-                            force: opts.index_force,
-                            files_indexed: None,
-                            files_skipped: None,
-                            files_deleted: None,
-                            total_chunks: None,
-                            errors: None,
-                            error: Some(e.to_string()),
-                        });
                     }
+
+                    report.index = Some(SyncAllIndexReport {
+                        status: if has_errors { "error" } else { "ok" }.into(),
+                        generation: index_config.active_generation.clone(),
+                        activated,
+                        force: opts.index_force,
+                        files_indexed: Some(index_result.files_indexed),
+                        files_skipped: Some(index_result.files_skipped),
+                        files_deleted: Some(index_result.files_deleted),
+                        total_chunks: Some(index_result.total_chunks),
+                        errors: Some(index_result.errors),
+                        error: activation_error,
+                    });
+                }
+                Err(e) => {
+                    index_failed = true;
+                    report.index = Some(SyncAllIndexReport {
+                        status: "error".into(),
+                        generation: index_config.active_generation.clone(),
+                        activated: false,
+                        force: opts.index_force,
+                        files_indexed: None,
+                        files_skipped: None,
+                        files_deleted: None,
+                        total_chunks: None,
+                        errors: None,
+                        error: Some(e.to_string()),
+                    });
                 }
             }
         }
@@ -1051,23 +1027,4 @@ pub async fn sync_all(opts: SyncAllOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn canonical_source_profiles(config: &AppConfig) -> Vec<FolderProfile> {
-    let mut profiles = Vec::new();
-    for class in ["restricted", "confidential", "internal", "public"] {
-        let class_dir = config.canonical_dir.join(class);
-        if !class_dir.exists() || !class_dir.is_dir() {
-            continue;
-        }
-        profiles.push(FolderProfile {
-            path: class_dir.to_string_lossy().to_string(),
-            mode: IndexMode::Incremental,
-            doc_type: "note".into(),
-            chunk_size: None,
-            chunk_overlap: None,
-            extensions: vec![".md".into()],
-            name: Some(format!("canonical-{class}")),
-            classification: class.to_string(),
-        });
-    }
-    profiles
-}
+// canonical indexing is handled by the indexer directly (no per-folder profiles).

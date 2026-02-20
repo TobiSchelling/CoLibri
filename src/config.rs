@@ -54,105 +54,9 @@ pub struct MigrationReport {
     pub checks: Vec<MigrationCheck>,
 }
 
-/// How a folder should be indexed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IndexMode {
-    /// Content assumed stable — skip known files, but detect deletions.
-    Static,
-    /// Track changes via mtime + SHA-256 — re-index modified files, detect deletions.
-    #[default]
-    Incremental,
-}
-
-/// Per-source indexing configuration (mirrors Python `FolderProfile`).
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
-pub struct FolderProfile {
-    /// Absolute path to the source directory (required).
-    pub path: String,
-
-    /// Indexing mode.
-    #[serde(default)]
-    pub mode: IndexMode,
-
-    /// Document type label (e.g., "book", "note").
-    #[serde(default = "default_doc_type")]
-    pub doc_type: String,
-
-    /// Per-folder chunk size override.
-    pub chunk_size: Option<usize>,
-
-    /// Per-folder chunk overlap override.
-    pub chunk_overlap: Option<usize>,
-
-    /// File extensions to index.
-    #[serde(default = "default_extensions")]
-    pub extensions: Vec<String>,
-
-    /// Display name (defaults to path basename).
-    pub name: Option<String>,
-
-    /// Data classification used for embedding profile routing.
-    #[serde(default = "default_classification")]
-    pub classification: String,
-}
-
-fn default_doc_type() -> String {
-    "note".into()
-}
-
-fn default_extensions() -> Vec<String> {
-    vec![".md".into()]
-}
-
-fn default_classification() -> String {
-    "internal".into()
-}
-
-impl Default for FolderProfile {
-    fn default() -> Self {
-        Self {
-            path: String::new(),
-            mode: IndexMode::default(),
-            doc_type: default_doc_type(),
-            chunk_size: None,
-            chunk_overlap: None,
-            extensions: default_extensions(),
-            name: None,
-            classification: default_classification(),
-        }
-    }
-}
-
-impl FolderProfile {
-    /// Human-readable display name.
-    pub fn display_name(&self) -> &str {
-        self.name.as_deref().unwrap_or_else(|| {
-            std::path::Path::new(&self.path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(&self.path)
-        })
-    }
-
-    /// Effective chunk size (per-folder override or global default).
-    pub fn effective_chunk_size(&self, default: usize) -> usize {
-        self.chunk_size.unwrap_or(default)
-    }
-
-    /// Effective chunk overlap (per-folder override or global default).
-    pub fn effective_chunk_overlap(&self, default: usize) -> usize {
-        self.chunk_overlap.unwrap_or(default)
-    }
-}
-
 /// Raw YAML config structure.
 #[derive(Debug, Deserialize)]
 struct RawConfig {
-    #[serde(default)]
-    sources: Vec<FolderProfile>,
-
     #[serde(default)]
     data: DataConfig,
 
@@ -784,7 +688,6 @@ fn ensure_metadata_db(
 /// Resolved application configuration.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    pub sources: Vec<FolderProfile>,
     pub plugin_jobs: Vec<PluginJob>,
     pub colibri_home: PathBuf,
     pub data_dir: PathBuf,
@@ -809,12 +712,6 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    /// Return the first source with `doc_type == "book"`, if any.
-    #[allow(dead_code)]
-    pub fn books_source(&self) -> Option<&FolderProfile> {
-        self.sources.iter().find(|s| s.doc_type == "book")
-    }
-
     /// Config file path.
     pub fn config_path() -> PathBuf {
         if let Ok(p) = env::var("COLIBRI_CONFIG_PATH") {
@@ -964,15 +861,6 @@ impl AppConfig {
             .ok_or_else(|| ColibriError::Config(format!("Unknown embedding profile: {profile_id}")))
     }
 
-    /// Return a config clone with embedding runtime and index path bound to profile.
-    pub fn with_embedding_profile(&self, profile: &EmbeddingProfile) -> Self {
-        let mut cloned = self.clone();
-        cloned.lancedb_dir = self.lancedb_dir_for_profile(&profile.id);
-        cloned.ollama_base_url = profile.endpoint.clone();
-        cloned.embedding_model = profile.model.clone();
-        cloned
-    }
-
     /// Return a config clone bound to a specific generation id.
     pub fn with_generation(&self, generation_id: &str) -> Result<Self, ColibriError> {
         let generation_id = self.validate_generation_id(generation_id)?;
@@ -1094,22 +982,6 @@ fn load_config_inner(bootstrap: bool) -> Result<AppConfig, ColibriError> {
     } else {
         // No config file — use defaults
         RawConfig {
-            sources: vec![FolderProfile {
-                path: dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join("Documents")
-                    .join("CoLibri")
-                    .join("Books")
-                    .to_string_lossy()
-                    .into_owned(),
-                mode: IndexMode::Static,
-                doc_type: "book".into(),
-                chunk_size: None,
-                chunk_overlap: None,
-                extensions: default_extensions(),
-                name: None,
-                classification: default_classification(),
-            }],
             data: DataConfig::default(),
             index: IndexConfig::default(),
             ollama: OllamaConfig::default(),
@@ -1173,7 +1045,6 @@ fn load_config_inner(bootstrap: bool) -> Result<AppConfig, ColibriError> {
     let embedding_model = default_profile.model.clone();
 
     let config = AppConfig {
-        sources: raw.sources,
         plugin_jobs,
         colibri_home,
         data_dir,
@@ -1210,61 +1081,6 @@ pub fn load_config() -> Result<AppConfig, ColibriError> {
 /// Load configuration without applying storage bootstrap.
 pub fn load_config_no_bootstrap() -> Result<AppConfig, ColibriError> {
     load_config_inner(false)
-}
-
-/// Structure for saving config back to YAML.
-/// Only includes sources since other settings may be from env vars.
-#[derive(Debug, Serialize)]
-struct SaveConfig {
-    sources: Vec<FolderProfile>,
-}
-
-/// Save configuration sources to the config file.
-///
-/// Only writes the `sources` section to preserve user's other settings.
-/// If the config file exists, it merges sources into the existing file.
-pub fn save_config(config: &AppConfig) -> Result<(), ColibriError> {
-    let config_path = AppConfig::config_path();
-
-    // Ensure config directory exists
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    // Try to preserve existing config structure
-    let yaml_content = if config_path.exists() {
-        let existing_text = std::fs::read_to_string(&config_path).map_err(|e| {
-            ColibriError::Config(format!("Failed to read {}: {e}", config_path.display()))
-        })?;
-
-        // Parse existing YAML as a generic value to preserve other sections
-        let mut existing: serde_yaml::Value = serde_yaml::from_str(&existing_text)
-            .unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-
-        // Update sources section
-        let sources_value = serde_yaml::to_value(&config.sources)
-            .map_err(|e| ColibriError::Config(format!("Failed to serialize sources: {e}")))?;
-
-        if let serde_yaml::Value::Mapping(ref mut map) = existing {
-            map.insert(serde_yaml::Value::String("sources".into()), sources_value);
-        }
-
-        serde_yaml::to_string(&existing)
-            .map_err(|e| ColibriError::Config(format!("Failed to serialize config: {e}")))?
-    } else {
-        // Create new config with just sources
-        let save_config = SaveConfig {
-            sources: config.sources.clone(),
-        };
-        serde_yaml::to_string(&save_config)
-            .map_err(|e| ColibriError::Config(format!("Failed to serialize config: {e}")))?
-    };
-
-    std::fs::write(&config_path, yaml_content).map_err(|e| {
-        ColibriError::Config(format!("Failed to write {}: {e}", config_path.display()))
-    })?;
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1385,7 +1201,7 @@ mod tests {
 
         let cfg_dir = home.join(".config").join("colibri");
         std::fs::create_dir_all(&cfg_dir).expect("create config dir");
-        std::fs::write(cfg_dir.join("config.yaml"), "sources: []\n").expect("write config");
+        std::fs::write(cfg_dir.join("config.yaml"), "{}\n").expect("write config");
 
         set_env_opt("HOME", Some(home.to_string_lossy().as_ref()));
         set_env_opt("XDG_DATA_HOME", None);
@@ -1435,7 +1251,7 @@ mod tests {
         let root = unique_tmp_dir("colibri-config");
         let cfg = root.join("config.yaml");
         std::fs::create_dir_all(&root).expect("create tmp root");
-        std::fs::write(&cfg, "sources: []\n").expect("write config");
+        std::fs::write(&cfg, "{}\n").expect("write config");
 
         set_env_opt("COLIBRI_CONFIG_PATH", Some(cfg.to_string_lossy().as_ref()));
         set_env_opt("COLIBRI_CONFIG", None);

@@ -5,10 +5,15 @@ use std::process::Stdio;
 
 use anyhow::{bail, Context};
 use clap::ValueEnum;
+use sha2::{Digest, Sha256};
 use tokio::process::Command;
 
+use crate::canonical_store::ingest_envelopes;
 use crate::config::load_config;
 use crate::indexer::index_library;
+use crate::plugin_host::{DocumentEnvelope, EnvelopeDocument, EnvelopeMetadata, EnvelopeSource};
+
+const IMPORT_PLUGIN_ID: &str = "cli_import";
 
 /// PDF converter choice.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -65,6 +70,31 @@ fn detect_format(path: &Path) -> anyhow::Result<Format> {
     }
 }
 
+fn sha256_hex(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn sha256_content_hash(markdown: &str) -> String {
+    format!("sha256:{}", sha256_hex(markdown))
+}
+
+fn title_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Imported Document")
+        .to_string()
+}
+
+fn unique_work_dir(prefix: &str) -> PathBuf {
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{n}"))
+}
+
 /// Check if a tool is available on PATH.
 async fn check_tool_available(tool: &str) -> anyhow::Result<()> {
     let status = Command::new("which")
@@ -87,81 +117,12 @@ async fn check_tool_available(tool: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Move images from docling output to attachments folder and update markdown references.
-fn relocate_images(
-    md_path: &Path,
-    stem: &str,
-    out_dir: &Path,
-    attachments_dir: &Path,
-) -> anyhow::Result<()> {
-    // Docling creates images in <out_dir>/<stem>/ folder
-    let images_source_dir = out_dir.join(stem);
-
-    if !images_source_dir.exists() || !images_source_dir.is_dir() {
-        return Ok(()); // No images exported
-    }
-
-    // Ensure attachments directory exists
-    std::fs::create_dir_all(attachments_dir).context("Failed to create attachments directory")?;
-
-    // Read the markdown content
-    let md_content =
-        std::fs::read_to_string(md_path).context("Failed to read markdown for image relocation")?;
-
-    let mut updated_content = md_content.clone();
-
-    // Find and move all image files
-    for entry in std::fs::read_dir(&images_source_dir)? {
-        let entry = entry?;
-        let file_path = entry.path();
-
-        if file_path.is_file() {
-            if let Some(ext) = file_path.extension().and_then(|e| e.to_str()) {
-                if ["png", "jpg", "jpeg", "gif", "webp"].contains(&ext.to_lowercase().as_str()) {
-                    let file_name = file_path.file_name().unwrap();
-                    let dest_path = attachments_dir.join(file_name);
-
-                    // Move the image
-                    std::fs::rename(&file_path, &dest_path).with_context(|| {
-                        format!("Failed to move image to {}", dest_path.display())
-                    })?;
-
-                    // Update references in markdown
-                    // Docling uses relative paths like: ./stem/image.png
-                    let old_ref = format!("./{}/{}", stem, file_name.to_string_lossy());
-
-                    // Calculate relative path from md_path to attachments_dir
-                    let md_dir = md_path.parent().unwrap_or(Path::new("."));
-                    let new_ref = if let Ok(rel) = attachments_dir.strip_prefix(md_dir) {
-                        format!("./{}/{}", rel.display(), file_name.to_string_lossy())
-                    } else {
-                        // Use absolute path if can't make relative
-                        dest_path.to_string_lossy().to_string()
-                    };
-
-                    updated_content = updated_content.replace(&old_ref, &new_ref);
-                }
-            }
-        }
-    }
-
-    // Write updated markdown if changed
-    if updated_content != md_content {
-        std::fs::write(md_path, updated_content).context("Failed to update markdown references")?;
-    }
-
-    // Clean up empty source directory
-    let _ = std::fs::remove_dir(&images_source_dir);
-
-    Ok(())
-}
-
 /// Convert PDF using docling.
 async fn convert_pdf_docling(
     input: &Path,
     out_dir: &Path,
     image_mode: ImageMode,
-    attachments_dir: Option<&Path>,
+    _attachments_dir: Option<&Path>,
 ) -> anyhow::Result<PathBuf> {
     check_tool_available("docling").await?;
 
@@ -193,13 +154,6 @@ async fn convert_pdf_docling(
 
     if !output_file.exists() {
         bail!("Expected output file not found: {}", output_file.display());
-    }
-
-    // If referenced mode with attachments dir, relocate images
-    if matches!(image_mode, ImageMode::Referenced) {
-        if let Some(attach_dir) = attachments_dir {
-            relocate_images(&output_file, stem, out_dir, attach_dir)?;
-        }
     }
 
     Ok(output_file)
@@ -316,18 +270,17 @@ pub async fn run(
     // Detect format
     let format = detect_format(&input)?;
 
-    // Determine output directory
-    let out_dir = if let Some(dir) = output_dir {
-        dir
+    if matches!(image_mode, ImageMode::Referenced) || attachments_dir.is_some() {
+        bail!(
+            "Image attachments are not supported by `colibri import` (canonical store is markdown-only). Use --image-mode placeholder or embedded."
+        );
+    }
+
+    // Determine conversion working directory (used only for intermediate tool output).
+    let (out_dir, cleanup_out_dir) = if let Some(dir) = output_dir {
+        (dir, false)
     } else {
-        let config = load_config()?;
-        if let Some(books) = config.books_source() {
-            PathBuf::from(&books.path)
-        } else {
-            bail!(
-                "No books source in config. Use --output-dir or add a source with doc_type: book"
-            );
-        }
+        (unique_work_dir("colibri-import"), true)
     };
 
     // Ensure output directory exists
@@ -337,29 +290,71 @@ pub async fn run(
     let output_file = match format {
         Format::Pdf => match converter {
             PdfConverter::Docling => {
-                convert_pdf_docling(&input, &out_dir, image_mode, attachments_dir.as_deref())
-                    .await?
+                convert_pdf_docling(&input, &out_dir, image_mode, None).await?
             }
             PdfConverter::Marker => convert_pdf_marker(&input, &out_dir).await?,
         },
-        Format::Epub => convert_epub(&input, &out_dir, attachments_dir.as_deref()).await?,
+        Format::Epub => convert_epub(&input, &out_dir, None).await?,
     };
 
-    eprintln!("✓ Imported: {}", output_file.display());
+    let markdown = std::fs::read_to_string(&output_file).with_context(|| {
+        format!(
+            "Failed to read converted markdown {}",
+            output_file.display()
+        )
+    })?;
+
+    let config = load_config()?;
+
+    let doc_id = format!(
+        "{}:{}",
+        IMPORT_PLUGIN_ID,
+        sha256_hex(input.to_string_lossy().as_ref())
+    );
+
+    let envelope = DocumentEnvelope {
+        schema_version: 1,
+        source: EnvelopeSource {
+            plugin_id: IMPORT_PLUGIN_ID.into(),
+            connector_instance: "import".into(),
+            external_id: input.to_string_lossy().to_string(),
+            uri: Some(format!("file://{}", input.to_string_lossy())),
+        },
+        document: EnvelopeDocument {
+            doc_id,
+            title: title_from_path(&input),
+            markdown: markdown.clone(),
+            content_hash: sha256_content_hash(&markdown),
+            source_updated_at: chrono::Utc::now().to_rfc3339(),
+            deleted: false,
+        },
+        metadata: EnvelopeMetadata {
+            doc_type: "book".into(),
+            classification: "internal".into(),
+            tags: None,
+            language: None,
+            acl_tags: None,
+        },
+    };
+
+    let report = ingest_envelopes(&config, &[envelope], false)?;
+    eprintln!(
+        "✓ Ingested into canonical store: written={} unchanged={} tombstoned={}",
+        report.written, report.unchanged, report.tombstoned
+    );
 
     // Re-index if requested
     if reindex {
-        eprintln!("Re-indexing books folder...");
-        let config = load_config()?;
-
-        // Find the books source name for targeted indexing
-        let folder_filter = config.books_source().map(|s| s.display_name().to_string());
-
-        let result = index_library(&config, folder_filter.as_deref(), false, |_| {}).await?;
+        eprintln!("Indexing canonical store...");
+        let result = index_library(&config, false, |_| {}).await?;
 
         if result.errors > 0 {
             eprintln!("Warning: {} indexing errors occurred", result.errors);
         }
+    }
+
+    if cleanup_out_dir {
+        let _ = std::fs::remove_dir_all(&out_dir);
     }
 
     Ok(())

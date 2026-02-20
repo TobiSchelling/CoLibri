@@ -218,9 +218,15 @@ fn resolve_required_env_name(
     }
 }
 
+struct PluginRequirementsCheck {
+    missing_tools: Vec<String>,
+    missing_env: Vec<String>,
+    suggested_commands: Vec<String>,
+}
+
 fn gather_plugin_requirements(
     jobs: &[(PathBuf, serde_json::Value)],
-) -> Result<(Vec<String>, Vec<String>, Vec<String>), ColibriError> {
+) -> Result<PluginRequirementsCheck, ColibriError> {
     let mut missing_tools: BTreeSet<String> = BTreeSet::new();
     let mut missing_env: BTreeSet<String> = BTreeSet::new();
     let mut commands: BTreeSet<String> = BTreeSet::new();
@@ -272,11 +278,11 @@ fn gather_plugin_requirements(
         }
     }
 
-    Ok((
-        missing_tools.into_iter().collect(),
-        missing_env.into_iter().collect(),
-        commands.into_iter().collect(),
-    ))
+    Ok(PluginRequirementsCheck {
+        missing_tools: missing_tools.into_iter().collect(),
+        missing_env: missing_env.into_iter().collect(),
+        suggested_commands: commands.into_iter().collect(),
+    })
 }
 
 fn write_config(
@@ -497,9 +503,9 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
             }
             manifests.push((job.manifest.clone(), job.config.clone()));
         }
-        let (missing_tools, missing_env, cmds) = gather_plugin_requirements(&manifests)?;
+        let check = gather_plugin_requirements(&manifests)?;
 
-        for cmd in &cmds {
+        for cmd in &check.suggested_commands {
             suggested.insert(cmd.to_string());
         }
 
@@ -513,7 +519,7 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
         } else {
             std::env::remove_var("COLIBRI_CONFIG_PATH");
         }
-        (missing_tools, missing_env)
+        (check.missing_tools, check.missing_env)
     };
 
     if opts.install {
@@ -611,7 +617,7 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
 
     eprintln!("\nNext:");
     eprintln!("  colibri doctor");
-    eprintln!("  colibri plugins sync-all --index-canonical");
+    eprintln!("  colibri plugins sync-all --index");
 
     Ok(())
 }

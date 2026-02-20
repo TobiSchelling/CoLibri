@@ -71,6 +71,26 @@ pub struct DocumentUpsert {
 }
 
 #[derive(Debug, Clone)]
+pub struct DocumentRow {
+    pub doc_id: String,
+    pub plugin_id: String,
+    pub connector_instance: String,
+    pub title: String,
+    pub doc_type: String,
+    pub classification: String,
+    pub markdown_path: String,
+    pub tags_json: String,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DocumentIndexStateRow {
+    pub doc_id: String,
+    pub embedding_profile_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct SyncStateEntry {
     pub sync_key: String,
     pub manifest_path: String,
@@ -503,10 +523,12 @@ CREATE TABLE IF NOT EXISTS migration_log (
         ))
     }
 
-    pub fn list_live_document_paths(&self) -> Result<HashMap<String, String>, ColibriError> {
-        let rows =
-            self.query_json("SELECT doc_id, markdown_path FROM documents WHERE deleted=0")?;
-        let mut map = HashMap::new();
+    pub fn list_documents(&self) -> Result<Vec<DocumentRow>, ColibriError> {
+        let rows = self.query_json(
+            "SELECT doc_id, plugin_id, connector_instance, title, doc_type, classification, markdown_path, tags_json, deleted \
+             FROM documents ORDER BY doc_id",
+        )?;
+        let mut out = Vec::new();
         for row in rows {
             let Some(obj) = row.as_object() else {
                 continue;
@@ -514,12 +536,80 @@ CREATE TABLE IF NOT EXISTS migration_log (
             let Some(doc_id) = obj.get("doc_id").and_then(Value::as_str) else {
                 continue;
             };
+            let Some(plugin_id) = obj.get("plugin_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(connector_instance) = obj.get("connector_instance").and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let Some(title) = obj.get("title").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(doc_type) = obj.get("doc_type").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(classification) = obj.get("classification").and_then(Value::as_str) else {
+                continue;
+            };
             let Some(markdown_path) = obj.get("markdown_path").and_then(Value::as_str) else {
                 continue;
             };
-            map.insert(markdown_path.to_string(), doc_id.to_string());
+            let tags_json = obj
+                .get("tags_json")
+                .and_then(Value::as_str)
+                .unwrap_or("[]")
+                .to_string();
+            let deleted = obj.get("deleted").and_then(Value::as_i64).unwrap_or(0) != 0;
+
+            out.push(DocumentRow {
+                doc_id: doc_id.to_string(),
+                plugin_id: plugin_id.to_string(),
+                connector_instance: connector_instance.to_string(),
+                title: title.to_string(),
+                doc_type: doc_type.to_string(),
+                classification: classification.to_string(),
+                markdown_path: markdown_path.to_string(),
+                tags_json,
+                deleted,
+            });
         }
-        Ok(map)
+        Ok(out)
+    }
+
+    pub fn list_document_index_state_for_generation(
+        &self,
+        generation_id: &str,
+    ) -> Result<Vec<DocumentIndexStateRow>, ColibriError> {
+        let rows = self.query_json(&format!(
+            "SELECT doc_id, embedding_profile_id, status \
+             FROM document_index_state WHERE generation_id={} \
+             ORDER BY doc_id, embedding_profile_id",
+            q(generation_id)
+        ))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let Some(obj) = row.as_object() else {
+                continue;
+            };
+            let Some(doc_id) = obj.get("doc_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(embedding_profile_id) =
+                obj.get("embedding_profile_id").and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let Some(status) = obj.get("status").and_then(Value::as_str) else {
+                continue;
+            };
+            out.push(DocumentIndexStateRow {
+                doc_id: doc_id.to_string(),
+                embedding_profile_id: embedding_profile_id.to_string(),
+                status: status.to_string(),
+            });
+        }
+        Ok(out)
     }
 
     pub fn upsert_document_index_state(
@@ -962,12 +1052,15 @@ mod tests {
         };
         store.upsert_document(&row).expect("upsert document");
 
-        let live = store
-            .list_live_document_paths()
-            .expect("list live documents by path");
+        let docs = store.list_documents().expect("list documents");
+        let found = docs
+            .iter()
+            .find(|d| d.doc_id == "doc_1")
+            .expect("doc exists");
+        assert!(!found.deleted);
         assert_eq!(
-            live.get("internal/filesystem_markdown/local/doc-a.md"),
-            Some(&"doc_1".to_string())
+            found.markdown_path,
+            "internal/filesystem_markdown/local/doc-a.md"
         );
 
         store
