@@ -1,5 +1,6 @@
 //! CoLibri — Local RAG system for semantic search over markdown content.
 
+mod bundled_plugins;
 mod canonical_store;
 mod cli;
 mod config;

@@ -895,7 +895,17 @@ pub async fn sync_all(opts: SyncAllOptions) -> anyhow::Result<()> {
                 error: None,
             });
         } else {
-            match index_library(&app_config, opts.index_force, |_e| {}).await {
+            let index_run = if opts.json {
+                index_library(&app_config, opts.index_force, |_e| {}).await
+            } else {
+                let progress = crate::cli::index::CliProgress::new();
+                index_library(&app_config, opts.index_force, |e| {
+                    progress.handle(e);
+                })
+                .await
+            };
+
+            match index_run {
                 Ok(index_result) => {
                     let has_errors = index_result.errors > 0;
                     if has_errors {

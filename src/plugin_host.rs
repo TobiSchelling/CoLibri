@@ -138,8 +138,9 @@ impl PluginHostLimits {
             timeout_secs: env_u64("COLIBRI_PLUGIN_TIMEOUT_SECS").unwrap_or(300),
             max_envelopes: env_usize("COLIBRI_PLUGIN_MAX_ENVELOPES").unwrap_or(10_000),
             max_stdout_bytes: env_usize("COLIBRI_PLUGIN_MAX_STDOUT_BYTES")
-                .unwrap_or(8 * 1024 * 1024),
-            max_stdout_line_bytes: env_usize("COLIBRI_PLUGIN_MAX_LINE_BYTES").unwrap_or(512 * 1024),
+                .unwrap_or(128 * 1024 * 1024),
+            max_stdout_line_bytes: env_usize("COLIBRI_PLUGIN_MAX_LINE_BYTES")
+                .unwrap_or(16 * 1024 * 1024),
             max_stderr_bytes: env_usize("COLIBRI_PLUGIN_MAX_STDERR_BYTES").unwrap_or(64 * 1024),
         }
     }
@@ -564,13 +565,13 @@ async fn read_plugin_stdout(
 
         if total_bytes > limits.max_stdout_bytes {
             return Err(ColibriError::Config(format!(
-                "Plugin '{}' exceeded max stdout bytes ({} > {})",
+                "Plugin '{}' exceeded max stdout bytes ({} > {}). Increase COLIBRI_PLUGIN_MAX_STDOUT_BYTES (bytes) if this source legitimately emits large documents.",
                 plugin_id, total_bytes, limits.max_stdout_bytes
             )));
         }
         if buf.len() > limits.max_stdout_line_bytes {
             return Err(ColibriError::Config(format!(
-                "Plugin '{}' emitted an oversized stdout line at {} ({} > {} bytes)",
+                "Plugin '{}' emitted an oversized stdout line at {} ({} > {} bytes). This usually means a single JSONL envelope (including markdown) is large. Increase COLIBRI_PLUGIN_MAX_LINE_BYTES (bytes).",
                 plugin_id,
                 line_num,
                 buf.len(),

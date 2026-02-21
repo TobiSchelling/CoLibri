@@ -23,14 +23,14 @@ struct CliProgressState {
 }
 
 impl CliProgress {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             mp: MultiProgress::new(),
             state: Mutex::new(CliProgressState::default()),
         }
     }
 
-    fn handle(&self, event: IndexEvent) {
+    pub fn handle(&self, event: IndexEvent) {
         let mut st = self.state.lock().unwrap();
         match event {
             IndexEvent::SourceStart { name } => {

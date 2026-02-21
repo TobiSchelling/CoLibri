@@ -121,7 +121,7 @@ routing:
 plugins:
   jobs:
     - id: fs_docs
-      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/bundled/filesystem_documents/plugin_manifest.json
+      manifest: ~/.local/share/colibri/plugins/bundled/filesystem_documents/plugin_manifest.json
       enabled: true
       config:
         root_path: ~/Documents/knowledge

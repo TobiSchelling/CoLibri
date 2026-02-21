@@ -6,6 +6,7 @@ use std::process::Command;
 
 use serde::Serialize;
 
+use crate::bundled_plugins;
 use crate::config::{load_config, AppConfig};
 use crate::embedding::check_ollama;
 use crate::error::ColibriError;
@@ -29,6 +30,8 @@ struct BootstrapReport {
     config_path: String,
     wrote_config: bool,
     data_dir: String,
+    bundled_plugins_ok: bool,
+    bundled_plugins_error: Option<String>,
     sqlite3_ok: bool,
     ollama_installed: bool,
     ollama_reachable: bool,
@@ -337,33 +340,39 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
     let mut config_path = opts.config_path.unwrap_or_else(default_config_path);
     let mut data_dir = opts.data_dir.unwrap_or_else(default_data_dir);
 
-    let init_job = if let Some(root) = opts.init_path.clone() {
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("plugins/bundled/filesystem_documents/plugin_manifest.json");
-        let job_config = serde_json::json!({
-            "root_path": root.display().to_string(),
-            "classification": opts.classification,
-            "include_extensions": [".md", ".markdown"]
-        });
-        Some(YamlPluginJob {
-            id: "docs".to_string(),
-            manifest: manifest.display().to_string(),
-            enabled: true,
-            config: job_config,
-        })
-    } else {
-        None
-    };
+    let (wrote_config, bundled_plugins_ok, bundled_plugins_error) = if opts.non_interactive {
+        let bundled_res = bundled_plugins::ensure_bundled_plugins(&data_dir);
+        let bundled_plugins_ok = bundled_res.is_ok();
+        let bundled_plugins_error = bundled_res.err().map(|e| e.to_string());
 
-    let wrote_config = if opts.non_interactive {
-        write_config(&config_path, &data_dir, init_job.clone())?
+        let init_job = opts.init_path.clone().map(|root| {
+            let manifest = bundled_plugins::filesystem_documents_manifest_path(&data_dir);
+            let job_config = serde_json::json!({
+                "root_path": root.display().to_string(),
+                "classification": opts.classification,
+                "include_extensions": [".md", ".markdown"]
+            });
+            YamlPluginJob {
+                id: "docs".to_string(),
+                manifest: manifest.display().to_string(),
+                enabled: true,
+                config: job_config,
+            }
+        });
+
+        let wrote_config = write_config(&config_path, &data_dir, init_job)?;
+        (wrote_config, bundled_plugins_ok, bundled_plugins_error)
     } else {
         let cfg_default = config_path.display().to_string();
         config_path = PathBuf::from(prompt_line("Config path", &cfg_default)?);
         let dir_default = data_dir.display().to_string();
         data_dir = PathBuf::from(prompt_line("Data directory (COLIBRI_HOME)", &dir_default)?);
 
-        let init = if init_job.is_none() {
+        let bundled_res = bundled_plugins::ensure_bundled_plugins(&data_dir);
+        let bundled_plugins_ok = bundled_res.is_ok();
+        let bundled_plugins_error = bundled_res.err().map(|e| e.to_string());
+
+        let init = if opts.init_path.is_none() {
             prompt_yes_no(
                 "Initialize a folder sync job (filesystem_documents; default: Markdown only)?",
                 true,
@@ -389,8 +398,7 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
                 "Classification (restricted/confidential/internal/public)",
                 "internal",
             )?;
-            let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("plugins/bundled/filesystem_documents/plugin_manifest.json");
+            let manifest = bundled_plugins::filesystem_documents_manifest_path(&data_dir);
             Some(YamlPluginJob {
                 id: "docs".to_string(),
                 manifest: manifest.display().to_string(),
@@ -405,7 +413,8 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
             None
         };
 
-        write_config(&config_path, &data_dir, job)?
+        let wrote_config = write_config(&config_path, &data_dir, job)?;
+        (wrote_config, bundled_plugins_ok, bundled_plugins_error)
     };
 
     // Dependency checks
@@ -469,6 +478,8 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
         config_path: config_path.display().to_string(),
         wrote_config,
         data_dir: data_dir.display().to_string(),
+        bundled_plugins_ok,
+        bundled_plugins_error,
         sqlite3_ok,
         ollama_installed,
         ollama_reachable,
@@ -491,6 +502,17 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
     eprintln!("Wrote config: {}", report.wrote_config);
 
     eprintln!("\nCore dependencies:");
+    eprintln!(
+        "  bundled plugins: {}",
+        if report.bundled_plugins_ok {
+            "OK"
+        } else {
+            "ERROR"
+        }
+    );
+    if let Some(err) = &report.bundled_plugins_error {
+        eprintln!("    {err}");
+    }
     eprintln!(
         "  sqlite3: {}",
         if report.sqlite3_ok { "OK" } else { "MISSING" }

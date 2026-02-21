@@ -10,7 +10,7 @@ Config:
 plugins:
   jobs:
     - id: arch_repo
-      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/bundled/filesystem_documents/plugin_manifest.json
+      manifest: ~/.local/share/colibri/plugins/bundled/filesystem_documents/plugin_manifest.json
       enabled: true
       config:
         root_path: ~/repos/architecture-docs
@@ -36,7 +36,7 @@ Config:
 plugins:
   jobs:
     - id: library
-      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/bundled/filesystem_documents/plugin_manifest.json
+      manifest: ~/.local/share/colibri/plugins/bundled/filesystem_documents/plugin_manifest.json
       enabled: true
       config:
         root_path: ~/Library/Books
@@ -60,7 +60,7 @@ Config:
 plugins:
   jobs:
     - id: drop_zone
-      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/bundled/filesystem_documents/plugin_manifest.json
+      manifest: ~/.local/share/colibri/plugins/bundled/filesystem_documents/plugin_manifest.json
       enabled: true
       config:
         root_path: ~/Documents/drop-zone

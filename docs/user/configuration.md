@@ -44,6 +44,7 @@ Notes:
 - If `id` is omitted, CoLibri assigns `job_1`, `job_2`, ...
 - `manifest` may be absolute or relative to the directory containing `config.yaml`.
 - `config` must be an object and is passed to the plugin unchanged.
+- Bundled plugin manifests are installed under `COLIBRI_HOME/plugins/` when running `colibri bootstrap` (default `COLIBRI_HOME` is `~/.local/share/colibri`).
 
 Example:
 
@@ -51,7 +52,7 @@ Example:
 plugins:
   jobs:
     - id: fs_repo
-      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/bundled/filesystem_documents/plugin_manifest.json
+      manifest: ~/.local/share/colibri/plugins/bundled/filesystem_documents/plugin_manifest.json
       enabled: true
       config:
         root_path: ~/repos/architecture-docs
@@ -59,7 +60,7 @@ plugins:
         include_extensions: [".md", ".markdown"]
 
     - id: books
-      manifest: ~/GIT_ROOT/GIT_HUB/CoLibri/plugins/bundled/filesystem_documents/plugin_manifest.json
+      manifest: ~/.local/share/colibri/plugins/bundled/filesystem_documents/plugin_manifest.json
       enabled: true
       config:
         root_path: ~/Library/Books
