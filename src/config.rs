@@ -682,7 +682,6 @@ fn ensure_metadata_db(
 pub struct AppConfig {
     pub plugin_jobs: Vec<PluginJob>,
     pub colibri_home: PathBuf,
-    pub data_dir: PathBuf,
     pub canonical_dir: PathBuf,
     pub indexes_dir: PathBuf,
     pub state_dir: PathBuf,
@@ -894,7 +893,6 @@ fn load_config_inner(bootstrap: bool) -> Result<AppConfig, ColibriError> {
     let routing_policy =
         resolve_routing_policy(&raw, &default_embedding_profile, &embedding_profiles)?;
 
-    let data_dir = colibri_home.clone();
     let canonical_dir = colibri_home.join("canonical");
     let indexes_dir = colibri_home.join("indexes");
     let state_dir = colibri_home.join("state");
@@ -935,7 +933,6 @@ fn load_config_inner(bootstrap: bool) -> Result<AppConfig, ColibriError> {
     let config = AppConfig {
         plugin_jobs,
         colibri_home,
-        data_dir,
         canonical_dir,
         indexes_dir,
         state_dir,

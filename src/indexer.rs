@@ -379,7 +379,8 @@ async fn index_profile(
 
         for mut chunk_text in chunks {
             if chunk_text.len() > MAX_CHUNK_CHARS {
-                chunk_text.truncate(MAX_CHUNK_CHARS);
+                let safe = floor_char_boundary(&chunk_text, MAX_CHUNK_CHARS);
+                chunk_text.truncate(safe);
                 chunk_text.push_str("...");
             }
             rows.push(ChunkRow {

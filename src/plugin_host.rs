@@ -20,6 +20,7 @@ static CONTENT_HASH_RE: OnceLock<Regex> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(dead_code)] // Fields validated by serde deny_unknown_fields during deserialization.
 pub struct PluginCapabilities {
     snapshot: bool,
     incremental: bool,
@@ -64,6 +65,7 @@ pub struct PluginManifest {
     pub version: String,
     pub runtime: String,
     pub entrypoint: String,
+    #[allow(dead_code)] // Required by serde schema validation (deny_unknown_fields).
     pub capabilities: PluginCapabilities,
     pub requirements: Option<PluginRequirements>,
 }
@@ -113,7 +115,6 @@ pub struct PluginRunReport {
     pub next_cursor: Option<Value>,
     pub envelopes: Vec<DocumentEnvelope>,
     pub stderr: String,
-    pub stdout_truncated: bool,
     pub stderr_truncated: bool,
 }
 
@@ -415,13 +416,6 @@ fn validate_manifest(manifest: &PluginManifest) -> Result<(), ColibriError> {
         }
     }
 
-    // Capabilities are required by schema; just ensure shape is present by referencing.
-    let _ = (
-        manifest.capabilities.snapshot,
-        manifest.capabilities.incremental,
-        manifest.capabilities.webhook,
-    );
-
     Ok(())
 }
 
@@ -529,7 +523,6 @@ pub async fn run_plugin_manifest(
         next_cursor: stdout_out.next_cursor,
         envelopes: stdout_out.envelopes,
         stderr: stderr_out.stderr,
-        stdout_truncated: stdout_out.stdout_truncated,
         stderr_truncated: stderr_out.stderr_truncated,
     })
 }
@@ -539,7 +532,6 @@ struct StdoutReadResult {
     envelopes: Vec<DocumentEnvelope>,
     next_cursor: Option<Value>,
     deleted_count: usize,
-    stdout_truncated: bool,
 }
 
 async fn read_plugin_stdout(
@@ -635,7 +627,6 @@ async fn read_plugin_stdout(
         envelopes,
         next_cursor,
         deleted_count,
-        stdout_truncated: false,
     })
 }
 

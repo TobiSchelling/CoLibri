@@ -402,7 +402,6 @@ mod tests {
         AppConfig {
             plugin_jobs: Vec::new(),
             colibri_home: colibri_home.clone(),
-            data_dir: colibri_home.clone(),
             canonical_dir: colibri_home.join("canonical"),
             indexes_dir,
             state_dir: colibri_home.join("state"),

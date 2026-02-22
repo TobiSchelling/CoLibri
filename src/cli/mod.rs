@@ -14,8 +14,41 @@ pub mod sync;
 pub mod tour;
 
 use std::path::PathBuf;
+use std::process::Command;
 
 use clap::Subcommand;
+
+/// Check whether a tool is available on `$PATH` via `which`.
+pub(crate) fn tool_on_path(tool: &str) -> bool {
+    Command::new("which")
+        .arg(tool)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Check whether a tool spec (absolute path, relative path, or bare name) resolves to something
+/// that exists on disk or on `$PATH`.
+pub(crate) fn tool_available(spec: &str) -> bool {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let path = PathBuf::from(trimmed);
+    if path.is_absolute() || trimmed.contains('/') {
+        return path.exists();
+    }
+    tool_on_path(trimmed)
+}
+
+/// Extract a non-empty trimmed string value from a JSON object by key.
+pub(crate) fn config_string(config: &serde_json::Value, key: &str) -> Option<String> {
+    config
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
 
 #[derive(Subcommand)]
 pub enum Commands {

@@ -17,10 +17,6 @@ pub enum ColibriError {
     #[error("Query error: {0}")]
     Query(String),
 
-    #[error("Manifest error: {0}")]
-    #[allow(dead_code)]
-    Manifest(String),
-
     #[error("MCP error: {0}")]
     Mcp(String),
 

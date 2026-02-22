@@ -2,10 +2,10 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Serialize;
 
+use super::{config_string, tool_available, tool_on_path};
 use crate::bundled_plugins;
 use crate::config::{load_config, AppConfig};
 use crate::embedding::check_ollama;
@@ -130,34 +130,6 @@ fn prompt_yes_no(prompt: &str, default_yes: bool) -> anyhow::Result<bool> {
         return Ok(false);
     }
     Ok(default_yes)
-}
-
-fn tool_on_path(tool: &str) -> bool {
-    Command::new("which")
-        .arg(tool)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn tool_available(spec: &str) -> bool {
-    let trimmed = spec.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let path = PathBuf::from(trimmed);
-    if path.is_absolute() || trimmed.contains('/') {
-        return path.exists();
-    }
-    tool_on_path(trimmed)
-}
-
-fn config_string(config: &serde_json::Value, key: &str) -> Option<String> {
-    config
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 async fn ollama_model_present(base_url: &str, model: &str) -> Result<Option<bool>, ColibriError> {

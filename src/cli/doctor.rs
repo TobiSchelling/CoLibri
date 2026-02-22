@@ -1,10 +1,10 @@
 //! `colibri doctor` — health check command.
 
 use std::path::PathBuf;
-use std::process::Command;
 
 use serde::Serialize;
 
+use super::{config_string, tool_available, tool_on_path};
 use crate::config::{self, load_config, SCHEMA_VERSION};
 use crate::embedding::check_ollama;
 use crate::index_meta::read_index_meta;
@@ -90,34 +90,6 @@ fn resolve_entrypoint(manifest_path: &std::path::Path, entrypoint: &str) -> Path
     }
 }
 
-fn tool_on_path(tool: &str) -> bool {
-    Command::new("which")
-        .arg(tool)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn tool_available(spec: &str) -> bool {
-    let trimmed = spec.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let path = PathBuf::from(trimmed);
-    if path.is_absolute() || trimmed.contains('/') {
-        return path.exists();
-    }
-    tool_on_path(trimmed)
-}
-
-fn config_string(config: &serde_json::Value, key: &str) -> Option<String> {
-    config
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
 pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
     if !json {
         eprintln!("CoLibri Doctor");
@@ -162,7 +134,7 @@ pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
             if !json {
                 eprintln!("OK ({})", config::AppConfig::config_path().display());
                 eprintln!("  CoLibri home: {}", config.colibri_home.display());
-                eprintln!("  Data dir: {}", config.data_dir.display());
+                eprintln!("  Data dir: {}", config.colibri_home.display());
                 eprintln!("  Canonical dir: {}", config.canonical_dir.display());
                 eprintln!("  Metadata DB: {}", config.metadata_db_path.display());
                 eprintln!("  Active generation: {}", config.active_generation);
