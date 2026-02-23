@@ -339,6 +339,16 @@ pub enum PluginCommands {
         validate_manifests: bool,
     },
 
+    /// Run a plugin's interactive configuration wizard
+    Configure {
+        /// Plugin job id (from plugins.jobs[].id in config.yaml)
+        job_id: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Inspect or reset persisted plugin sync state
     State {
         #[command(subcommand)]

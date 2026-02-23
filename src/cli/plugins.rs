@@ -998,4 +998,108 @@ pub async fn sync_all(opts: SyncAllOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub async fn configure(job_id: String, json: bool) -> anyhow::Result<()> {
+    let app_config = load_config_no_bootstrap()?;
+
+    // Find the job
+    let job = app_config
+        .plugin_jobs
+        .iter()
+        .find(|j| j.id == job_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Plugin job '{}' not found. Run `colibri plugins jobs` to list configured jobs.",
+                job_id
+            )
+        })?;
+
+    // Load manifest to check for configure hook
+    let manifest = crate::plugin_host::load_plugin_manifest(&job.manifest)
+        .with_context(|| format!("Failed to load manifest for job '{}'", job_id))?;
+
+    if manifest.configure.is_none() {
+        anyhow::bail!(
+            "Plugin '{}' does not support interactive configuration (no configure hook in manifest).",
+            manifest.plugin_id
+        );
+    }
+
+    // Write current config to temp file
+    let tmp_dir = std::env::temp_dir();
+    let config_file_path = tmp_dir.join(format!("colibri-cfg-{}.json", job_id));
+    let config_json = serde_json::to_string_pretty(&job.config)
+        .context("Failed to serialize current config")?;
+    std::fs::write(&config_file_path, &config_json)
+        .with_context(|| {
+            format!(
+                "Failed to write temp config file: {}",
+                config_file_path.display()
+            )
+        })?;
+
+    // Run the configure hook with inherited TTY
+    let result = crate::plugin_host::run_plugin_configure(&job.manifest, &config_file_path).await;
+
+    // Read back and clean up regardless of outcome
+    let readback = match &result {
+        Ok(r) if !r.cancelled => {
+            let text = std::fs::read_to_string(&config_file_path).ok();
+            let _ = std::fs::remove_file(&config_file_path);
+            text
+        }
+        _ => {
+            let _ = std::fs::remove_file(&config_file_path);
+            None
+        }
+    };
+
+    let result = result?;
+
+    if result.cancelled {
+        if json {
+            let payload = serde_json::json!({
+                "job_id": job_id,
+                "plugin_id": result.plugin_id,
+                "status": "cancelled"
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            eprintln!("Configuration cancelled. No changes were made.");
+        }
+        return Ok(());
+    }
+
+    // Parse and validate new config
+    let new_config_text = readback.ok_or_else(|| {
+        anyhow::anyhow!("Failed to read back config file after plugin configure hook")
+    })?;
+    let new_config: Value = serde_json::from_str(&new_config_text)
+        .context("Plugin wrote invalid JSON to config file")?;
+    if !new_config.is_object() {
+        anyhow::bail!("Plugin config must be a JSON object, got: {}", new_config);
+    }
+
+    // Write back to config.yaml
+    let config_path = crate::config::AppConfig::config_path();
+    crate::config::update_plugin_job_config(&config_path, &job_id, &new_config)?;
+
+    if json {
+        let payload = serde_json::json!({
+            "job_id": job_id,
+            "plugin_id": result.plugin_id,
+            "status": "ok",
+            "config": new_config
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        eprintln!("Plugin Configured");
+        eprintln!("=================");
+        eprintln!("Job: {}", job_id);
+        eprintln!("Plugin: {}", result.plugin_id);
+        eprintln!("Config updated in: {}", config_path.display());
+    }
+
+    Ok(())
+}
+
 // canonical indexing is handled by the indexer directly (no per-folder profiles).

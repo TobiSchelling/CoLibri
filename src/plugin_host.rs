@@ -59,7 +59,6 @@ pub struct PluginRequirements {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)] // Used by run_plugin_configure(); wired in Task 4.
 pub struct PluginConfigureHook {
     pub entrypoint: String,
 }
@@ -75,7 +74,6 @@ pub struct PluginManifest {
     #[allow(dead_code)] // Required by serde schema validation (deny_unknown_fields).
     pub capabilities: PluginCapabilities,
     pub requirements: Option<PluginRequirements>,
-    #[allow(dead_code)] // Used by run_plugin_configure(); wired in Task 4.
     pub configure: Option<PluginConfigureHook>,
 }
 
@@ -129,9 +127,9 @@ pub struct PluginRunReport {
 
 /// Result of running a plugin's configure hook.
 #[derive(Debug)]
-#[allow(dead_code)] // Wired in Task 4 (CLI command).
 pub struct PluginConfigureResult {
     pub plugin_id: String,
+    #[allow(dead_code)] // Informational; callers use `cancelled` for control flow.
     pub exit_code: i32,
     pub cancelled: bool,
 }
@@ -550,7 +548,6 @@ pub async fn run_plugin_manifest(
 /// The plugin receives the config file path as its first CLI argument and has
 /// full terminal access (stdin/stdout/stderr inherited). On exit 0, the caller
 /// reads back the file. Exit 1 means user cancelled.
-#[allow(dead_code)] // Wired in Task 4 (CLI command).
 pub async fn run_plugin_configure(
     manifest_path: &Path,
     config_file_path: &Path,
