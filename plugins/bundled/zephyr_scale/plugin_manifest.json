@@ -9,6 +9,9 @@
     "incremental": true,
     "webhook": false
   },
+  "configure": {
+    "entrypoint": "configure.py"
+  },
   "requirements": {
     "tools": [
       {
