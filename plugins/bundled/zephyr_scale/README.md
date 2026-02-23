@@ -37,6 +37,17 @@ Then index:
 colibri index --force
 ```
 
+## Interactive setup
+
+```bash
+colibri plugins configure <job_id>
+```
+
+Walks through project selection and folder scoping. Updates `config.yaml` automatically.
+Requires `ZEPHYR_API_TOKEN` to be set in the environment.
+
+To reconfigure later, run the same command again.
+
 ## Config notes
 
 - `folder` scopes export to a specific Zephyr folder path. When set, tombstone emission is disabled

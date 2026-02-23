@@ -111,6 +111,9 @@ async fn main() -> anyhow::Result<()> {
                 json,
                 validate_manifests,
             } => cli::plugins::jobs(json, validate_manifests).await,
+            cli::PluginCommands::Configure { job_id, json } => {
+                cli::plugins::configure(job_id, json).await
+            }
             cli::PluginCommands::State { command } => match command {
                 cli::PluginStateCommands::List { json } => cli::plugins::state_list(json).await,
                 cli::PluginStateCommands::Show {

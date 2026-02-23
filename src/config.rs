@@ -851,6 +851,62 @@ impl AppConfig {
     }
 }
 
+/// Update a plugin job's config in the YAML config file.
+///
+/// Reads the config file, finds the job by ID, replaces its `config` block
+/// with the new JSON value, and writes back. Does not preserve YAML comments.
+pub fn update_plugin_job_config(
+    config_path: &Path,
+    job_id: &str,
+    new_config: &serde_json::Value,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    let text = std::fs::read_to_string(config_path)
+        .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
+
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&text)
+        .with_context(|| format!("Failed to parse config YAML: {}", config_path.display()))?;
+
+    // Navigate to plugins.jobs array
+    let jobs = doc
+        .get_mut("plugins")
+        .and_then(|p| p.get_mut("jobs"))
+        .and_then(|j| j.as_sequence_mut())
+        .ok_or_else(|| anyhow::anyhow!("No plugins.jobs array found in config"))?;
+
+    // Find the job by id
+    let job = jobs
+        .iter_mut()
+        .find(|j| {
+            j.get("id")
+                .and_then(|id| id.as_str())
+                .map(|id| id == job_id)
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| anyhow::anyhow!("Plugin job '{}' not found in config", job_id))?;
+
+    // Convert serde_json::Value -> serde_yaml::Value
+    let yaml_config: serde_yaml::Value =
+        serde_yaml::to_value(new_config).context("Failed to convert config to YAML")?;
+
+    // Replace the config block
+    if let serde_yaml::Value::Mapping(ref mut map) = job {
+        map.insert(
+            serde_yaml::Value::String("config".into()),
+            yaml_config,
+        );
+    } else {
+        anyhow::bail!("Plugin job entry is not a YAML mapping");
+    }
+
+    let output = serde_yaml::to_string(&doc).context("Failed to serialize updated config")?;
+    std::fs::write(config_path, output)
+        .with_context(|| format!("Failed to write config file: {}", config_path.display()))?;
+
+    Ok(())
+}
+
 /// Load configuration from YAML file + env var overrides.
 ///
 /// Matches the Python `load_config()` behaviour: reads
@@ -1150,5 +1206,54 @@ mod tests {
 
         snap.restore();
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod config_update_tests {
+    use super::*;
+
+    #[test]
+    fn update_plugin_job_config_replaces_config_block() {
+        let yaml_content = r#"
+sources: []
+plugins:
+  jobs:
+    - id: myjob
+      manifest: /tmp/manifest.json
+      enabled: true
+      config:
+        old_key: old_value
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml_content).unwrap();
+
+        let new_config = serde_json::json!({"new_key": "new_value"});
+        update_plugin_job_config(tmp.path(), "myjob", &new_config).unwrap();
+
+        let updated = std::fs::read_to_string(tmp.path()).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&updated).unwrap();
+        let jobs = doc["plugins"]["jobs"].as_sequence().unwrap();
+        let job = &jobs[0];
+        assert_eq!(job["config"]["new_key"].as_str().unwrap(), "new_value");
+        assert!(job["config"].get("old_key").is_none());
+    }
+
+    #[test]
+    fn update_plugin_job_config_errors_for_unknown_job() {
+        let yaml_content = r#"
+plugins:
+  jobs:
+    - id: myjob
+      manifest: /tmp/manifest.json
+      config: {}
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), yaml_content).unwrap();
+
+        let new_config = serde_json::json!({"key": "value"});
+        let err = update_plugin_job_config(tmp.path(), "nonexistent", &new_config);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("nonexistent"));
     }
 }

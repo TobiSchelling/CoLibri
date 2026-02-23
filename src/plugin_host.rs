@@ -59,6 +59,12 @@ pub struct PluginRequirements {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PluginConfigureHook {
+    pub entrypoint: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginManifest {
     pub schema_version: u32,
     pub plugin_id: String,
@@ -68,6 +74,7 @@ pub struct PluginManifest {
     #[allow(dead_code)] // Required by serde schema validation (deny_unknown_fields).
     pub capabilities: PluginCapabilities,
     pub requirements: Option<PluginRequirements>,
+    pub configure: Option<PluginConfigureHook>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -116,6 +123,15 @@ pub struct PluginRunReport {
     pub envelopes: Vec<DocumentEnvelope>,
     pub stderr: String,
     pub stderr_truncated: bool,
+}
+
+/// Result of running a plugin's configure hook.
+#[derive(Debug)]
+pub struct PluginConfigureResult {
+    pub plugin_id: String,
+    #[allow(dead_code)] // Informational; callers use `cancelled` for control flow.
+    pub exit_code: i32,
+    pub cancelled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -527,6 +543,73 @@ pub async fn run_plugin_manifest(
     })
 }
 
+/// Run a plugin's configure entrypoint with inherited TTY.
+///
+/// The plugin receives the config file path as its first CLI argument and has
+/// full terminal access (stdin/stdout/stderr inherited). On exit 0, the caller
+/// reads back the file. Exit 1 means user cancelled.
+pub async fn run_plugin_configure(
+    manifest_path: &Path,
+    config_file_path: &Path,
+) -> Result<PluginConfigureResult, ColibriError> {
+    let manifest = load_plugin_manifest(manifest_path)?;
+
+    let hook = manifest.configure.ok_or_else(|| {
+        ColibriError::Config(format!(
+            "Plugin '{}' does not declare a configure hook",
+            manifest.plugin_id
+        ))
+    })?;
+
+    let manifest_dir = manifest_path.parent().unwrap_or(Path::new("."));
+    let entrypoint_path = resolve_entrypoint(manifest_dir, &hook.entrypoint);
+
+    if !entrypoint_path.exists() {
+        return Err(ColibriError::Config(format!(
+            "Configure entrypoint not found: {}",
+            entrypoint_path.display()
+        )));
+    }
+
+    let mut cmd = build_command(&manifest.runtime, &entrypoint_path)?;
+    cmd.arg(config_file_path);
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    let status = cmd
+        .spawn()
+        .map_err(|e| {
+            ColibriError::Config(format!(
+                "Failed to launch configure hook for '{}': {e}",
+                manifest.plugin_id
+            ))
+        })?
+        .wait()
+        .await
+        .map_err(|e| {
+            ColibriError::Config(format!(
+                "Failed waiting for configure hook '{}': {e}",
+                manifest.plugin_id
+            ))
+        })?;
+
+    let exit_code = status.code().unwrap_or(-1);
+
+    if exit_code >= 2 {
+        return Err(ColibriError::Config(format!(
+            "Plugin '{}' configure hook failed (exit code {exit_code})",
+            manifest.plugin_id
+        )));
+    }
+
+    Ok(PluginConfigureResult {
+        plugin_id: manifest.plugin_id,
+        exit_code,
+        cancelled: exit_code == 1,
+    })
+}
+
 #[derive(Debug)]
 struct StdoutReadResult {
     envelopes: Vec<DocumentEnvelope>,
@@ -820,6 +903,7 @@ mod manifest_tests {
                 webhook: false,
             },
             requirements: None,
+            configure: None,
         }
     }
 
@@ -921,5 +1005,24 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("uri"));
+    }
+}
+
+#[cfg(test)]
+mod configure_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_configure_entrypoint_relative() {
+        let manifest_dir = Path::new("/tmp/plugins/myplugin");
+        let resolved = resolve_entrypoint(manifest_dir, "configure.py");
+        assert_eq!(resolved, PathBuf::from("/tmp/plugins/myplugin/configure.py"));
+    }
+
+    #[test]
+    fn resolve_configure_entrypoint_absolute() {
+        let manifest_dir = Path::new("/tmp/plugins/myplugin");
+        let resolved = resolve_entrypoint(manifest_dir, "/usr/local/bin/configure");
+        assert_eq!(resolved, PathBuf::from("/usr/local/bin/configure"));
     }
 }
