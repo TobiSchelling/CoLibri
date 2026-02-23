@@ -133,6 +133,17 @@
           }
         }
       }
+    },
+    "configure": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "entrypoint": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": ["entrypoint"]
     }
   }
 }

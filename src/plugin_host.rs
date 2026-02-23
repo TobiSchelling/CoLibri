@@ -59,6 +59,12 @@ pub struct PluginRequirements {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PluginConfigureHook {
+    pub entrypoint: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginManifest {
     pub schema_version: u32,
     pub plugin_id: String,
@@ -68,6 +74,7 @@ pub struct PluginManifest {
     #[allow(dead_code)] // Required by serde schema validation (deny_unknown_fields).
     pub capabilities: PluginCapabilities,
     pub requirements: Option<PluginRequirements>,
+    pub configure: Option<PluginConfigureHook>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -820,6 +827,7 @@ mod manifest_tests {
                 webhook: false,
             },
             requirements: None,
+            configure: None,
         }
     }
 
