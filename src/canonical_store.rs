@@ -7,9 +7,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::config::AppConfig;
+use crate::envelope::DocumentEnvelope;
 use crate::error::ColibriError;
 use crate::metadata_store::{DocumentUpsert, MetadataStore};
-use crate::plugin_host::DocumentEnvelope;
 
 /// Summary of a canonical ingest run.
 #[derive(Debug, Clone, Serialize)]
@@ -248,9 +248,7 @@ pub fn ingest_envelopes(
 #[cfg(test)]
 mod tests {
     use super::{canonical_rel_path, safe_component};
-    use crate::plugin_host::{
-        DocumentEnvelope, EnvelopeDocument, EnvelopeMetadata, EnvelopeSource,
-    };
+    use crate::envelope::{DocumentEnvelope, EnvelopeDocument, EnvelopeMetadata, EnvelopeSource};
 
     fn sample_envelope() -> DocumentEnvelope {
         DocumentEnvelope {

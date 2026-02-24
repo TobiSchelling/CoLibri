@@ -2,11 +2,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use chrono::DateTime;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
@@ -16,7 +14,8 @@ use tokio::time::timeout;
 
 use crate::error::ColibriError;
 
-static CONTENT_HASH_RE: OnceLock<Regex> = OnceLock::new();
+// Re-export envelope types so existing code that imports from plugin_host still compiles.
+pub use crate::envelope::DocumentEnvelope;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,41 +74,6 @@ pub struct PluginManifest {
     pub capabilities: PluginCapabilities,
     pub requirements: Option<PluginRequirements>,
     pub configure: Option<PluginConfigureHook>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct EnvelopeSource {
-    pub plugin_id: String,
-    pub connector_instance: String,
-    pub external_id: String,
-    pub uri: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct EnvelopeDocument {
-    pub doc_id: String,
-    pub title: String,
-    pub markdown: String,
-    pub content_hash: String,
-    pub source_updated_at: String,
-    pub deleted: bool,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct EnvelopeMetadata {
-    pub doc_type: String,
-    pub classification: String,
-    pub tags: Option<Vec<String>>,
-    pub language: Option<String>,
-    pub acl_tags: Option<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct DocumentEnvelope {
-    pub schema_version: u32,
-    pub source: EnvelopeSource,
-    pub document: EnvelopeDocument,
-    pub metadata: EnvelopeMetadata,
 }
 
 #[derive(Debug, Serialize)]
@@ -294,10 +258,7 @@ fn validate_document_envelope_value(
         .ok_or_else(|| {
             ColibriError::Config("document_envelope.document.content_hash missing".into())
         })?;
-    let hash_re = CONTENT_HASH_RE.get_or_init(|| {
-        Regex::new(r"^sha256:[a-f0-9]{64}$").expect("content hash regex must compile")
-    });
-    if !hash_re.is_match(content_hash) {
+    if !crate::envelope::content_hash_regex().is_match(content_hash) {
         return Err(ColibriError::Config(format!(
             "Envelope content_hash has invalid format: {content_hash}"
         )));
@@ -829,61 +790,7 @@ fn validate_envelope(
     envelope: &DocumentEnvelope,
     expected_plugin_id: &str,
 ) -> Result<(), ColibriError> {
-    if envelope.schema_version != 1 {
-        return Err(ColibriError::Config(format!(
-            "Invalid envelope schema_version {} (expected 1)",
-            envelope.schema_version
-        )));
-    }
-    if envelope.source.plugin_id != expected_plugin_id {
-        return Err(ColibriError::Config(format!(
-            "Envelope plugin_id mismatch: expected '{}', got '{}'",
-            expected_plugin_id, envelope.source.plugin_id
-        )));
-    }
-    if envelope.document.doc_id.trim().is_empty() {
-        return Err(ColibriError::Config(
-            "Envelope document.doc_id cannot be empty".into(),
-        ));
-    }
-    if envelope.document.content_hash.trim().is_empty() {
-        return Err(ColibriError::Config(
-            "Envelope document.content_hash cannot be empty".into(),
-        ));
-    }
-    let hash_re = CONTENT_HASH_RE.get_or_init(|| {
-        Regex::new(r"^sha256:[a-f0-9]{64}$").expect("content hash regex must compile")
-    });
-    if !hash_re.is_match(&envelope.document.content_hash) {
-        return Err(ColibriError::Config(format!(
-            "Envelope content_hash has invalid format: {}",
-            envelope.document.content_hash
-        )));
-    }
-
-    if DateTime::parse_from_rfc3339(&envelope.document.source_updated_at).is_err() {
-        return Err(ColibriError::Config(format!(
-            "Envelope source_updated_at is not RFC3339: {}",
-            envelope.document.source_updated_at
-        )));
-    }
-
-    if envelope.metadata.doc_type.trim().is_empty() {
-        return Err(ColibriError::Config(
-            "Envelope metadata.doc_type cannot be empty".into(),
-        ));
-    }
-
-    match envelope.metadata.classification.as_str() {
-        "restricted" | "confidential" | "internal" | "public" => {}
-        other => {
-            return Err(ColibriError::Config(format!(
-                "Envelope classification must be one of restricted/confidential/internal/public, got '{other}'"
-            )))
-        }
-    }
-
-    Ok(())
+    crate::envelope::validate(envelope, expected_plugin_id)
 }
 
 #[cfg(test)]
@@ -1016,7 +923,10 @@ mod configure_tests {
     fn resolve_configure_entrypoint_relative() {
         let manifest_dir = Path::new("/tmp/plugins/myplugin");
         let resolved = resolve_entrypoint(manifest_dir, "configure.py");
-        assert_eq!(resolved, PathBuf::from("/tmp/plugins/myplugin/configure.py"));
+        assert_eq!(
+            resolved,
+            PathBuf::from("/tmp/plugins/myplugin/configure.py")
+        );
     }
 
     #[test]

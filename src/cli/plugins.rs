@@ -1027,15 +1027,14 @@ pub async fn configure(job_id: String, json: bool) -> anyhow::Result<()> {
     // Write current config to temp file
     let tmp_dir = std::env::temp_dir();
     let config_file_path = tmp_dir.join(format!("colibri-cfg-{}.json", job_id));
-    let config_json = serde_json::to_string_pretty(&job.config)
-        .context("Failed to serialize current config")?;
-    std::fs::write(&config_file_path, &config_json)
-        .with_context(|| {
-            format!(
-                "Failed to write temp config file: {}",
-                config_file_path.display()
-            )
-        })?;
+    let config_json =
+        serde_json::to_string_pretty(&job.config).context("Failed to serialize current config")?;
+    std::fs::write(&config_file_path, &config_json).with_context(|| {
+        format!(
+            "Failed to write temp config file: {}",
+            config_file_path.display()
+        )
+    })?;
 
     // Run the configure hook with inherited TTY
     let result = crate::plugin_host::run_plugin_configure(&job.manifest, &config_file_path).await;

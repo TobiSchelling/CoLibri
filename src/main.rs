@@ -5,6 +5,7 @@ mod canonical_store;
 mod cli;
 mod config;
 mod embedding;
+mod envelope;
 mod error;
 mod index_meta;
 mod indexer;

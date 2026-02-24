@@ -892,10 +892,7 @@ pub fn update_plugin_job_config(
 
     // Replace the config block
     if let serde_yaml::Value::Mapping(ref mut map) = job {
-        map.insert(
-            serde_yaml::Value::String("config".into()),
-            yaml_config,
-        );
+        map.insert(serde_yaml::Value::String("config".into()), yaml_config);
     } else {
         anyhow::bail!("Plugin job entry is not a YAML mapping");
     }

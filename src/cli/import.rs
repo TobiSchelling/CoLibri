@@ -10,8 +10,8 @@ use tokio::process::Command;
 
 use crate::canonical_store::ingest_envelopes;
 use crate::config::load_config;
+use crate::envelope::{DocumentEnvelope, EnvelopeDocument, EnvelopeMetadata, EnvelopeSource};
 use crate::indexer::index_library;
-use crate::plugin_host::{DocumentEnvelope, EnvelopeDocument, EnvelopeMetadata, EnvelopeSource};
 
 const IMPORT_PLUGIN_ID: &str = "cli_import";
 
