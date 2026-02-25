@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use super::tool_on_path;
 use crate::config::{load_config, AppConfig};
+use crate::connectors::ConnectorJob;
 use crate::embedding::check_ollama;
 use crate::error::ColibriError;
 
@@ -49,9 +50,22 @@ struct YamlOllamaConfig {
 }
 
 #[derive(Debug, Serialize)]
+struct YamlConnectorEntry {
+    #[serde(rename = "type")]
+    connector_type: String,
+    id: String,
+    enabled: bool,
+    root_path: String,
+    include_extensions: Vec<String>,
+    classification: String,
+}
+
+#[derive(Debug, Serialize)]
 struct YamlConfig {
     data: YamlDataConfig,
     ollama: YamlOllamaConfig,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    connectors: Vec<YamlConnectorEntry>,
 }
 
 fn default_config_path() -> PathBuf {
@@ -152,10 +166,29 @@ async fn ollama_model_present(base_url: &str, model: &str) -> Result<Option<bool
     Ok(Some(false))
 }
 
-fn write_config(config_path: &Path, data_dir: &Path) -> anyhow::Result<bool> {
+fn write_config(
+    config_path: &Path,
+    data_dir: &Path,
+    init_path: Option<&Path>,
+    classification: &str,
+) -> anyhow::Result<bool> {
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+
+    let connectors = if let Some(path) = init_path {
+        vec![YamlConnectorEntry {
+            connector_type: "filesystem".into(),
+            id: "docs".into(),
+            enabled: true,
+            root_path: path.display().to_string(),
+            include_extensions: vec![".md".into(), ".markdown".into()],
+            classification: classification.to_string(),
+        }]
+    } else {
+        Vec::new()
+    };
+
     let cfg = YamlConfig {
         data: YamlDataConfig {
             directory: data_dir.display().to_string(),
@@ -164,6 +197,7 @@ fn write_config(config_path: &Path, data_dir: &Path) -> anyhow::Result<bool> {
             base_url: DEFAULT_OLLAMA_BASE_URL.to_string(),
             embedding_model: DEFAULT_OLLAMA_MODEL.to_string(),
         },
+        connectors,
     };
 
     let yaml = serde_yaml::to_string(&cfg)?;
@@ -182,19 +216,59 @@ fn write_config(config_path: &Path, data_dir: &Path) -> anyhow::Result<bool> {
     Ok(wrote)
 }
 
+/// Check that external tools required by connector extensions are available.
+pub(crate) fn check_connector_tools(connectors: &[ConnectorJob]) -> Vec<String> {
+    let mut missing = Vec::new();
+    for job in connectors {
+        if job.connector_type != "filesystem" {
+            continue;
+        }
+        let exts: Vec<String> =
+            super::connectors::parse_string_array(&job.config, "include_extensions")
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| s.to_lowercase())
+                .collect();
+
+        if exts.iter().any(|e| e == ".pdf") && !tool_on_path("docling") {
+            missing.push("docling (pipx install docling) — for PDF conversion".into());
+        }
+        if exts.iter().any(|e| e == ".docx" || e == ".epub") && !tool_on_path("pandoc") {
+            missing.push("pandoc (brew install pandoc) — for DOCX/EPUB conversion".into());
+        }
+        if exts.iter().any(|e| e == ".pptx")
+            && !tool_on_path("markitdown")
+            && !tool_on_path("pandoc")
+        {
+            missing.push("markitdown or pandoc — for PPTX conversion".into());
+        }
+    }
+    missing
+}
+
 pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
     let mut config_path = opts.config_path.unwrap_or_else(default_config_path);
     let mut data_dir = opts.data_dir.unwrap_or_else(default_data_dir);
 
     let wrote_config = if opts.non_interactive {
-        write_config(&config_path, &data_dir)?
+        write_config(
+            &config_path,
+            &data_dir,
+            opts.init_path.as_deref(),
+            &opts.classification,
+        )?
     } else {
         let cfg_default = config_path.display().to_string();
         config_path = PathBuf::from(prompt_line("Config path", &cfg_default)?);
         let dir_default = data_dir.display().to_string();
         data_dir = PathBuf::from(prompt_line("Data directory (COLIBRI_HOME)", &dir_default)?);
 
-        write_config(&config_path, &data_dir)?
+        write_config(
+            &config_path,
+            &data_dir,
+            opts.init_path.as_deref(),
+            &opts.classification,
+        )?
     };
 
     // Dependency checks
@@ -230,6 +304,11 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
         // Initialize storage metadata when sqlite3 is available.
         if sqlite3_ok {
             let _ = cfg.apply_migrations();
+        }
+
+        // Check external tools required by connector extensions.
+        for tool_msg in check_connector_tools(&cfg.connector_jobs) {
+            suggested.insert(tool_msg);
         }
 
         if let Some(prev) = _prev {
@@ -308,4 +387,62 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
     eprintln!("  colibri sync");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_connector_tools_no_missing_for_markdown_only() {
+        let jobs = vec![ConnectorJob {
+            id: "docs".into(),
+            connector_type: "filesystem".into(),
+            enabled: true,
+            config: serde_json::json!({
+                "root_path": "/tmp/docs",
+                "include_extensions": [".md", ".markdown"]
+            }),
+        }];
+        let missing = check_connector_tools(&jobs);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn check_connector_tools_skips_non_filesystem() {
+        let jobs = vec![ConnectorJob {
+            id: "custom".into(),
+            connector_type: "other_type".into(),
+            enabled: true,
+            config: serde_json::json!({
+                "include_extensions": [".pdf", ".docx"]
+            }),
+        }];
+        let missing = check_connector_tools(&jobs);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn write_config_without_init_path_omits_connectors() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        let data_dir = dir.path().join("data");
+        write_config(&config_path, &data_dir, None, "internal").unwrap();
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!content.contains("connectors"));
+    }
+
+    #[test]
+    fn write_config_with_init_path_includes_connector() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        let data_dir = dir.path().join("data");
+        let init_path = dir.path().join("docs");
+        write_config(&config_path, &data_dir, Some(&init_path), "internal").unwrap();
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("connectors"));
+        assert!(content.contains("filesystem"));
+        assert!(content.contains(".md"));
+        assert!(content.contains("internal"));
+    }
 }

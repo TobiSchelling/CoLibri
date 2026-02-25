@@ -2,10 +2,21 @@
 
 use serde::Serialize;
 
+use super::tool_on_path;
 use crate::config::{self, load_config, SCHEMA_VERSION};
+use crate::connectors::ConnectorJob;
 use crate::embedding::check_ollama;
 use crate::index_meta::read_index_meta;
 use crate::mcp;
+
+#[derive(Debug, Serialize)]
+struct DoctorConnectorStatus {
+    id: String,
+    connector_type: String,
+    enabled: bool,
+    status: String,
+    issues: Vec<String>,
+}
 
 #[derive(Debug, Serialize)]
 struct DoctorReport {
@@ -30,6 +41,7 @@ struct DoctorReport {
     serving_total_profiles: Option<usize>,
     serving_issues: Vec<String>,
     connectors_configured: Option<usize>,
+    connector_details: Vec<DoctorConnectorStatus>,
 }
 
 impl DoctorReport {
@@ -56,7 +68,60 @@ impl DoctorReport {
             serving_total_profiles: None,
             serving_issues: Vec::new(),
             connectors_configured: None,
+            connector_details: Vec::new(),
         }
+    }
+}
+
+/// Diagnose a single connector, returning per-connector status and issues.
+fn diagnose_connector(job: &ConnectorJob) -> DoctorConnectorStatus {
+    let mut issues = Vec::new();
+
+    if job.connector_type == "filesystem" {
+        // Check root_path exists.
+        if let Some(raw_path) = super::config_string(&job.config, "root_path") {
+            let expanded = super::connectors::expand_tilde(&raw_path);
+            if !std::path::Path::new(&expanded).exists() {
+                issues.push(format!("root_path {raw_path} does not exist"));
+            }
+        } else {
+            issues.push("root_path is not configured".into());
+        }
+
+        // Check required tools based on extensions.
+        let exts: Vec<String> =
+            super::connectors::parse_string_array(&job.config, "include_extensions")
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| s.to_lowercase())
+                .collect();
+
+        if exts.iter().any(|e| e == ".pdf") && !tool_on_path("docling") {
+            issues.push("docling not found (needed for .pdf)".into());
+        }
+        if exts.iter().any(|e| e == ".docx" || e == ".epub") && !tool_on_path("pandoc") {
+            issues.push("pandoc not found (needed for .docx/.epub)".into());
+        }
+        if exts.iter().any(|e| e == ".pptx")
+            && !tool_on_path("markitdown")
+            && !tool_on_path("pandoc")
+        {
+            issues.push("markitdown or pandoc not found (needed for .pptx)".into());
+        }
+    }
+
+    let status = if issues.is_empty() {
+        "ok".into()
+    } else {
+        "warn".into()
+    };
+
+    DoctorConnectorStatus {
+        id: job.id.clone(),
+        connector_type: job.connector_type.clone(),
+        enabled: job.enabled,
+        status,
+        issues,
     }
 }
 
@@ -121,21 +186,44 @@ pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
             }
             let n = config.connector_jobs.len();
             report.connectors_configured = Some(n);
+
+            let mut connector_details = Vec::new();
+            for job in &config.connector_jobs {
+                connector_details.push(diagnose_connector(job));
+            }
+
+            let has_connector_issues = connector_details.iter().any(|d| d.status == "warn");
             if n == 0 {
                 if !json {
                     eprintln!("OK (no connectors configured)");
                 }
-            } else {
+            } else if has_connector_issues {
                 if !json {
-                    eprintln!("OK ({n} configured)");
+                    eprintln!("WARN ({n} configured)");
                 }
-                for job in &config.connector_jobs {
-                    let label = if job.enabled { "enabled" } else { "disabled" };
-                    if !json {
-                        eprintln!("  - {} ({}) [{label}]", job.id, job.connector_type);
+            } else if !json {
+                eprintln!("OK ({n} configured)");
+            }
+
+            if !json {
+                for detail in &connector_details {
+                    let label = if detail.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    };
+                    let status_label = detail.status.to_uppercase();
+                    eprintln!(
+                        "  - {} ({}) [{label}] {status_label}",
+                        detail.id, detail.connector_type
+                    );
+                    for issue in &detail.issues {
+                        eprintln!("    - {issue}");
                     }
                 }
             }
+
+            report.connector_details = connector_details;
 
             // 1c. Migrations
             if !json {

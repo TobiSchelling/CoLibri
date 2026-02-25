@@ -50,7 +50,7 @@ fn build_connector(job: &ConnectorJob) -> anyhow::Result<Box<dyn Connector>> {
 }
 
 /// Expand leading `~/` to the user's home directory.
-fn expand_tilde(path: &str) -> String {
+pub(crate) fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
             return format!("{}/{rest}", home.display());
@@ -64,7 +64,7 @@ fn expand_tilde(path: &str) -> String {
 }
 
 /// Parse an optional JSON array of strings from a config value.
-fn parse_string_array(config: &Value, key: &str) -> Option<Vec<String>> {
+pub(crate) fn parse_string_array(config: &Value, key: &str) -> Option<Vec<String>> {
     config.get(key).and_then(|v| v.as_array()).map(|arr| {
         arr.iter()
             .filter_map(|item| item.as_str().map(|s| s.to_string()))
