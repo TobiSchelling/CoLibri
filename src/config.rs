@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -79,45 +79,7 @@ struct RawConfig {
     routing: RoutingConfig,
 
     #[serde(default)]
-    plugins: PluginsConfig,
-
-    #[serde(default)]
     connectors: Vec<crate::connectors::ConnectorRawConfig>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct PluginsConfig {
-    #[serde(default)]
-    jobs: Vec<PluginJobRawConfig>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(default)]
-struct PluginJobRawConfig {
-    id: Option<String>,
-    manifest: String,
-    enabled: bool,
-    config: Value,
-}
-
-impl Default for PluginJobRawConfig {
-    fn default() -> Self {
-        Self {
-            id: None,
-            manifest: String::new(),
-            enabled: true,
-            config: Value::Object(Map::new()),
-        }
-    }
-}
-
-/// A configured plugin sync job.
-#[derive(Debug, Clone, Serialize)]
-pub struct PluginJob {
-    pub id: String,
-    pub manifest: PathBuf,
-    pub enabled: bool,
-    pub config: Value,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -463,57 +425,6 @@ fn enforce_local_only_routing(
     Ok(())
 }
 
-fn resolve_plugin_jobs(
-    raw: &RawConfig,
-    config_path: &Path,
-) -> Result<Vec<PluginJob>, ColibriError> {
-    let config_dir = config_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-
-    let mut jobs = Vec::new();
-    for (idx, job) in raw.plugins.jobs.iter().enumerate() {
-        let manifest_raw = job.manifest.trim();
-        if manifest_raw.is_empty() {
-            return Err(ColibriError::Config(format!(
-                "plugins.jobs[{}].manifest cannot be empty",
-                idx
-            )));
-        }
-
-        let manifest_path = {
-            let candidate = PathBuf::from(manifest_raw);
-            if candidate.is_absolute() {
-                candidate
-            } else {
-                config_dir.join(candidate)
-            }
-        };
-
-        let id = job.id.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let id = id
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| format!("job_{}", idx + 1));
-
-        if !job.config.is_object() {
-            return Err(ColibriError::Config(format!(
-                "plugins.jobs[{}].config must be a JSON/YAML object",
-                idx
-            )));
-        }
-
-        jobs.push(PluginJob {
-            id,
-            manifest: manifest_path,
-            enabled: job.enabled,
-            config: job.config.clone(),
-        });
-    }
-
-    Ok(jobs)
-}
-
 fn read_root_manifest_version(colibri_home: &std::path::Path) -> Result<Option<u32>, ColibriError> {
     let manifest_path = colibri_home.join("manifest.json");
     if !manifest_path.exists() {
@@ -683,7 +594,6 @@ fn ensure_metadata_db(
 /// Resolved application configuration.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    pub plugin_jobs: Vec<PluginJob>,
     pub connector_jobs: Vec<crate::connectors::ConnectorJob>,
     pub colibri_home: PathBuf,
     pub canonical_dir: PathBuf,
@@ -855,59 +765,6 @@ impl AppConfig {
     }
 }
 
-/// Update a plugin job's config in the YAML config file.
-///
-/// Reads the config file, finds the job by ID, replaces its `config` block
-/// with the new JSON value, and writes back. Does not preserve YAML comments.
-pub fn update_plugin_job_config(
-    config_path: &Path,
-    job_id: &str,
-    new_config: &serde_json::Value,
-) -> anyhow::Result<()> {
-    use anyhow::Context;
-
-    let text = std::fs::read_to_string(config_path)
-        .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
-
-    let mut doc: serde_yaml::Value = serde_yaml::from_str(&text)
-        .with_context(|| format!("Failed to parse config YAML: {}", config_path.display()))?;
-
-    // Navigate to plugins.jobs array
-    let jobs = doc
-        .get_mut("plugins")
-        .and_then(|p| p.get_mut("jobs"))
-        .and_then(|j| j.as_sequence_mut())
-        .ok_or_else(|| anyhow::anyhow!("No plugins.jobs array found in config"))?;
-
-    // Find the job by id
-    let job = jobs
-        .iter_mut()
-        .find(|j| {
-            j.get("id")
-                .and_then(|id| id.as_str())
-                .map(|id| id == job_id)
-                .unwrap_or(false)
-        })
-        .ok_or_else(|| anyhow::anyhow!("Plugin job '{}' not found in config", job_id))?;
-
-    // Convert serde_json::Value -> serde_yaml::Value
-    let yaml_config: serde_yaml::Value =
-        serde_yaml::to_value(new_config).context("Failed to convert config to YAML")?;
-
-    // Replace the config block
-    if let serde_yaml::Value::Mapping(ref mut map) = job {
-        map.insert(serde_yaml::Value::String("config".into()), yaml_config);
-    } else {
-        anyhow::bail!("Plugin job entry is not a YAML mapping");
-    }
-
-    let output = serde_yaml::to_string(&doc).context("Failed to serialize updated config")?;
-    std::fs::write(config_path, output)
-        .with_context(|| format!("Failed to write config file: {}", config_path.display()))?;
-
-    Ok(())
-}
-
 /// Load configuration from YAML file + env var overrides.
 ///
 /// Matches the Python `load_config()` behaviour: reads
@@ -933,12 +790,9 @@ fn load_config_inner(bootstrap: bool) -> Result<AppConfig, ColibriError> {
             chunking: ChunkingConfig::default(),
             embeddings: EmbeddingsConfig::default(),
             routing: RoutingConfig::default(),
-            plugins: PluginsConfig::default(),
             connectors: Vec::new(),
         }
     };
-
-    let plugin_jobs = resolve_plugin_jobs(&raw, &config_path)?;
 
     // Resolve native connector jobs.
     let connector_jobs: Vec<crate::connectors::ConnectorJob> = raw
@@ -1009,7 +863,6 @@ fn load_config_inner(bootstrap: bool) -> Result<AppConfig, ColibriError> {
     let embedding_model = default_profile.model.clone();
 
     let config = AppConfig {
-        plugin_jobs,
         connector_jobs,
         colibri_home,
         canonical_dir,
@@ -1229,54 +1082,5 @@ mod tests {
 
         snap.restore();
         let _ = std::fs::remove_dir_all(root);
-    }
-}
-
-#[cfg(test)]
-mod config_update_tests {
-    use super::*;
-
-    #[test]
-    fn update_plugin_job_config_replaces_config_block() {
-        let yaml_content = r#"
-sources: []
-plugins:
-  jobs:
-    - id: myjob
-      manifest: /tmp/manifest.json
-      enabled: true
-      config:
-        old_key: old_value
-"#;
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), yaml_content).unwrap();
-
-        let new_config = serde_json::json!({"new_key": "new_value"});
-        update_plugin_job_config(tmp.path(), "myjob", &new_config).unwrap();
-
-        let updated = std::fs::read_to_string(tmp.path()).unwrap();
-        let doc: serde_yaml::Value = serde_yaml::from_str(&updated).unwrap();
-        let jobs = doc["plugins"]["jobs"].as_sequence().unwrap();
-        let job = &jobs[0];
-        assert_eq!(job["config"]["new_key"].as_str().unwrap(), "new_value");
-        assert!(job["config"].get("old_key").is_none());
-    }
-
-    #[test]
-    fn update_plugin_job_config_errors_for_unknown_job() {
-        let yaml_content = r#"
-plugins:
-  jobs:
-    - id: myjob
-      manifest: /tmp/manifest.json
-      config: {}
-"#;
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), yaml_content).unwrap();
-
-        let new_config = serde_json::json!({"key": "value"});
-        let err = update_plugin_job_config(tmp.path(), "nonexistent", &new_config);
-        assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("nonexistent"));
     }
 }

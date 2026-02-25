@@ -1,4 +1,4 @@
-//! Canonical markdown persistence for plugin ingestion.
+//! Canonical markdown persistence for connector ingestion.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -125,7 +125,7 @@ fn build_document_upsert(
     })
 }
 
-/// Persist validated plugin envelopes into canonical storage and metadata DB.
+/// Persist validated connector envelopes into canonical storage and metadata DB.
 pub fn ingest_envelopes(
     config: &AppConfig,
     envelopes: &[DocumentEnvelope],

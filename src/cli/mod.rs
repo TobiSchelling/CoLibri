@@ -7,7 +7,6 @@ pub mod import;
 pub mod index;
 pub mod instructions;
 pub mod migrate;
-pub mod plugins;
 pub mod profiles;
 pub mod search;
 pub mod serve;
@@ -30,6 +29,7 @@ pub(crate) fn tool_on_path(tool: &str) -> bool {
 
 /// Check whether a tool spec (absolute path, relative path, or bare name) resolves to something
 /// that exists on disk or on `$PATH`.
+#[allow(dead_code)]
 pub(crate) fn tool_available(spec: &str) -> bool {
     let trimmed = spec.trim();
     if trimmed.is_empty() {
@@ -107,13 +107,6 @@ pub enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
-    },
-
-    /// Run plugin commands
-    #[command(hide = true)]
-    Plugins {
-        #[command(subcommand)]
-        command: PluginCommands,
     },
 
     /// Manage native connectors
@@ -237,188 +230,6 @@ pub enum Commands {
 pub enum ConnectorCommands {
     /// List configured connectors
     List {
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum PluginCommands {
-    /// Execute a plugin manifest and validate emitted envelopes
-    Run {
-        /// Path to plugin_manifest.json
-        #[arg(long)]
-        manifest: PathBuf,
-
-        /// JSON object passed as plugin config (mutually exclusive with --config-file)
-        #[arg(long)]
-        config_json: Option<String>,
-
-        /// Path to JSON file used as plugin config (mutually exclusive with --config-json)
-        #[arg(long)]
-        config_file: Option<PathBuf>,
-
-        /// Include envelope payloads in output (default: summary only)
-        #[arg(long)]
-        include_envelopes: bool,
-
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Execute a plugin and persist envelopes into canonical storage
-    Ingest {
-        /// Path to plugin_manifest.json
-        #[arg(long)]
-        manifest: PathBuf,
-
-        /// JSON object passed as plugin config (mutually exclusive with --config-file)
-        #[arg(long)]
-        config_json: Option<String>,
-
-        /// Path to JSON file used as plugin config (mutually exclusive with --config-json)
-        #[arg(long)]
-        config_file: Option<PathBuf>,
-
-        /// Validate and report writes without mutating canonical storage
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Execute a plugin incrementally using persisted sync cursor state
-    Sync {
-        /// Path to plugin_manifest.json
-        #[arg(long)]
-        manifest: PathBuf,
-
-        /// JSON object passed as plugin config (mutually exclusive with --config-file)
-        #[arg(long)]
-        config_json: Option<String>,
-
-        /// Path to JSON file used as plugin config (mutually exclusive with --config-json)
-        #[arg(long)]
-        config_file: Option<PathBuf>,
-
-        /// Validate and report writes without mutating canonical storage/state
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Execute all configured plugin sync jobs from config.yaml
-    SyncAll {
-        /// Restrict to specific job id(s); may be repeated
-        #[arg(long = "job")]
-        jobs: Vec<String>,
-
-        /// Also run jobs marked as disabled in config
-        #[arg(long)]
-        include_disabled: bool,
-
-        /// Stop on first failed job
-        #[arg(long)]
-        fail_fast: bool,
-
-        /// Index canonical corpus after successful sync run
-        #[arg(long)]
-        index: bool,
-
-        /// Force full rebuild for optional index step
-        #[arg(long)]
-        index_force: bool,
-
-        /// Validate and report writes without mutating canonical storage/state
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Show configured plugin jobs from config.yaml
-    Jobs {
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-
-        /// Include filesystem validation status for manifest paths
-        #[arg(long)]
-        validate_manifests: bool,
-    },
-
-    /// Run a plugin's interactive configuration wizard
-    Configure {
-        /// Plugin job id (from plugins.jobs[].id in config.yaml)
-        job_id: String,
-
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Inspect or reset persisted plugin sync state
-    State {
-        #[command(subcommand)]
-        command: PluginStateCommands,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum PluginStateCommands {
-    /// List all persisted plugin sync entries
-    List {
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Show sync entry for a specific manifest + config pair
-    Show {
-        /// Path to plugin_manifest.json
-        #[arg(long)]
-        manifest: PathBuf,
-
-        /// JSON object passed as plugin config (mutually exclusive with --config-file)
-        #[arg(long)]
-        config_json: Option<String>,
-
-        /// Path to JSON file used as plugin config (mutually exclusive with --config-json)
-        #[arg(long)]
-        config_file: Option<PathBuf>,
-
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Remove sync entry for a specific manifest + config pair
-    Reset {
-        /// Path to plugin_manifest.json
-        #[arg(long)]
-        manifest: PathBuf,
-
-        /// JSON object passed as plugin config (mutually exclusive with --config-file)
-        #[arg(long)]
-        config_json: Option<String>,
-
-        /// Path to JSON file used as plugin config (mutually exclusive with --config-json)
-        #[arg(long)]
-        config_file: Option<PathBuf>,
-
-        /// Required safety flag to confirm reset action
-        #[arg(long)]
-        yes: bool,
-
         /// Output as JSON
         #[arg(long)]
         json: bool,

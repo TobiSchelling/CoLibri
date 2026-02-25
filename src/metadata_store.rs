@@ -91,20 +91,6 @@ pub struct DocumentIndexStateRow {
     pub indexed_markdown_path: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct SyncStateEntry {
-    pub sync_key: String,
-    pub manifest_path: String,
-    pub config_hash: String,
-    pub plugin_id: Option<String>,
-    pub cursor: Option<Value>,
-    pub last_success_at: Option<String>,
-    pub last_error_at: Option<String>,
-    pub last_error: Option<String>,
-    pub envelope_count_last_run: Option<u64>,
-    pub updated_at: String,
-}
-
 pub struct MetadataStore {
     path: PathBuf,
 }
@@ -176,18 +162,6 @@ CREATE TABLE IF NOT EXISTS document_blobs (
     markdown_path TEXT NOT NULL,
     size_bytes INTEGER NOT NULL,
     checksum TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS sync_state (
-    sync_key TEXT PRIMARY KEY,
-    manifest_path TEXT NOT NULL,
-    config_hash TEXT NOT NULL,
-    plugin_id TEXT,
-    cursor_json TEXT,
-    last_success_at TEXT,
-    last_error_at TEXT,
-    last_error TEXT,
-    envelope_count_last_run INTEGER,
     updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS index_generations (
@@ -732,124 +706,6 @@ CREATE TABLE IF NOT EXISTS migration_log (
         ))
     }
 
-    pub fn get_sync_cursor(&self, sync_key: &str) -> Result<Option<Value>, ColibriError> {
-        let rows = self.query_json(&format!(
-            "SELECT cursor_json FROM sync_state WHERE sync_key={} LIMIT 1",
-            q(sync_key)
-        ))?;
-        let Some(row) = rows.first() else {
-            return Ok(None);
-        };
-        let raw = row.get("cursor_json").and_then(Value::as_str).unwrap_or("");
-        if raw.trim().is_empty() {
-            return Ok(None);
-        }
-        Ok(serde_json::from_str(raw).ok())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn upsert_sync_success(
-        &self,
-        sync_key: &str,
-        manifest_path: &str,
-        config_hash: &str,
-        plugin_id: &str,
-        cursor: Option<Value>,
-        envelope_count_last_run: usize,
-    ) -> Result<(), ColibriError> {
-        let now = Utc::now().to_rfc3339();
-        let cursor_json = cursor.map(|v| serde_json::to_string(&v)).transpose()?;
-        let sql = format!(
-            "INSERT INTO sync_state(\
-                sync_key, manifest_path, config_hash, plugin_id, cursor_json,\
-                last_success_at, last_error_at, last_error, envelope_count_last_run, updated_at\
-             ) VALUES ({sync_key}, {manifest_path}, {config_hash}, {plugin_id}, {cursor_json}, {last_success_at}, NULL, NULL, {envelope_count}, {updated_at}) \
-             ON CONFLICT(sync_key) DO UPDATE SET \
-                manifest_path=excluded.manifest_path,\
-                config_hash=excluded.config_hash,\
-                plugin_id=excluded.plugin_id,\
-                cursor_json=excluded.cursor_json,\
-                last_success_at=excluded.last_success_at,\
-                last_error_at=NULL,\
-                last_error=NULL,\
-                envelope_count_last_run=excluded.envelope_count_last_run,\
-                updated_at=excluded.updated_at;",
-            sync_key = q(sync_key),
-            manifest_path = q(manifest_path),
-            config_hash = q(config_hash),
-            plugin_id = q(plugin_id),
-            cursor_json = q_opt(cursor_json.as_deref()),
-            last_success_at = q(&now),
-            envelope_count = envelope_count_last_run as i64,
-            updated_at = q(&Utc::now().to_rfc3339()),
-        );
-        self.exec_script(&sql)
-    }
-
-    pub fn upsert_sync_error(
-        &self,
-        sync_key: &str,
-        manifest_path: &str,
-        config_hash: &str,
-        error: &str,
-    ) -> Result<(), ColibriError> {
-        let now = Utc::now().to_rfc3339();
-        let sql = format!(
-            "INSERT INTO sync_state(\
-                sync_key, manifest_path, config_hash, plugin_id, cursor_json,\
-                last_success_at, last_error_at, last_error, envelope_count_last_run, updated_at\
-             ) VALUES ({sync_key}, {manifest_path}, {config_hash}, NULL, NULL, NULL, {last_error_at}, {last_error}, NULL, {updated_at}) \
-             ON CONFLICT(sync_key) DO UPDATE SET \
-                manifest_path=excluded.manifest_path,\
-                config_hash=excluded.config_hash,\
-                last_error_at=excluded.last_error_at,\
-                last_error=excluded.last_error,\
-                updated_at=excluded.updated_at;",
-            sync_key = q(sync_key),
-            manifest_path = q(manifest_path),
-            config_hash = q(config_hash),
-            last_error_at = q(&now),
-            last_error = q(error),
-            updated_at = q(&Utc::now().to_rfc3339()),
-        );
-        self.exec_script(&sql)
-    }
-
-    pub fn list_sync_entries(&self) -> Result<Vec<SyncStateEntry>, ColibriError> {
-        let rows = self.query_json(
-            "SELECT sync_key, manifest_path, config_hash, plugin_id, cursor_json,\
-                    last_success_at, last_error_at, last_error, envelope_count_last_run, updated_at \
-             FROM sync_state ORDER BY sync_key",
-        )?;
-        rows.into_iter().map(parse_sync_row).collect()
-    }
-
-    pub fn get_sync_entry(&self, sync_key: &str) -> Result<Option<SyncStateEntry>, ColibriError> {
-        let rows = self.query_json(&format!(
-            "SELECT sync_key, manifest_path, config_hash, plugin_id, cursor_json,\
-                    last_success_at, last_error_at, last_error, envelope_count_last_run, updated_at \
-             FROM sync_state WHERE sync_key={} LIMIT 1",
-            q(sync_key)
-        ))?;
-        let Some(row) = rows.into_iter().next() else {
-            return Ok(None);
-        };
-        Ok(Some(parse_sync_row(row)?))
-    }
-
-    pub fn delete_sync_entry(&self, sync_key: &str) -> Result<bool, ColibriError> {
-        let rows = self.query_json(&format!(
-            "DELETE FROM sync_state WHERE sync_key={}; SELECT changes() AS affected;",
-            q(sync_key)
-        ))?;
-        let affected = rows
-            .first()
-            .and_then(|r| r.get("affected"))
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        Ok(affected > 0)
-    }
-
     fn exec_script(&self, sql: &str) -> Result<(), ColibriError> {
         require_sqlite3()?;
         let output = Command::new("sqlite3").arg(&self.path).arg(sql).output()?;
@@ -896,62 +752,6 @@ CREATE TABLE IF NOT EXISTS migration_log (
         let rows = parsed.as_array().cloned().unwrap_or_default();
         Ok(rows)
     }
-}
-
-fn parse_sync_row(row: Value) -> Result<SyncStateEntry, ColibriError> {
-    let obj = row
-        .as_object()
-        .ok_or_else(|| ColibriError::Config("Invalid sync_state row shape".into()))?;
-    let cursor = obj
-        .get("cursor_json")
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .and_then(|s| serde_json::from_str::<Value>(s).ok());
-    let envelope_count_last_run = obj
-        .get("envelope_count_last_run")
-        .and_then(Value::as_i64)
-        .and_then(|v| if v >= 0 { Some(v as u64) } else { None });
-
-    Ok(SyncStateEntry {
-        sync_key: obj
-            .get("sync_key")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        manifest_path: obj
-            .get("manifest_path")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        config_hash: obj
-            .get("config_hash")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        plugin_id: obj
-            .get("plugin_id")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        cursor,
-        last_success_at: obj
-            .get("last_success_at")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        last_error_at: obj
-            .get("last_error_at")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        last_error: obj
-            .get("last_error")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        envelope_count_last_run,
-        updated_at: obj
-            .get("updated_at")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-    })
 }
 
 fn q(raw: &str) -> String {

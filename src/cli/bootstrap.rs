@@ -5,17 +5,16 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::{config_string, tool_available, tool_on_path};
-use crate::bundled_plugins;
+use super::tool_on_path;
 use crate::config::{load_config, AppConfig};
 use crate::embedding::check_ollama;
 use crate::error::ColibriError;
-use crate::plugin_host::{load_plugin_manifest, RequiredEnvVar, RequiredTool};
 
 const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434";
 const DEFAULT_OLLAMA_MODEL: &str = "bge-m3";
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct BootstrapOptions {
     pub config_path: Option<PathBuf>,
     pub data_dir: Option<PathBuf>,
@@ -30,15 +29,11 @@ struct BootstrapReport {
     config_path: String,
     wrote_config: bool,
     data_dir: String,
-    bundled_plugins_ok: bool,
-    bundled_plugins_error: Option<String>,
     sqlite3_ok: bool,
     ollama_installed: bool,
     ollama_reachable: bool,
     ollama_model: String,
     ollama_model_present: Option<bool>,
-    plugin_tools_missing: Vec<String>,
-    plugin_env_missing: Vec<String>,
     suggested_commands: Vec<String>,
 }
 
@@ -53,24 +48,10 @@ struct YamlOllamaConfig {
     embedding_model: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct YamlPluginJob {
-    id: String,
-    manifest: String,
-    enabled: bool,
-    config: serde_json::Value,
-}
-
-#[derive(Debug, Serialize)]
-struct YamlPluginsConfig {
-    jobs: Vec<YamlPluginJob>,
-}
-
 #[derive(Debug, Serialize)]
 struct YamlConfig {
     data: YamlDataConfig,
     ollama: YamlOllamaConfig,
-    plugins: YamlPluginsConfig,
 }
 
 fn default_config_path() -> PathBuf {
@@ -119,6 +100,7 @@ fn prompt_line(prompt: &str, default: &str) -> anyhow::Result<String> {
     })
 }
 
+#[allow(dead_code)]
 fn prompt_yes_no(prompt: &str, default_yes: bool) -> anyhow::Result<bool> {
     let default = if default_yes { "Y/n" } else { "y/N" };
     let input = prompt_line(prompt, default)?;
@@ -170,117 +152,10 @@ async fn ollama_model_present(base_url: &str, model: &str) -> Result<Option<bool
     Ok(Some(false))
 }
 
-fn resolve_required_tool_spec(
-    tool: &RequiredTool,
-    job_config: &serde_json::Value,
-) -> Option<String> {
-    if let Some(key) = tool.check_from_config.as_deref() {
-        config_string(job_config, key).or_else(|| tool.default.clone())
-    } else {
-        tool.check.clone()
-    }
-}
-
-fn resolve_required_env_name(
-    var: &RequiredEnvVar,
-    job_config: &serde_json::Value,
-) -> Option<String> {
-    if let Some(key) = var.name_from_config.as_deref() {
-        config_string(job_config, key).or_else(|| var.default.clone())
-    } else {
-        var.name.clone()
-    }
-}
-
-struct PluginRequirementsCheck {
-    missing_tools: Vec<String>,
-    missing_env: Vec<String>,
-    suggested_commands: Vec<String>,
-}
-
-fn gather_plugin_requirements(
-    jobs: &[(PathBuf, serde_json::Value)],
-) -> Result<PluginRequirementsCheck, ColibriError> {
-    let mut missing_tools: BTreeSet<String> = BTreeSet::new();
-    let mut missing_env: BTreeSet<String> = BTreeSet::new();
-    let mut commands: BTreeSet<String> = BTreeSet::new();
-
-    for (manifest_path, job_config) in jobs {
-        let manifest = load_plugin_manifest(manifest_path)?;
-        let relevant_tool_checks = crate::plugin_requirements::tool_checks_relevant_for_job(
-            &manifest.plugin_id,
-            job_config,
-        );
-        if let Some(req) = &manifest.requirements {
-            if let Some(tools) = &req.tools {
-                for tool in tools {
-                    if let Some(filter) = &relevant_tool_checks {
-                        if let Some(check) = tool.check.as_deref() {
-                            if matches!(check, "pandoc" | "docling" | "soffice" | "pdftotext")
-                                && !filter.contains(check)
-                            {
-                                continue;
-                            }
-                        }
-                    }
-                    let spec = resolve_required_tool_spec(tool, job_config);
-                    let Some(spec) = spec else {
-                        continue;
-                    };
-                    if !tool_available(&spec) {
-                        let optional = tool.optional.unwrap_or(false);
-                        let prefix = if optional { "optional " } else { "" };
-                        missing_tools.insert(format!("{prefix}{spec} ({})", manifest.plugin_id));
-                        if let Some(formula) = tool.brew.as_deref() {
-                            commands.insert(format!("brew install {formula}"));
-                        }
-                        if let Some(cask) = tool.brew_cask.as_deref() {
-                            commands.insert(format!("brew install --cask {cask}"));
-                        }
-                        if let Some(pkg) = tool.pipx.as_deref() {
-                            commands.insert(format!("pipx install {pkg}"));
-                        }
-                        if let Some(hint) = tool.install_hint.as_deref() {
-                            commands.insert(hint.to_string());
-                        }
-                    }
-                }
-            }
-            if let Some(env) = &req.env {
-                for var in env {
-                    let Some(name) = resolve_required_env_name(var, job_config) else {
-                        continue;
-                    };
-                    let present = std::env::var(&name).ok().is_some_and(|v| !v.is_empty());
-                    if var.required && !present {
-                        missing_env.insert(format!("{name} ({})", manifest.plugin_id));
-                        if let Some(hint) = var.hint.as_deref() {
-                            commands.insert(hint.to_string());
-                        } else {
-                            commands.insert(format!("export {name}=..."));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(PluginRequirementsCheck {
-        missing_tools: missing_tools.into_iter().collect(),
-        missing_env: missing_env.into_iter().collect(),
-        suggested_commands: commands.into_iter().collect(),
-    })
-}
-
-fn write_config(
-    config_path: &Path,
-    data_dir: &Path,
-    init_job: Option<YamlPluginJob>,
-) -> anyhow::Result<bool> {
+fn write_config(config_path: &Path, data_dir: &Path) -> anyhow::Result<bool> {
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let jobs = init_job.into_iter().collect::<Vec<_>>();
     let cfg = YamlConfig {
         data: YamlDataConfig {
             directory: data_dir.display().to_string(),
@@ -289,7 +164,6 @@ fn write_config(
             base_url: DEFAULT_OLLAMA_BASE_URL.to_string(),
             embedding_model: DEFAULT_OLLAMA_MODEL.to_string(),
         },
-        plugins: YamlPluginsConfig { jobs },
     };
 
     let yaml = serde_yaml::to_string(&cfg)?;
@@ -312,81 +186,15 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
     let mut config_path = opts.config_path.unwrap_or_else(default_config_path);
     let mut data_dir = opts.data_dir.unwrap_or_else(default_data_dir);
 
-    let (wrote_config, bundled_plugins_ok, bundled_plugins_error) = if opts.non_interactive {
-        let bundled_res = bundled_plugins::ensure_bundled_plugins(&data_dir);
-        let bundled_plugins_ok = bundled_res.is_ok();
-        let bundled_plugins_error = bundled_res.err().map(|e| e.to_string());
-
-        let init_job = opts.init_path.clone().map(|root| {
-            let manifest = bundled_plugins::filesystem_documents_manifest_path(&data_dir);
-            let job_config = serde_json::json!({
-                "root_path": root.display().to_string(),
-                "classification": opts.classification,
-                "include_extensions": [".md", ".markdown"]
-            });
-            YamlPluginJob {
-                id: "docs".to_string(),
-                manifest: manifest.display().to_string(),
-                enabled: true,
-                config: job_config,
-            }
-        });
-
-        let wrote_config = write_config(&config_path, &data_dir, init_job)?;
-        (wrote_config, bundled_plugins_ok, bundled_plugins_error)
+    let wrote_config = if opts.non_interactive {
+        write_config(&config_path, &data_dir)?
     } else {
         let cfg_default = config_path.display().to_string();
         config_path = PathBuf::from(prompt_line("Config path", &cfg_default)?);
         let dir_default = data_dir.display().to_string();
         data_dir = PathBuf::from(prompt_line("Data directory (COLIBRI_HOME)", &dir_default)?);
 
-        let bundled_res = bundled_plugins::ensure_bundled_plugins(&data_dir);
-        let bundled_plugins_ok = bundled_res.is_ok();
-        let bundled_plugins_error = bundled_res.err().map(|e| e.to_string());
-
-        let init = if opts.init_path.is_none() {
-            prompt_yes_no(
-                "Initialize a folder sync job (filesystem_documents; default: Markdown only)?",
-                true,
-            )?
-        } else {
-            true
-        };
-
-        let job = if init {
-            let root_default = opts
-                .init_path
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| {
-                    dirs::home_dir()
-                        .unwrap_or_else(|| PathBuf::from("."))
-                        .join("Documents")
-                        .display()
-                        .to_string()
-                });
-            let root = prompt_line("Root path", &root_default)?;
-            let class = prompt_line(
-                "Classification (restricted/confidential/internal/public)",
-                "internal",
-            )?;
-            let manifest = bundled_plugins::filesystem_documents_manifest_path(&data_dir);
-            Some(YamlPluginJob {
-                id: "docs".to_string(),
-                manifest: manifest.display().to_string(),
-                enabled: true,
-                config: serde_json::json!({
-                    "root_path": root,
-                    "classification": class,
-                    "include_extensions": [".md", ".markdown"]
-                }),
-            })
-        } else {
-            None
-        };
-
-        let wrote_config = write_config(&config_path, &data_dir, job)?;
-        (wrote_config, bundled_plugins_ok, bundled_plugins_error)
+        write_config(&config_path, &data_dir)?
     };
 
     // Dependency checks
@@ -413,9 +221,8 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
         suggested.insert(format!("ollama pull {model}"));
     }
 
-    // Gather plugin requirements from the config we just wrote.
-    // We load config with env overrides by setting COLIBRI_CONFIG_PATH for this process.
-    let (plugin_tools_missing, plugin_env_missing) = {
+    // Load and validate config.
+    {
         let _prev = std::env::var("COLIBRI_CONFIG_PATH").ok();
         std::env::set_var("COLIBRI_CONFIG_PATH", &config_path);
         let cfg = load_config().map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -425,40 +232,22 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
             let _ = cfg.apply_migrations();
         }
 
-        let mut manifests: Vec<(PathBuf, serde_json::Value)> = Vec::new();
-        for job in &cfg.plugin_jobs {
-            if !job.enabled {
-                continue;
-            }
-            manifests.push((job.manifest.clone(), job.config.clone()));
-        }
-        let check = gather_plugin_requirements(&manifests)?;
-
-        for cmd in &check.suggested_commands {
-            suggested.insert(cmd.to_string());
-        }
-
         if let Some(prev) = _prev {
             std::env::set_var("COLIBRI_CONFIG_PATH", prev);
         } else {
             std::env::remove_var("COLIBRI_CONFIG_PATH");
         }
-        (check.missing_tools, check.missing_env)
-    };
+    }
 
     let report = BootstrapReport {
         config_path: config_path.display().to_string(),
         wrote_config,
         data_dir: data_dir.display().to_string(),
-        bundled_plugins_ok,
-        bundled_plugins_error,
         sqlite3_ok,
         ollama_installed,
         ollama_reachable,
         ollama_model: model,
         ollama_model_present: model_present,
-        plugin_tools_missing,
-        plugin_env_missing,
         suggested_commands: suggested.into_iter().collect(),
     };
 
@@ -474,17 +263,6 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
     eprintln!("Wrote config: {}", report.wrote_config);
 
     eprintln!("\nCore dependencies:");
-    eprintln!(
-        "  bundled plugins: {}",
-        if report.bundled_plugins_ok {
-            "OK"
-        } else {
-            "ERROR"
-        }
-    );
-    if let Some(err) = &report.bundled_plugins_error {
-        eprintln!("    {err}");
-    }
     eprintln!(
         "  sqlite3: {}",
         if report.sqlite3_ok { "OK" } else { "MISSING" }
@@ -516,22 +294,6 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
             "  ollama model {}: unknown (server not reachable)",
             report.ollama_model
         );
-    }
-
-    if !report.plugin_tools_missing.is_empty() || !report.plugin_env_missing.is_empty() {
-        eprintln!("\nPlugin requirements:");
-        if !report.plugin_tools_missing.is_empty() {
-            eprintln!("  Missing tools:");
-            for item in &report.plugin_tools_missing {
-                eprintln!("    - {item}");
-            }
-        }
-        if !report.plugin_env_missing.is_empty() {
-            eprintln!("  Missing env vars:");
-            for item in &report.plugin_env_missing {
-                eprintln!("    - {item}");
-            }
-        }
     }
 
     if !report.suggested_commands.is_empty() {

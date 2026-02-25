@@ -13,9 +13,11 @@ use sha2::{Digest, Sha256};
 
 use crate::error::ColibriError;
 
+#[allow(dead_code)]
 pub(crate) static CONTENT_HASH_RE: OnceLock<Regex> = OnceLock::new();
 
 /// Returns the compiled regex for validating content hash format.
+#[allow(dead_code)]
 pub(crate) fn content_hash_regex() -> &'static Regex {
     CONTENT_HASH_RE.get_or_init(|| {
         Regex::new(r"^sha256:[a-f0-9]{64}$").expect("content hash regex must compile")
@@ -68,6 +70,7 @@ pub fn content_hash(markdown: &str) -> String {
 ///
 /// Checks schema version, plugin_id match, required fields, content_hash
 /// format, RFC 3339 timestamp, and classification values.
+#[allow(dead_code)]
 pub fn validate(envelope: &DocumentEnvelope, expected_plugin_id: &str) -> Result<(), ColibriError> {
     if envelope.schema_version != 1 {
         return Err(ColibriError::Config(format!(

@@ -1,28 +1,11 @@
 //! `colibri doctor` — health check command.
 
-use std::path::PathBuf;
-
 use serde::Serialize;
 
-use super::{config_string, tool_available, tool_on_path};
 use crate::config::{self, load_config, SCHEMA_VERSION};
 use crate::embedding::check_ollama;
 use crate::index_meta::read_index_meta;
 use crate::mcp;
-use crate::plugin_host::load_plugin_manifest;
-use crate::plugin_requirements::tool_checks_relevant_for_job;
-
-#[derive(Debug, Serialize)]
-struct DoctorPluginJobStatus {
-    id: String,
-    enabled: bool,
-    manifest: String,
-    plugin_id: Option<String>,
-    runtime: Option<String>,
-    entrypoint: Option<String>,
-    status: String,
-    issues: Vec<String>,
-}
 
 #[derive(Debug, Serialize)]
 struct DoctorReport {
@@ -46,7 +29,7 @@ struct DoctorReport {
     serving_queryable_profiles: Option<usize>,
     serving_total_profiles: Option<usize>,
     serving_issues: Vec<String>,
-    plugin_jobs: Vec<DoctorPluginJobStatus>,
+    connectors_configured: Option<usize>,
 }
 
 impl DoctorReport {
@@ -72,21 +55,8 @@ impl DoctorReport {
             serving_queryable_profiles: None,
             serving_total_profiles: None,
             serving_issues: Vec::new(),
-            plugin_jobs: Vec::new(),
+            connectors_configured: None,
         }
-    }
-}
-
-fn resolve_entrypoint(manifest_path: &std::path::Path, entrypoint: &str) -> PathBuf {
-    let manifest_dir = manifest_path
-        .parent()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let candidate = PathBuf::from(entrypoint);
-    if candidate.is_absolute() {
-        candidate
-    } else {
-        manifest_dir.join(candidate)
     }
 }
 
@@ -145,208 +115,25 @@ pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
                 eprintln!("  LanceDB dir: {}", config.lancedb_dir.display());
             }
 
-            // 1b. Plugins
+            // 1b. Connectors
             if !json {
-                eprint!("\nPlugins ... ");
+                eprint!("\nConnectors ... ");
             }
-            if config.plugin_jobs.is_empty() {
+            let n = config.connector_jobs.len();
+            report.connectors_configured = Some(n);
+            if n == 0 {
                 if !json {
-                    eprintln!("OK (no plugin jobs configured)");
+                    eprintln!("OK (no connectors configured)");
                 }
             } else {
                 if !json {
-                    eprintln!("OK ({})", config.plugin_jobs.len());
+                    eprintln!("OK ({n} configured)");
                 }
-                for job in &config.plugin_jobs {
-                    let mut issues: Vec<String> = Vec::new();
-                    let mut status = "ok".to_string();
-
-                    if !job.manifest.exists() {
-                        status = "missing_manifest".into();
-                        issues.push("manifest file not found".into());
-                        if strict && job.enabled {
-                            strict_violation = true;
-                        }
-                        report.plugin_jobs.push(DoctorPluginJobStatus {
-                            id: job.id.clone(),
-                            enabled: job.enabled,
-                            manifest: job.manifest.display().to_string(),
-                            plugin_id: None,
-                            runtime: None,
-                            entrypoint: None,
-                            status,
-                            issues,
-                        });
-                        continue;
-                    }
-
-                    let manifest = match load_plugin_manifest(&job.manifest) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            status = "invalid_manifest".into();
-                            issues.push(e.to_string());
-                            if strict && job.enabled {
-                                strict_violation = true;
-                            }
-                            report.plugin_jobs.push(DoctorPluginJobStatus {
-                                id: job.id.clone(),
-                                enabled: job.enabled,
-                                manifest: job.manifest.display().to_string(),
-                                plugin_id: None,
-                                runtime: None,
-                                entrypoint: None,
-                                status,
-                                issues,
-                            });
-                            continue;
-                        }
-                    };
-
-                    let entrypoint_path =
-                        resolve_entrypoint(job.manifest.as_path(), &manifest.entrypoint);
-                    if !entrypoint_path.exists() {
-                        status = "warn".into();
-                        issues.push(format!(
-                            "entrypoint not found: {}",
-                            entrypoint_path.display()
-                        ));
-                    }
-
-                    match manifest.runtime.as_str() {
-                        "python" => {
-                            if !tool_on_path("python3") {
-                                status = "warn".into();
-                                issues.push("python3 not found on PATH".into());
-                            }
-                        }
-                        "external" | "rust" => {
-                            if entrypoint_path.exists() {
-                                if let Ok(meta) = std::fs::metadata(&entrypoint_path) {
-                                    #[cfg(unix)]
-                                    {
-                                        use std::os::unix::fs::PermissionsExt;
-                                        if meta.permissions().mode() & 0o111 == 0 {
-                                            status = "warn".into();
-                                            issues.push(format!(
-                                                "entrypoint is not executable: {}",
-                                                entrypoint_path.display()
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        "wasm" => {
-                            status = "warn".into();
-                            issues.push(
-                                "wasm runtime declared, but no wasm runner is implemented".into(),
-                            );
-                        }
-                        other => {
-                            status = "warn".into();
-                            issues.push(format!("unsupported runtime: {other}"));
-                        }
-                    }
-
-                    if let Some(req) = &manifest.requirements {
-                        let relevant_tool_checks =
-                            tool_checks_relevant_for_job(&manifest.plugin_id, &job.config);
-                        // Tools
-                        if let Some(tools) = &req.tools {
-                            for tool in tools {
-                                let optional = tool.optional.unwrap_or(false);
-                                let spec = if let Some(key) = tool.check_from_config.as_deref() {
-                                    config_string(&job.config, key).or_else(|| tool.default.clone())
-                                } else {
-                                    tool.check.clone()
-                                };
-
-                                let Some(spec) = spec else {
-                                    continue;
-                                };
-                                if let Some(filter) = &relevant_tool_checks {
-                                    if let Some(check) = tool.check.as_deref() {
-                                        if matches!(
-                                            check,
-                                            "pandoc" | "docling" | "soffice" | "pdftotext"
-                                        ) && !filter.contains(check)
-                                        {
-                                            continue;
-                                        }
-                                    }
-                                }
-                                if !tool_available(&spec) {
-                                    status = "warn".into();
-                                    let mut msg = format!("missing tool: {spec}");
-                                    if let Some(hint) = tool.install_hint.as_deref() {
-                                        msg.push_str(&format!(" ({hint})"));
-                                    } else if let Some(formula) = tool.brew.as_deref() {
-                                        msg.push_str(&format!(" (brew install {formula})"));
-                                    } else if let Some(cask) = tool.brew_cask.as_deref() {
-                                        msg.push_str(&format!(" (brew install --cask {cask})"));
-                                    } else if let Some(pkg) = tool.pipx.as_deref() {
-                                        msg.push_str(&format!(" (pipx install {pkg})"));
-                                    }
-                                    if optional {
-                                        msg = format!("optional {msg}");
-                                    }
-                                    issues.push(msg);
-                                }
-                            }
-                        }
-
-                        // Env vars
-                        if let Some(env) = &req.env {
-                            for var in env {
-                                let required = var.required;
-                                let name = if let Some(key) = var.name_from_config.as_deref() {
-                                    config_string(&job.config, key).or_else(|| var.default.clone())
-                                } else {
-                                    var.name.clone()
-                                };
-                                let Some(name) = name else {
-                                    continue;
-                                };
-                                let present =
-                                    std::env::var(&name).ok().is_some_and(|v| !v.is_empty());
-                                if required && !present {
-                                    status = "warn".into();
-                                    let mut msg = format!("required env var not set: {name}");
-                                    if let Some(hint) = var.hint.as_deref() {
-                                        msg.push_str(&format!(" ({hint})"));
-                                    }
-                                    issues.push(msg);
-                                }
-                            }
-                        }
-                    }
-
+                for job in &config.connector_jobs {
+                    let label = if job.enabled { "enabled" } else { "disabled" };
                     if !json {
-                        let label = if job.enabled { "enabled" } else { "disabled" };
-                        if issues.is_empty() {
-                            eprintln!("  - {} ({}) [{}] OK", job.id, manifest.plugin_id, label);
-                        } else {
-                            eprintln!(
-                                "  - {} ({}) [{}] {}: {}",
-                                job.id,
-                                manifest.plugin_id,
-                                label,
-                                status.to_uppercase(),
-                                issues.join("; ")
-                            );
-                        }
+                        eprintln!("  - {} ({}) [{label}]", job.id, job.connector_type);
                     }
-
-                    report.plugin_jobs.push(DoctorPluginJobStatus {
-                        id: job.id.clone(),
-                        enabled: job.enabled,
-                        manifest: job.manifest.display().to_string(),
-                        plugin_id: Some(manifest.plugin_id),
-                        runtime: Some(manifest.runtime),
-                        entrypoint: Some(manifest.entrypoint),
-                        status,
-                        issues,
-                    });
                 }
             }
 

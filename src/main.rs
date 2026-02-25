@@ -1,6 +1,5 @@
 //! CoLibri — Local RAG system for semantic search over markdown content.
 
-mod bundled_plugins;
 mod canonical_store;
 mod cli;
 mod config;
@@ -12,8 +11,6 @@ mod index_meta;
 mod indexer;
 mod mcp;
 mod metadata_store;
-mod plugin_host;
-mod plugin_requirements;
 mod query;
 mod serve_ready;
 
@@ -67,74 +64,6 @@ async fn main() -> anyhow::Result<()> {
         cli::Commands::Profiles { json } => cli::profiles::run(json).await,
         cli::Commands::Connectors { command } => match command {
             cli::ConnectorCommands::List { json } => cli::connectors::list(json).await,
-        },
-        cli::Commands::Plugins { command } => match command {
-            cli::PluginCommands::Run {
-                manifest,
-                config_json,
-                config_file,
-                include_envelopes,
-                json,
-            } => {
-                cli::plugins::run(manifest, config_json, config_file, include_envelopes, json).await
-            }
-            cli::PluginCommands::Ingest {
-                manifest,
-                config_json,
-                config_file,
-                dry_run,
-                json,
-            } => cli::plugins::ingest(manifest, config_json, config_file, dry_run, json).await,
-            cli::PluginCommands::Sync {
-                manifest,
-                config_json,
-                config_file,
-                dry_run,
-                json,
-            } => cli::plugins::sync(manifest, config_json, config_file, dry_run, json).await,
-            cli::PluginCommands::SyncAll {
-                jobs,
-                include_disabled,
-                fail_fast,
-                index,
-                index_force,
-                dry_run,
-                json,
-            } => {
-                cli::plugins::sync_all(cli::plugins::SyncAllOptions {
-                    requested_jobs: jobs,
-                    include_disabled,
-                    fail_fast,
-                    index,
-                    index_force,
-                    dry_run,
-                    json,
-                })
-                .await
-            }
-            cli::PluginCommands::Jobs {
-                json,
-                validate_manifests,
-            } => cli::plugins::jobs(json, validate_manifests).await,
-            cli::PluginCommands::Configure { job_id, json } => {
-                cli::plugins::configure(job_id, json).await
-            }
-            cli::PluginCommands::State { command } => match command {
-                cli::PluginStateCommands::List { json } => cli::plugins::state_list(json).await,
-                cli::PluginStateCommands::Show {
-                    manifest,
-                    config_json,
-                    config_file,
-                    json,
-                } => cli::plugins::state_show(manifest, config_json, config_file, json).await,
-                cli::PluginStateCommands::Reset {
-                    manifest,
-                    config_json,
-                    config_file,
-                    yes,
-                    json,
-                } => cli::plugins::state_reset(manifest, config_json, config_file, yes, json).await,
-            },
         },
         cli::Commands::Index { force } => cli::index::run(force).await,
         cli::Commands::Sync {

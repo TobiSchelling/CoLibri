@@ -4,7 +4,6 @@ use std::path::PathBuf;
 
 use crate::config::{load_config, AppConfig};
 use crate::metadata_store::MetadataStore;
-use crate::plugin_host::load_plugin_manifest;
 
 /// Run the instructions command.
 pub async fn run(output: Option<PathBuf>) -> anyhow::Result<()> {
@@ -69,20 +68,17 @@ fn generate_instructions(config: &AppConfig) -> anyhow::Result<String> {
         }
     }
 
-    if config.plugin_jobs.is_empty() {
-        md.push_str("- Ingestion jobs: none configured\n");
-        md.push_str(
-            "  - Configure `plugins.jobs` in `config.yaml` and run `colibri plugins sync-all`.\n",
-        );
+    if config.connector_jobs.is_empty() {
+        md.push_str("- Connectors: none configured\n");
+        md.push_str("  - Configure `connectors` in `config.yaml` and run `colibri sync`.\n");
     } else {
-        md.push_str("- Ingestion jobs (plugins):\n");
-        for job in &config.plugin_jobs {
-            let plugin_id = load_plugin_manifest(&job.manifest)
-                .ok()
-                .map(|m| m.plugin_id)
-                .unwrap_or_else(|| "unknown".into());
+        md.push_str("- Connectors:\n");
+        for job in &config.connector_jobs {
             let enabled = if job.enabled { "enabled" } else { "disabled" };
-            md.push_str(&format!("  - {} ({plugin_id}) [{enabled}]\n", job.id));
+            md.push_str(&format!(
+                "  - {} ({}) [{enabled}]\n",
+                job.id, job.connector_type
+            ));
         }
     }
 
