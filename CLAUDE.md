@@ -23,18 +23,23 @@ CoLibri is a local RAG system that indexes markdown content into LanceDB for sem
 ### Data Flow
 
 ```
-Markdown Sources → Indexer → LanceDB ← SearchEngine ← MCP Server / CLI
-                      ↑                       ↑
-               Ollama /api/embed        Ollama /api/embed
-              (batches of 32)           (single query)
+Connectors → DocumentEnvelope[] → Canonical Store → Indexer → LanceDB
+                                   (markdown + SQLite)    ↑
+                                                   Ollama /api/embed
+                                                  (batches of 32)
+
+SearchEngine ← LanceDB ← MCP Server / CLI
+     ↑
+Ollama /api/embed (single query)
 ```
 
 ### Key Types & Boundaries
 
 - **`AppConfig`** (`config.rs`): Resolved config loaded from YAML + env var overrides. Central to all operations.
-- **`ContentSource` trait** (`sources/mod.rs`): Abstraction for content providers. Returns `SourceDocument` structs. Only implementation: `MarkdownFolderSource`.
-- **`FolderProfile`** (`config.rs`): Per-source config (path, mode, doc_type, chunk settings). Supports two `IndexMode`s: `Static` (skip known files) and `Incremental` (track changes via mtime+hash). Both modes detect deletions.
-- **`Manifest`** (`manifest.rs`): JSON-persisted change tracker. Keys are namespaced `"{source_id_12hex}:{rel_path}"`. Uses mtime-first, then SHA-256 for change detection.
+- **`Connector` trait** (`connectors/mod.rs`): `async fn sync(&self) -> Result<Vec<DocumentEnvelope>>`. Only implementation: `FilesystemConnector`.
+- **`DocumentEnvelope`** (`envelope.rs`): Canonical document representation with source, document, and metadata sections. Produced by connectors, consumed by canonical store.
+- **`ConnectorJob`** (`connectors/mod.rs`): Resolved connector config with `id`, `connector_type`, `enabled`, and `config: serde_json::Value`.
+- **`FilesystemConnector`** (`connectors/filesystem.rs`): Walks directories, reads/converts files (MD, PDF, DOCX, EPUB, PPTX), enriches PlantUML blocks, produces envelopes.
 - **`SearchEngine`** (`query.rs`): Wraps LanceDB table. L2 distance → similarity via `exp(-distance)`. Filters by `similarity_threshold`.
 - **`ColibriError`** (`error.rs`): `thiserror` enum with domain variants. CLI commands return `anyhow::Result` at the boundary.
 
@@ -48,31 +53,36 @@ JSON-RPC over stdio (`mcp.rs`). Lazily initializes `SearchEngine` on first tool 
 
 ### Key Patterns
 
-- **Per-source profiles**: Each content directory is a `FolderProfile` with its own indexing mode, doc_type, chunk settings.
-- **Incremental indexing**: `Manifest` tracks file state (mtime + SHA-256). Only changed files are re-embedded.
+- **Connector-based ingestion**: Each connector produces `Vec<DocumentEnvelope>`. Envelopes are persisted to canonical markdown store and tracked in SQLite metadata DB.
+- **Content-hash deduplication**: Canonical store uses SHA-256 content hashes to skip unchanged documents.
+- **Document conversion**: FilesystemConnector converts non-markdown formats via external tools (docling for PDF, pandoc for DOCX/EPUB, markitdown for PPTX).
+- **PlantUML enrichment**: PlantUML blocks in markdown are parsed and entity/relation summaries inserted as HTML comments for searchability.
 - **Schema versioning**: `SCHEMA_VERSION` in `config.rs`. Mismatch triggers automatic full rebuild.
-- **Nested exclusions**: When indexing, a source auto-excludes paths that belong to other configured sources.
 - **Embedding batching**: Ollama requests batched at 32 texts, 120s timeout per batch.
 
 ## Config Structure
 
-The YAML config uses nested sections (not flat keys as README suggests):
-
 ```yaml
-sources:
+data:
+  directory: ~/.local/share/colibri
+ollama:
+  base_url: http://localhost:11434
+  embedding_model: bge-m3
+connectors:
+  - type: filesystem
+    id: books
+    enabled: true
+    root_path: ~/Library/Books
+    include_extensions: [.md, .markdown]
+    exclude_globs: ["**/node_modules/**"]
+    doc_type: book
+    classification: internal
+    plantuml_summaries: true   # default: true
+sources:                       # legacy folder profiles for indexing
   - name: Books
     path: ~/Library/Books
     doc_type: book
-    mode: static          # static | incremental
-ollama:
-  base_url: http://localhost:11434
-  embedding_model: bge-m3  # default model
-retrieval:
-  top_k: 10
-  similarity_threshold: 0.3
-chunking:
-  chunk_size: 3000
-  chunk_overlap: 200
+    mode: static               # static | incremental
 ```
 
 Env var overrides: `COLIBRI_DATA_DIR`, `OLLAMA_BASE_URL`, `COLIBRI_EMBEDDING_MODEL`.
@@ -80,8 +90,11 @@ Env var overrides: `COLIBRI_DATA_DIR`, `OLLAMA_BASE_URL`, `COLIBRI_EMBEDDING_MOD
 ## Data Locations
 
 - `~/.config/colibri/config.yaml` — Configuration
+- `~/.local/share/colibri/` — Data directory (COLIBRI_HOME)
+- `~/.local/share/colibri/canonical/` — Canonical markdown store (connector output)
+- `~/.local/share/colibri/metadata.db` — SQLite metadata database
 - `~/.local/share/colibri/lancedb/` — Vector index
-- `~/.local/share/colibri/manifest.json` — Change tracking
+- `~/.local/share/colibri/manifest.json` — Change tracking (legacy sources)
 - `~/.local/share/colibri/index_meta.json` — Schema version and stats
 
 ## CI
