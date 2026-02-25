@@ -163,9 +163,10 @@ pub async fn list(json: bool) -> anyhow::Result<()> {
 }
 
 /// Run sync for all (or selected) connectors.
-pub async fn sync_all(opts: SyncAllOptions) -> anyhow::Result<()> {
-    if opts.dry_run && opts.index {
-        anyhow::bail!("`--no-index false` cannot be used with `--dry-run`");
+pub async fn sync_all(mut opts: SyncAllOptions) -> anyhow::Result<()> {
+    // Dry-run implies no indexing — silently disable rather than erroring.
+    if opts.dry_run {
+        opts.index = false;
     }
 
     let app_config = if opts.dry_run {
