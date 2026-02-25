@@ -4,6 +4,7 @@ mod bundled_plugins;
 mod canonical_store;
 mod cli;
 mod config;
+mod connectors;
 mod embedding;
 mod envelope;
 mod error;

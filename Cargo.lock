@@ -1215,6 +1215,7 @@ dependencies = [
  "anyhow",
  "arrow-array",
  "arrow-schema",
+ "async-trait",
  "chrono",
  "clap",
  "dirs",

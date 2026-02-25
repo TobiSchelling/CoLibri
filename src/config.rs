@@ -80,6 +80,9 @@ struct RawConfig {
 
     #[serde(default)]
     plugins: PluginsConfig,
+
+    #[serde(default)]
+    connectors: Vec<crate::connectors::ConnectorRawConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -681,6 +684,8 @@ fn ensure_metadata_db(
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub plugin_jobs: Vec<PluginJob>,
+    #[allow(dead_code)] // Consumed by CLI sync (upcoming task).
+    pub connector_jobs: Vec<crate::connectors::ConnectorJob>,
     pub colibri_home: PathBuf,
     pub canonical_dir: PathBuf,
     pub indexes_dir: PathBuf,
@@ -930,10 +935,31 @@ fn load_config_inner(bootstrap: bool) -> Result<AppConfig, ColibriError> {
             embeddings: EmbeddingsConfig::default(),
             routing: RoutingConfig::default(),
             plugins: PluginsConfig::default(),
+            connectors: Vec::new(),
         }
     };
 
     let plugin_jobs = resolve_plugin_jobs(&raw, &config_path)?;
+
+    // Resolve native connector jobs.
+    let connector_jobs: Vec<crate::connectors::ConnectorJob> = raw
+        .connectors
+        .iter()
+        .enumerate()
+        .map(|(idx, c)| {
+            let id = if c.id.trim().is_empty() {
+                format!("connector_{}", idx + 1)
+            } else {
+                c.id.trim().to_string()
+            };
+            crate::connectors::ConnectorJob {
+                id,
+                connector_type: c.connector_type.clone(),
+                enabled: c.enabled,
+                config: c.config.clone(),
+            }
+        })
+        .collect();
 
     // Resolve app root: COLIBRI_HOME > COLIBRI_DATA_DIR > config data.directory > XDG default
     let colibri_home = resolve_colibri_home(raw.data.directory.as_deref());
@@ -985,6 +1011,7 @@ fn load_config_inner(bootstrap: bool) -> Result<AppConfig, ColibriError> {
 
     let config = AppConfig {
         plugin_jobs,
+        connector_jobs,
         colibri_home,
         canonical_dir,
         indexes_dir,

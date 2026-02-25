@@ -41,6 +41,9 @@ sha2 = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Async trait support
+async-trait = "0.1"
+
 # Error handling
 thiserror = "2"
 anyhow = "1"
