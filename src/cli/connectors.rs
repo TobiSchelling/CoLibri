@@ -7,6 +7,7 @@ use crate::canonical_store::{ingest_envelopes, CanonicalIngestReport};
 use crate::cli::config_string;
 use crate::config::{load_config, load_config_no_bootstrap, AppConfig};
 use crate::connectors::filesystem::FilesystemConnector;
+use crate::connectors::zephyr_scale::ZephyrScaleConnector;
 use crate::connectors::{Connector, ConnectorJob};
 use crate::indexer::index_library;
 
@@ -43,6 +44,59 @@ fn build_connector(job: &ConnectorJob) -> anyhow::Result<Box<dyn Connector>> {
                 doc_type,
                 classification,
                 plantuml_summaries,
+            }))
+        }
+        "zephyr_scale" => {
+            let project_key = config_string(&job.config, "project_key").ok_or_else(|| {
+                anyhow::anyhow!("connector '{}': missing project_key", job.id)
+            })?;
+
+            let api_base_url = config_string(&job.config, "api_base_url")
+                .unwrap_or_else(|| "https://api.zephyrscale.smartbear.com/v2".into());
+
+            // Resolve token: direct config value or env var
+            let token_env = config_string(&job.config, "token_env")
+                .unwrap_or_else(|| "ZEPHYR_API_TOKEN".into());
+            let token = config_string(&job.config, "token")
+                .or_else(|| std::env::var(&token_env).ok().filter(|s| !s.is_empty()))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "connector '{}': no API token — set `token` in config or env var {}",
+                        job.id,
+                        token_env
+                    )
+                })?;
+
+            let folder_path = config_string(&job.config, "folder_path");
+
+            let doc_type =
+                config_string(&job.config, "doc_type").unwrap_or_else(|| "test_case".into());
+
+            let classification =
+                config_string(&job.config, "classification").unwrap_or_else(|| "internal".into());
+
+            let include_steps = job
+                .config
+                .get("include_steps")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            let include_links = job
+                .config
+                .get("include_links")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            Ok(Box::new(ZephyrScaleConnector {
+                id: job.id.clone(),
+                project_key,
+                api_base_url,
+                token,
+                folder_path,
+                doc_type,
+                classification,
+                include_steps,
+                include_links,
             }))
         }
         other => anyhow::bail!("connector '{}': unknown connector type '{}'", job.id, other),
@@ -524,5 +578,63 @@ mod tests {
     fn parse_string_array_missing_key_returns_none() {
         let config = serde_json::json!({});
         assert!(parse_string_array(&config, "missing").is_none());
+    }
+
+    #[test]
+    fn build_zephyr_connector_missing_project_key_errors() {
+        let job = ConnectorJob {
+            id: "zephyr-test".into(),
+            connector_type: "zephyr_scale".into(),
+            enabled: true,
+            config: serde_json::json!({"token": "test-token"}),
+        };
+        let err = build_connector(&job).err().expect("should fail");
+        assert!(err.to_string().contains("project_key"));
+    }
+
+    #[test]
+    fn build_zephyr_connector_missing_token_errors() {
+        // Ensure env var is not set for this test
+        std::env::remove_var("ZEPHYR_API_TOKEN");
+        let job = ConnectorJob {
+            id: "zephyr-test".into(),
+            connector_type: "zephyr_scale".into(),
+            enabled: true,
+            config: serde_json::json!({"project_key": "PROJ"}),
+        };
+        let err = build_connector(&job).err().expect("should fail");
+        assert!(err.to_string().contains("token"));
+    }
+
+    #[test]
+    fn build_zephyr_connector_with_config_token_succeeds() {
+        let job = ConnectorJob {
+            id: "zephyr-test".into(),
+            connector_type: "zephyr_scale".into(),
+            enabled: true,
+            config: serde_json::json!({
+                "project_key": "PROJ",
+                "token": "my-secret-token"
+            }),
+        };
+        let connector = build_connector(&job).expect("should succeed");
+        assert_eq!(connector.id(), "zephyr-test");
+    }
+
+    #[test]
+    fn build_zephyr_connector_with_env_token_succeeds() {
+        std::env::set_var("TEST_ZEPHYR_TOKEN", "env-token");
+        let job = ConnectorJob {
+            id: "zephyr-test".into(),
+            connector_type: "zephyr_scale".into(),
+            enabled: true,
+            config: serde_json::json!({
+                "project_key": "PROJ",
+                "token_env": "TEST_ZEPHYR_TOKEN"
+            }),
+        };
+        let connector = build_connector(&job).expect("should succeed");
+        assert_eq!(connector.id(), "zephyr-test");
+        std::env::remove_var("TEST_ZEPHYR_TOKEN");
     }
 }

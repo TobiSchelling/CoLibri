@@ -3,6 +3,10 @@
 //! Provides serde types for API responses and a thin `reqwest`-based client
 //! with pagination support.
 
+// API response types include all fields from the Zephyr API schema for
+// correct deserialization, even when not all fields are read in logic.
+#![allow(dead_code)]
+
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::Deserialize;
 

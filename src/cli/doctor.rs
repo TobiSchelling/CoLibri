@@ -108,6 +108,25 @@ fn diagnose_connector(job: &ConnectorJob) -> DoctorConnectorStatus {
         {
             issues.push("markitdown or pandoc not found (needed for .pptx)".into());
         }
+    } else if job.connector_type == "zephyr_scale" {
+        // Check project_key is configured.
+        if super::config_string(&job.config, "project_key").is_none() {
+            issues.push("project_key is not configured".into());
+        }
+
+        // Check API token is available (config field or env var).
+        let token_env = super::config_string(&job.config, "token_env")
+            .unwrap_or_else(|| "ZEPHYR_API_TOKEN".into());
+        let has_token = super::config_string(&job.config, "token").is_some()
+            || std::env::var(&token_env)
+                .ok()
+                .filter(|s| !s.is_empty())
+                .is_some();
+        if !has_token {
+            issues.push(format!(
+                "no API token — set `token` in config or env var {token_env}"
+            ));
+        }
     }
 
     let status = if issues.is_empty() {
