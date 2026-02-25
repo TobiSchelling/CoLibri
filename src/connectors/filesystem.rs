@@ -2,13 +2,15 @@
 //!
 //! Walks a directory tree, filters by extension and exclude globs,
 //! reads Markdown files, and produces `DocumentEnvelope`s.
-//! Non-markdown conversion (PDF, DOCX, etc.) is deferred to Task 4.
+//! Non-markdown formats (PDF, DOCX, EPUB, PPTX) are converted to
+//! Markdown via external tools (docling, pandoc, markitdown).
 
 // Wired into production code paths in Task 6 (CLI sync).
 #![allow(dead_code)]
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -72,7 +74,16 @@ impl Connector for FilesystemConnector {
                         continue;
                     }
                 },
-                _ => continue, // Non-markdown handled in Task 4
+                ".pdf" | ".epub" | ".docx" | ".pptx" => {
+                    match convert_to_markdown(&ext, file_path) {
+                        Ok(text) => text,
+                        Err(e) => {
+                            eprintln!("Failed converting {rel}: {e}");
+                            continue;
+                        }
+                    }
+                }
+                _ => continue,
             };
 
             let mtime = file_mtime(file_path);
@@ -215,6 +226,135 @@ fn default_title(path: &Path) -> String {
                 .to_string()
         })
         .unwrap_or_else(|| "untitled".into())
+}
+
+// ---------------------------------------------------------------------------
+// Document conversion
+// ---------------------------------------------------------------------------
+
+/// Describes how to convert a file extension to Markdown.
+enum ConversionPipeline {
+    /// PDF via `docling`.
+    Pdf,
+    /// Generic pandoc conversion from the given source format.
+    Pandoc { from_format: String },
+    /// PPTX: try `markitdown` first, fall back to pandoc.
+    Pptx,
+}
+
+/// Determine the conversion pipeline for a file extension.
+///
+/// Returns `None` for extensions with no known converter.
+fn conversion_command(ext: &str) -> Option<ConversionPipeline> {
+    match ext {
+        ".pdf" => Some(ConversionPipeline::Pdf),
+        ".epub" => Some(ConversionPipeline::Pandoc {
+            from_format: "epub".into(),
+        }),
+        ".docx" => Some(ConversionPipeline::Pandoc {
+            from_format: "docx".into(),
+        }),
+        ".pptx" => Some(ConversionPipeline::Pptx),
+        _ => None,
+    }
+}
+
+/// Convert a file to Markdown using the appropriate external tool.
+fn convert_to_markdown(ext: &str, file_path: &Path) -> Result<String, String> {
+    match conversion_command(ext) {
+        Some(ConversionPipeline::Pdf) => convert_pdf(file_path),
+        Some(ConversionPipeline::Pandoc { from_format }) => {
+            convert_with_pandoc(file_path, &from_format)
+        }
+        Some(ConversionPipeline::Pptx) => convert_pptx(file_path),
+        None => Err(format!("No converter for extension: {ext}")),
+    }
+}
+
+/// Convert a PDF to Markdown using `docling`.
+fn convert_pdf(file_path: &Path) -> Result<String, String> {
+    let tmp = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+    let output = Command::new("docling")
+        .arg(file_path)
+        .args([
+            "--to",
+            "md",
+            "--image-export-mode",
+            "placeholder",
+            "--output",
+        ])
+        .arg(tmp.path())
+        .stdout(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("Failed to run docling: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("docling failed: {stderr}"));
+    }
+
+    // docling writes <stem>.md in the output directory.
+    let stem = file_path.file_stem().unwrap_or_default().to_string_lossy();
+    let out_md = tmp.path().join(format!("{stem}.md"));
+    if !out_md.exists() {
+        // docling sometimes uses different naming; find any .md file.
+        let candidates: Vec<_> = std::fs::read_dir(tmp.path())
+            .map_err(|e| e.to_string())?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
+            .collect();
+        if let Some(entry) = candidates.first() {
+            return std::fs::read_to_string(entry.path()).map_err(|e| e.to_string());
+        }
+        return Err("docling produced no .md output".into());
+    }
+    std::fs::read_to_string(out_md).map_err(|e| e.to_string())
+}
+
+/// Convert a file to Markdown using `pandoc`.
+fn convert_with_pandoc(file_path: &Path, from_format: &str) -> Result<String, String> {
+    let output = Command::new("pandoc")
+        .args(["-f", from_format, "-t", "gfm", "--wrap=none"])
+        .arg(file_path)
+        .output()
+        .map_err(|e| format!("Failed to run pandoc: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("pandoc failed: {stderr}"));
+    }
+    String::from_utf8(output.stdout).map_err(|e| format!("pandoc output not UTF-8: {e}"))
+}
+
+/// Convert a PPTX to Markdown, trying `markitdown` first, then pandoc.
+fn convert_pptx(file_path: &Path) -> Result<String, String> {
+    if which_exists("markitdown") {
+        let output = Command::new("markitdown")
+            .arg(file_path)
+            .output()
+            .map_err(|e| format!("Failed to run markitdown: {e}"))?;
+
+        if output.status.success() {
+            let text = String::from_utf8(output.stdout)
+                .map_err(|e| format!("markitdown output not UTF-8: {e}"))?;
+            if !text.trim().is_empty() {
+                return Ok(text);
+            }
+        }
+    }
+    // Fallback to pandoc.
+    convert_with_pandoc(file_path, "pptx")
+}
+
+/// Check whether an external tool is available on `$PATH`.
+fn which_exists(tool: &str) -> bool {
+    Command::new("which")
+        .arg(tool)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -372,5 +512,61 @@ mod tests {
         for env in &envelopes {
             crate::envelope::validate(env, PLUGIN_ID).unwrap();
         }
+    }
+
+    // -- Conversion dispatch tests ------------------------------------------
+
+    #[tokio::test]
+    async fn sync_skips_unsupported_extension_gracefully() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("data.csv"), "a,b,c").unwrap();
+        let connector = FilesystemConnector {
+            id: "test".into(),
+            root_path: dir.path().to_path_buf(),
+            include_extensions: vec![".csv".into()],
+            exclude_globs: vec![],
+            doc_type: "note".into(),
+            classification: "internal".into(),
+            plantuml_summaries: false,
+        };
+        let envelopes = connector.sync().await.unwrap();
+        assert!(envelopes.is_empty()); // .csv has no converter
+    }
+
+    #[test]
+    fn test_convert_command_for_pdf() {
+        assert!(matches!(
+            conversion_command(".pdf"),
+            Some(ConversionPipeline::Pdf)
+        ));
+    }
+
+    #[test]
+    fn test_convert_command_for_docx() {
+        assert!(matches!(
+            conversion_command(".docx"),
+            Some(ConversionPipeline::Pandoc { .. })
+        ));
+    }
+
+    #[test]
+    fn test_convert_command_for_pptx() {
+        assert!(matches!(
+            conversion_command(".pptx"),
+            Some(ConversionPipeline::Pptx)
+        ));
+    }
+
+    #[test]
+    fn test_convert_command_for_epub() {
+        assert!(matches!(
+            conversion_command(".epub"),
+            Some(ConversionPipeline::Pandoc { .. })
+        ));
+    }
+
+    #[test]
+    fn test_convert_command_for_unsupported() {
+        assert!(conversion_command(".csv").is_none());
     }
 }
