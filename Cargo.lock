@@ -1220,6 +1220,7 @@ dependencies = [
  "clap",
  "dirs",
  "futures",
+ "glob",
  "indicatif",
  "lancedb",
  "regex",

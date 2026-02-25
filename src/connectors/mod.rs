@@ -10,8 +10,8 @@ use crate::envelope::DocumentEnvelope;
 use crate::error::ColibriError;
 
 /// A native content connector.
-#[allow(dead_code)] // Will be used by FilesystemConnector in upcoming task.
 #[async_trait]
+#[allow(dead_code)] // Used by FilesystemConnector; not yet called from production code paths.
 pub trait Connector: Send + Sync {
     /// Unique identifier for this connector instance.
     fn id(&self) -> &str;
