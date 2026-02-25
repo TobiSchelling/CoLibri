@@ -15,7 +15,6 @@ const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434";
 const DEFAULT_OLLAMA_MODEL: &str = "bge-m3";
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct BootstrapOptions {
     pub config_path: Option<PathBuf>,
     pub data_dir: Option<PathBuf>,
@@ -112,20 +111,6 @@ fn prompt_line(prompt: &str, default: &str) -> anyhow::Result<String> {
     } else {
         trimmed.to_string()
     })
-}
-
-#[allow(dead_code)]
-fn prompt_yes_no(prompt: &str, default_yes: bool) -> anyhow::Result<bool> {
-    let default = if default_yes { "Y/n" } else { "y/N" };
-    let input = prompt_line(prompt, default)?;
-    let normalized = input.trim().to_ascii_lowercase();
-    if normalized == "y" || normalized == "yes" {
-        return Ok(true);
-    }
-    if normalized == "n" || normalized == "no" {
-        return Ok(false);
-    }
-    Ok(default_yes)
 }
 
 async fn ollama_model_present(base_url: &str, model: &str) -> Result<Option<bool>, ColibriError> {

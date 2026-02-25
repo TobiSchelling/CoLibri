@@ -27,21 +27,6 @@ pub(crate) fn tool_on_path(tool: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Check whether a tool spec (absolute path, relative path, or bare name) resolves to something
-/// that exists on disk or on `$PATH`.
-#[allow(dead_code)]
-pub(crate) fn tool_available(spec: &str) -> bool {
-    let trimmed = spec.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let path = PathBuf::from(trimmed);
-    if path.is_absolute() || trimmed.contains('/') {
-        return path.exists();
-    }
-    tool_on_path(trimmed)
-}
-
 /// Extract a non-empty trimmed string value from a JSON object by key.
 pub(crate) fn config_string(config: &serde_json::Value, key: &str) -> Option<String> {
     config
