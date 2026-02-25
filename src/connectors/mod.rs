@@ -11,7 +11,6 @@ use crate::error::ColibriError;
 
 /// A native content connector.
 #[async_trait]
-#[allow(dead_code)] // Used by FilesystemConnector; not yet called from production code paths.
 pub trait Connector: Send + Sync {
     /// Unique identifier for this connector instance.
     fn id(&self) -> &str;
@@ -38,7 +37,6 @@ fn default_enabled() -> bool {
 }
 
 /// Resolved connector ready to sync.
-#[allow(dead_code)] // Fields consumed by CLI sync (upcoming task).
 #[derive(Debug, Clone)]
 pub struct ConnectorJob {
     pub id: String,

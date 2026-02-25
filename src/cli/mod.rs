@@ -1,6 +1,7 @@
 //! CLI command definitions and handlers.
 
 pub mod bootstrap;
+pub mod connectors;
 pub mod doctor;
 pub mod import;
 pub mod index;
@@ -115,11 +116,17 @@ pub enum Commands {
         command: PluginCommands,
     },
 
+    /// Manage native connectors
+    Connectors {
+        #[command(subcommand)]
+        command: ConnectorCommands,
+    },
+
     /// Sync configured sources into canonical store (and optionally index)
     Sync {
-        /// Restrict to specific job id(s); may be repeated
-        #[arg(long = "job")]
-        jobs: Vec<String>,
+        /// Restrict to specific connector id(s); may be repeated
+        #[arg(long = "connector")]
+        connectors: Vec<String>,
 
         /// Also run jobs marked as disabled in config
         #[arg(long)]
@@ -223,6 +230,16 @@ pub enum Commands {
         /// Index the canonical corpus after import
         #[arg(long)]
         reindex: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ConnectorCommands {
+    /// List configured connectors
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 

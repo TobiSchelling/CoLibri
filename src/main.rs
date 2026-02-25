@@ -65,6 +65,9 @@ async fn main() -> anyhow::Result<()> {
         cli::Commands::Doctor { strict, json } => cli::doctor::run(strict, json).await,
         cli::Commands::Migrate { dry_run, json } => cli::migrate::run(dry_run, json).await,
         cli::Commands::Profiles { json } => cli::profiles::run(json).await,
+        cli::Commands::Connectors { command } => match command {
+            cli::ConnectorCommands::List { json } => cli::connectors::list(json).await,
+        },
         cli::Commands::Plugins { command } => match command {
             cli::PluginCommands::Run {
                 manifest,
@@ -135,7 +138,7 @@ async fn main() -> anyhow::Result<()> {
         },
         cli::Commands::Index { force } => cli::index::run(force).await,
         cli::Commands::Sync {
-            jobs,
+            connectors,
             include_disabled,
             fail_fast,
             no_index,
@@ -144,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
             json,
         } => {
             cli::sync::run(
-                jobs,
+                connectors,
                 include_disabled,
                 fail_fast,
                 no_index,

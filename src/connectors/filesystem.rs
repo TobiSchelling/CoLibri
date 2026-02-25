@@ -5,9 +5,6 @@
 //! Non-markdown formats (PDF, DOCX, EPUB, PPTX) are converted to
 //! Markdown via external tools (docling, pandoc, markitdown).
 
-// Wired into production code paths in Task 6 (CLI sync).
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;

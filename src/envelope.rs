@@ -58,7 +58,6 @@ pub struct DocumentEnvelope {
 }
 
 /// Compute a SHA-256 content hash in the envelope format (`sha256:{hex}`).
-#[allow(dead_code)] // Used by connectors (upcoming) and tests; not yet called from main code paths.
 pub fn content_hash(markdown: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(markdown.as_bytes());

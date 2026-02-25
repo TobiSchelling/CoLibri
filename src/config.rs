@@ -684,7 +684,6 @@ fn ensure_metadata_db(
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub plugin_jobs: Vec<PluginJob>,
-    #[allow(dead_code)] // Consumed by CLI sync (upcoming task).
     pub connector_jobs: Vec<crate::connectors::ConnectorJob>,
     pub colibri_home: PathBuf,
     pub canonical_dir: PathBuf,

@@ -1,9 +1,9 @@
 //! `colibri sync` — ingest configured sources into the canonical store.
 
-use crate::cli::plugins;
+use crate::cli::connectors;
 
 pub async fn run(
-    jobs: Vec<String>,
+    connectors_filter: Vec<String>,
     include_disabled: bool,
     fail_fast: bool,
     no_index: bool,
@@ -11,8 +11,8 @@ pub async fn run(
     dry_run: bool,
     json: bool,
 ) -> anyhow::Result<()> {
-    plugins::sync_all(plugins::SyncAllOptions {
-        requested_jobs: jobs,
+    connectors::sync_all(connectors::SyncAllOptions {
+        requested_connectors: connectors_filter,
         include_disabled,
         fail_fast,
         index: !no_index,
