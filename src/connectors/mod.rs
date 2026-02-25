@@ -1,6 +1,7 @@
 //! Native connector framework.
 
 pub mod filesystem;
+pub mod zephyr_scale;
 
 use async_trait::async_trait;
 use serde::Deserialize;

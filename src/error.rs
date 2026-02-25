@@ -17,6 +17,9 @@ pub enum ColibriError {
     #[error("Query error: {0}")]
     Query(String),
 
+    #[error("API error: {0}")]
+    Api(String),
+
     #[error("MCP error: {0}")]
     Mcp(String),
 
