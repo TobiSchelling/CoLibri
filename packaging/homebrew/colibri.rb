@@ -1,13 +1,13 @@
 class Colibri < Formula
   desc "Local RAG system for semantic search over markdown content"
   homepage "https://github.com/TobiSchelling/CoLibri"
-  version "0.9.0"
+  version "0.10.0"
   license "MIT"
 
   on_macos do
     on_arm do
       url "https://github.com/TobiSchelling/CoLibri/releases/download/v#{version}/colibri-#{version}-macos-arm64.tar.gz"
-      sha256 "7d7e7733d5be3086b280dad9dd53642f9b9efbf5ed6b48458c069068c6660efb"
+      sha256 "6d62a067f52bf6d196b760a069210aed5b89c8bcabc357b8c25424dbaa746220"
     end
   end
 
