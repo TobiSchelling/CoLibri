@@ -16,6 +16,8 @@ use crate::envelope::{
 };
 use crate::error::ColibriError;
 
+use std::collections::HashMap;
+
 use api::ZephyrApiClient;
 use folders::{FolderTree, RawFolder};
 use render::render_test_case;
@@ -72,7 +74,23 @@ impl Connector for ZephyrScaleConnector {
             None
         };
 
-        // 3. Fetch all test cases
+        // 3. Fetch status/priority lookup tables
+        let status_lookup: HashMap<i64, String> = client
+            .get_statuses(&self.project_key)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| (s.id, s.name))
+            .collect();
+        let priority_lookup: HashMap<i64, String> = client
+            .get_priorities(&self.project_key)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| (p.id, p.name))
+            .collect();
+
+        // 4. Fetch all test cases
         let test_cases = client.get_test_cases(&self.project_key, None).await?;
 
         // 4. Filter by folder scope if set
@@ -119,8 +137,15 @@ impl Connector for ZephyrScaleConnector {
             };
 
             // Render markdown
-            let rendered =
-                render_test_case(tc, &self.project_key, &folder_tree, &steps, &links);
+            let rendered = render_test_case(
+                tc,
+                &self.project_key,
+                &folder_tree,
+                &steps,
+                &links,
+                &status_lookup,
+                &priority_lookup,
+            );
 
             let markdown = rendered.markdown;
             let doc_id = format!("{PLUGIN_ID}:{}:{}", self.project_key, tc.key);

@@ -61,7 +61,8 @@ pub struct ApiTestCase {
     pub status: Option<ApiRef>,
     #[serde(default)]
     pub priority: Option<ApiRef>,
-    #[serde(default)]
+    /// Owner can be a string or a Jira user object `{"accountId": "..."}`.
+    #[serde(default, deserialize_with = "deserialize_owner")]
     pub owner: Option<String>,
     #[serde(default)]
     pub objective: Option<String>,
@@ -79,6 +80,22 @@ pub struct ApiTestCase {
     pub updated_on: Option<String>,
 }
 
+/// Deserialize owner from either a plain string or a Jira user object.
+fn deserialize_owner<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    Ok(value.and_then(|v| match v {
+        serde_json::Value::String(s) => Some(s),
+        serde_json::Value::Object(ref obj) => obj
+            .get("accountId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        _ => None,
+    }))
+}
+
 /// Inline test script within a test case.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -91,7 +108,7 @@ pub struct ApiTestScript {
     pub text: Option<String>,
 }
 
-/// A single test step.
+/// A single test step (flat representation used internally).
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiTestStep {
@@ -105,6 +122,23 @@ pub struct ApiTestStep {
     pub expected_result: Option<String>,
     #[serde(default)]
     pub custom_fields: Option<serde_json::Value>,
+}
+
+/// Wrapper for a test step in the paginated response.
+/// Steps are wrapped as `{"inline": {...}, "testCase": ...}`.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiTestStepWrapper {
+    #[serde(default)]
+    pub inline: Option<ApiTestStep>,
+}
+
+/// A named entity from status/priority lookup endpoints.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiNamedEntity {
+    pub id: i64,
+    pub name: String,
 }
 
 /// A linked issue or URL.
@@ -201,6 +235,8 @@ impl ZephyrApiClient {
     }
 
     /// Fetch test steps for a specific test case.
+    ///
+    /// The API wraps steps in `{"inline": {...}}` objects; this unwraps them.
     pub async fn get_test_steps(
         &self,
         test_case_key: &str,
@@ -209,7 +245,35 @@ impl ZephyrApiClient {
             "{}/testcases/{}/teststeps?maxResults={}",
             self.base_url, test_case_key, MAX_RESULTS
         );
-        self.paginate::<ApiTestStep>(&url).await
+        let wrappers = self.paginate::<ApiTestStepWrapper>(&url).await?;
+        Ok(wrappers
+            .into_iter()
+            .filter_map(|w| w.inline)
+            .collect())
+    }
+
+    /// Fetch all test case statuses for a project (for name lookup).
+    pub async fn get_statuses(
+        &self,
+        project_key: &str,
+    ) -> Result<Vec<ApiNamedEntity>, ColibriError> {
+        let url = format!(
+            "{}/statuses?projectKey={}&statusType=TEST_CASE&maxResults={}",
+            self.base_url, project_key, MAX_RESULTS
+        );
+        self.paginate::<ApiNamedEntity>(&url).await
+    }
+
+    /// Fetch all priorities for a project (for name lookup).
+    pub async fn get_priorities(
+        &self,
+        project_key: &str,
+    ) -> Result<Vec<ApiNamedEntity>, ColibriError> {
+        let url = format!(
+            "{}/priorities?projectKey={}&maxResults={}",
+            self.base_url, project_key, MAX_RESULTS
+        );
+        self.paginate::<ApiNamedEntity>(&url).await
     }
 
     /// Fetch links for a specific test case.

@@ -3,6 +3,8 @@
 //! Renders test cases into markdown with YAML frontmatter,
 //! matching the output format of the Python Jinja2 template.
 
+use std::collections::HashMap;
+
 use super::api::{ApiLink, ApiTestCase, ApiTestStep};
 use super::folders::FolderTree;
 use super::html_to_md::html_to_md;
@@ -23,6 +25,8 @@ pub fn render_test_case(
     folder_tree: &FolderTree,
     steps: &[ApiTestStep],
     links: &[ApiLink],
+    status_lookup: &HashMap<i64, String>,
+    priority_lookup: &HashMap<i64, String>,
 ) -> RenderedTestCase {
     let mut out = String::new();
 
@@ -35,16 +39,24 @@ pub fn render_test_case(
         .unwrap_or("(unfiled)")
         .to_string();
 
-    // Status and priority names
+    // Status and priority names — try inline name, then lookup by ID
     let status = tc
         .status
         .as_ref()
-        .and_then(|s| s.name.as_deref())
+        .and_then(|s| {
+            s.name
+                .as_deref()
+                .or_else(|| s.id.and_then(|id| status_lookup.get(&id).map(|n| n.as_str())))
+        })
         .unwrap_or("Unknown");
     let priority = tc
         .priority
         .as_ref()
-        .and_then(|p| p.name.as_deref())
+        .and_then(|p| {
+            p.name
+                .as_deref()
+                .or_else(|| p.id.and_then(|id| priority_lookup.get(&id).map(|n| n.as_str())))
+        })
         .unwrap_or("Unknown");
 
     let owner = tc.owner.as_deref().unwrap_or("");
@@ -193,6 +205,10 @@ mod tests {
     use crate::connectors::zephyr_scale::api::{ApiRef, ApiTestScript};
     use crate::connectors::zephyr_scale::folders::RawFolder;
 
+    fn empty_lookups() -> (HashMap<i64, String>, HashMap<i64, String>) {
+        (HashMap::new(), HashMap::new())
+    }
+
     fn sample_tree() -> FolderTree {
         FolderTree::build(vec![
             RawFolder {
@@ -263,7 +279,8 @@ mod tests {
             issue_key: Some("JIRA-456".into()),
         }];
 
-        let result = render_test_case(&tc, "CTSLAB", &tree, &steps, &links);
+        let (sl, pl) = empty_lookups();
+        let result = render_test_case(&tc, "CTSLAB", &tree, &steps, &links, &sl, &pl);
 
         assert_eq!(result.title, "CTSLAB-T123: Verify login flow");
         assert!(result.markdown.contains("key: CTSLAB-T123"));
@@ -290,7 +307,8 @@ mod tests {
         tc.objective = None;
         tc.precondition = None;
 
-        let result = render_test_case(&tc, "CTSLAB", &tree, &sample_steps(), &[]);
+        let (sl, pl) = empty_lookups();
+        let result = render_test_case(&tc, "CTSLAB", &tree, &sample_steps(), &[], &sl, &pl);
 
         assert!(!result.markdown.contains("## Objective"));
         assert!(!result.markdown.contains("## Precondition"));
@@ -302,7 +320,8 @@ mod tests {
         let mut tc = sample_test_case();
         tc.test_script = None;
 
-        let result = render_test_case(&tc, "CTSLAB", &tree, &[], &[]);
+        let (sl, pl) = empty_lookups();
+        let result = render_test_case(&tc, "CTSLAB", &tree, &[], &[], &sl, &pl);
 
         assert!(result.markdown.contains("_No test steps available._"));
     }
@@ -317,7 +336,8 @@ mod tests {
             text: Some("Manual test steps here".into()),
         });
 
-        let result = render_test_case(&tc, "CTSLAB", &tree, &[], &[]);
+        let (sl, pl) = empty_lookups();
+        let result = render_test_case(&tc, "CTSLAB", &tree, &[], &[], &sl, &pl);
 
         assert!(result
             .markdown
@@ -329,7 +349,8 @@ mod tests {
     fn frontmatter_is_valid_yaml() {
         let tree = sample_tree();
         let tc = sample_test_case();
-        let result = render_test_case(&tc, "CTSLAB", &tree, &sample_steps(), &[]);
+        let (sl, pl) = empty_lookups();
+        let result = render_test_case(&tc, "CTSLAB", &tree, &sample_steps(), &[], &sl, &pl);
 
         // Extract frontmatter between --- markers
         let parts: Vec<&str> = result.markdown.splitn(3, "---").collect();
@@ -348,7 +369,8 @@ mod tests {
         let mut tc = sample_test_case();
         tc.folder = None;
 
-        let result = render_test_case(&tc, "CTSLAB", &tree, &[], &[]);
+        let (sl, pl) = empty_lookups();
+        let result = render_test_case(&tc, "CTSLAB", &tree, &[], &[], &sl, &pl);
         assert!(result.markdown.contains("folder: (unfiled)"));
     }
 
@@ -371,7 +393,8 @@ mod tests {
             custom_fields: Some(serde_json::json!({"Automation": "Yes"})),
         }];
 
-        let result = render_test_case(&tc, "CTSLAB", &tree, &steps, &[]);
+        let (sl, pl) = empty_lookups();
+        let result = render_test_case(&tc, "CTSLAB", &tree, &steps, &[], &sl, &pl);
         assert!(result.markdown.contains("**Custom Fields**"));
         assert!(result.markdown.contains("`Automation`: Yes"));
     }
