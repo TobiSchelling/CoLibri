@@ -189,7 +189,7 @@ impl Default for RetrievalConfig {
 }
 
 fn default_top_k() -> usize {
-    10
+    25
 }
 
 fn default_similarity_threshold() -> f64 {

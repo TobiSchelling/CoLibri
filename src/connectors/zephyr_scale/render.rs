@@ -44,18 +44,18 @@ pub fn render_test_case(
         .status
         .as_ref()
         .and_then(|s| {
-            s.name
-                .as_deref()
-                .or_else(|| s.id.and_then(|id| status_lookup.get(&id).map(|n| n.as_str())))
+            s.name.as_deref().or_else(|| {
+                s.id.and_then(|id| status_lookup.get(&id).map(|n| n.as_str()))
+            })
         })
         .unwrap_or("Unknown");
     let priority = tc
         .priority
         .as_ref()
         .and_then(|p| {
-            p.name
-                .as_deref()
-                .or_else(|| p.id.and_then(|id| priority_lookup.get(&id).map(|n| n.as_str())))
+            p.name.as_deref().or_else(|| {
+                p.id.and_then(|id| priority_lookup.get(&id).map(|n| n.as_str()))
+            })
         })
         .unwrap_or("Unknown");
 

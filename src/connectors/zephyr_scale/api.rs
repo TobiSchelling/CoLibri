@@ -246,10 +246,7 @@ impl ZephyrApiClient {
             self.base_url, test_case_key, MAX_RESULTS
         );
         let wrappers = self.paginate::<ApiTestStepWrapper>(&url).await?;
-        Ok(wrappers
-            .into_iter()
-            .filter_map(|w| w.inline)
-            .collect())
+        Ok(wrappers.into_iter().filter_map(|w| w.inline).collect())
     }
 
     /// Fetch all test case statuses for a project (for name lookup).
