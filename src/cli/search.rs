@@ -13,7 +13,7 @@ pub async fn run(
     let config = load_config()?;
     let engine = SearchEngine::new(&config).await?;
 
-    let limit = limit.min(10);
+    let limit = limit.min(config.top_k);
     let results = engine
         .search(
             &query,

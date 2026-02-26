@@ -91,8 +91,8 @@ pub async fn run_server(config: &AppConfig) -> Result<(), ColibriError> {
                 // Notification — no response needed
                 continue;
             }
-            "tools/list" => handle_tools_list(id),
-            "tools/call" => handle_tools_call(id, &request, &engine).await,
+            "tools/list" => handle_tools_list(id, config.top_k),
+            "tools/call" => handle_tools_call(id, &request, &engine, config.top_k).await,
             "notifications/cancelled" | "ping" => {
                 // Ignore notifications, respond to ping
                 if method == "ping" {
@@ -159,7 +159,8 @@ fn handle_initialize(id: Option<Value>) -> Value {
     })
 }
 
-fn handle_tools_list(id: Option<Value>) -> Value {
+fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
+    let max_limit = top_k.saturating_mul(2).max(10);
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -177,10 +178,10 @@ fn handle_tools_list(id: Option<Value>) -> Value {
                             },
                             "limit": {
                                 "type": "integer",
-                                "description": "Maximum results to return (default: 5, max: 10)",
-                                "default": 5,
+                                "description": format!("Maximum results to return (default: {top_k}, max: {max_limit})"),
+                                "default": top_k,
                                 "minimum": 1,
-                                "maximum": 10
+                                "maximum": max_limit
                             }
                         },
                         "required": ["query"]
@@ -198,10 +199,10 @@ fn handle_tools_list(id: Option<Value>) -> Value {
                             },
                             "limit": {
                                 "type": "integer",
-                                "description": "Maximum results to return (default: 5, max: 10)",
-                                "default": 5,
+                                "description": format!("Maximum results to return (default: {top_k}, max: {max_limit})"),
+                                "default": top_k,
                                 "minimum": 1,
-                                "maximum": 10
+                                "maximum": max_limit
                             }
                         },
                         "required": ["query"]
@@ -233,7 +234,13 @@ fn handle_tools_list(id: Option<Value>) -> Value {
     })
 }
 
-async fn handle_tools_call(id: Option<Value>, request: &Value, engine: &SearchEngine) -> Value {
+async fn handle_tools_call(
+    id: Option<Value>,
+    request: &Value,
+    engine: &SearchEngine,
+    top_k: usize,
+) -> Value {
+    let max_limit = top_k.saturating_mul(2).max(10);
     let params = request.get("params").cloned().unwrap_or(json!({}));
     let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -247,8 +254,8 @@ async fn handle_tools_call(id: Option<Value>, request: &Value, engine: &SearchEn
             let limit = arguments
                 .get("limit")
                 .and_then(|l| l.as_u64())
-                .map(|l| l.min(10) as usize)
-                .unwrap_or(5);
+                .map(|l| (l as usize).min(max_limit))
+                .unwrap_or(top_k);
 
             match engine.search_library(query, limit).await {
                 Ok(results) => {
@@ -270,8 +277,8 @@ async fn handle_tools_call(id: Option<Value>, request: &Value, engine: &SearchEn
             let limit = arguments
                 .get("limit")
                 .and_then(|l| l.as_u64())
-                .map(|l| l.min(10) as usize)
-                .unwrap_or(5);
+                .map(|l| (l as usize).min(max_limit))
+                .unwrap_or(top_k);
 
             match engine.search_books(query, limit).await {
                 Ok(results) => {
@@ -416,7 +423,7 @@ mod tests {
             lancedb_dir,
             ollama_base_url: "http://localhost:11434".into(),
             embedding_model: "bge-m3".into(),
-            top_k: 10,
+            top_k: 25,
             similarity_threshold: 0.3,
             chunk_size: 3000,
             chunk_overlap: 200,
