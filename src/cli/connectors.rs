@@ -47,9 +47,8 @@ fn build_connector(job: &ConnectorJob) -> anyhow::Result<Box<dyn Connector>> {
             }))
         }
         "zephyr_scale" => {
-            let project_key = config_string(&job.config, "project_key").ok_or_else(|| {
-                anyhow::anyhow!("connector '{}': missing project_key", job.id)
-            })?;
+            let project_key = config_string(&job.config, "project_key")
+                .ok_or_else(|| anyhow::anyhow!("connector '{}': missing project_key", job.id))?;
 
             let api_base_url = config_string(&job.config, "api_base_url")
                 .unwrap_or_else(|| "https://api.zephyrscale.smartbear.com/v2".into());
