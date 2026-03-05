@@ -141,6 +141,14 @@ impl SearchEngine {
             .min(500);
 
         for backend in &self.backends {
+            // Refresh to latest LanceDB version so externally-rebuilt indexes are visible.
+            if let Err(e) = backend.table.checkout_latest().await {
+                warn!(
+                    "Failed to refresh table for profile '{}': {e}",
+                    backend.profile_id
+                );
+            }
+
             let query_vector = match embed_texts(
                 &[query.to_string()],
                 &backend.embedding_model,
