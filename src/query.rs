@@ -5,9 +5,12 @@
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::str::FromStr;
 
 use arrow_array::{Float32Array, RecordBatch, StringArray};
 use futures::TryStreamExt;
+use lancedb::index::scalar::FullTextSearchQuery;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use serde::Serialize;
 use tracing::warn;
@@ -27,6 +30,57 @@ pub struct SearchResult {
     pub doc_type: String,
     pub classification: String,
     pub score: f64,
+    pub search_mode: SearchMode,
+}
+
+/// Controls how search queries are executed against LanceDB.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub enum SearchMode {
+    /// BM25 + vector combined via LanceDB native RRF.
+    #[default]
+    Hybrid,
+    /// Vector-only search (original behavior).
+    Semantic,
+    /// BM25 full-text search only.
+    Keyword,
+}
+
+impl fmt::Display for SearchMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SearchMode::Hybrid => write!(f, "hybrid"),
+            SearchMode::Semantic => write!(f, "semantic"),
+            SearchMode::Keyword => write!(f, "keyword"),
+        }
+    }
+}
+
+impl FromStr for SearchMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "hybrid" => Ok(SearchMode::Hybrid),
+            "semantic" => Ok(SearchMode::Semantic),
+            "keyword" => Ok(SearchMode::Keyword),
+            other => Err(format!(
+                "Invalid search mode '{other}'. Must be one of: hybrid, semantic, keyword"
+            )),
+        }
+    }
+}
+
+impl clap::ValueEnum for SearchMode {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[SearchMode::Hybrid, SearchMode::Semantic, SearchMode::Keyword]
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        match self {
+            SearchMode::Hybrid => Some(clap::builder::PossibleValue::new("hybrid")),
+            SearchMode::Semantic => Some(clap::builder::PossibleValue::new("semantic")),
+            SearchMode::Keyword => Some(clap::builder::PossibleValue::new("keyword")),
+        }
+    }
 }
 
 /// Book entry from the index.
@@ -123,13 +177,14 @@ impl SearchEngine {
         })
     }
 
-    /// Semantic search with optional folder/doc_type filters.
+    /// Search with optional folder/doc_type filters.
     pub async fn search(
         &self,
         query: &str,
         classification: Option<&str>,
         doc_type: Option<&str>,
         limit: usize,
+        mode: SearchMode,
     ) -> Result<Vec<SearchResult>, ColibriError> {
         let mut merged: Vec<SearchHit> = Vec::new();
         let mut succeeded = 0usize;
@@ -141,7 +196,6 @@ impl SearchEngine {
             .min(500);
 
         for backend in &self.backends {
-            // Refresh to latest LanceDB version so externally-rebuilt indexes are visible.
             if let Err(e) = backend.table.checkout_latest().await {
                 warn!(
                     "Failed to refresh table for profile '{}': {e}",
@@ -149,60 +203,146 @@ impl SearchEngine {
                 );
             }
 
-            let query_vector = match embed_texts(
-                &[query.to_string()],
-                &backend.embedding_model,
-                &backend.embedding_endpoint,
-            )
-            .await
-            {
-                Ok(v) if !v.is_empty() => v,
-                Ok(_) => {
-                    warn!(
-                        "Skipping profile '{}' for query: embedding returned empty vector",
-                        backend.profile_id
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    warn!(
-                        "Skipping profile '{}' for query embed error: {e}",
-                        backend.profile_id
-                    );
-                    continue;
-                }
-            };
+            let batches: Vec<RecordBatch> = match mode {
+                SearchMode::Semantic => {
+                    let query_vector = match embed_texts(
+                        &[query.to_string()],
+                        &backend.embedding_model,
+                        &backend.embedding_endpoint,
+                    )
+                    .await
+                    {
+                        Ok(v) if !v.is_empty() => v,
+                        Ok(_) => {
+                            warn!(
+                                "Skipping profile '{}': embedding returned empty vector",
+                                backend.profile_id
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Skipping profile '{}': embed error: {e}",
+                                backend.profile_id
+                            );
+                            continue;
+                        }
+                    };
 
-            let search = backend
-                .table
-                .vector_search(query_vector[0].clone())
-                .map_err(|e| ColibriError::Query(format!("Vector search failed: {e}")))?
-                .limit(per_backend_limit);
+                    let search = backend
+                        .table
+                        .vector_search(query_vector[0].clone())
+                        .map_err(|e| ColibriError::Query(format!("Vector search failed: {e}")))?
+                        .limit(per_backend_limit);
 
-            let raw_results = match search.execute().await {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!(
-                        "Skipping profile '{}' for query execution error: {e}",
-                        backend.profile_id
-                    );
-                    continue;
+                    match search.execute().await {
+                        Ok(stream) => match stream.try_collect().await {
+                            Ok(b) => b,
+                            Err(e) => {
+                                warn!("Skipping profile '{}': collect error: {e}", backend.profile_id);
+                                continue;
+                            }
+                        },
+                        Err(e) => {
+                            warn!("Skipping profile '{}': query error: {e}", backend.profile_id);
+                            continue;
+                        }
+                    }
                 }
-            };
+                SearchMode::Keyword => {
+                    let fts_query = FullTextSearchQuery::new(query.to_string());
+                    let search = backend
+                        .table
+                        .query()
+                        .full_text_search(fts_query)
+                        .limit(per_backend_limit);
 
-            let batches: Vec<RecordBatch> = match raw_results.try_collect().await {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!(
-                        "Skipping profile '{}' while collecting results: {e}",
-                        backend.profile_id
-                    );
-                    continue;
+                    match search.execute().await {
+                        Ok(stream) => match stream.try_collect().await {
+                            Ok(b) => b,
+                            Err(e) => {
+                                warn!("Skipping profile '{}': FTS collect error: {e}", backend.profile_id);
+                                continue;
+                            }
+                        },
+                        Err(e) => {
+                            warn!("Skipping profile '{}': FTS query error: {e}", backend.profile_id);
+                            continue;
+                        }
+                    }
+                }
+                SearchMode::Hybrid => {
+                    match embed_texts(
+                        &[query.to_string()],
+                        &backend.embedding_model,
+                        &backend.embedding_endpoint,
+                    )
+                    .await
+                    {
+                        Ok(v) if !v.is_empty() => {
+                            let fts_query = FullTextSearchQuery::new(query.to_string());
+                            let search = backend
+                                .table
+                                .query()
+                                .full_text_search(fts_query)
+                                .nearest_to(v[0].as_slice())
+                                .map_err(|e| ColibriError::Query(format!("Hybrid search failed: {e}")))?
+                                .limit(per_backend_limit);
+
+                            match search.execute().await {
+                                Ok(stream) => match stream.try_collect().await {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        warn!("Skipping profile '{}': hybrid collect error: {e}", backend.profile_id);
+                                        continue;
+                                    }
+                                },
+                                Err(e) => {
+                                    warn!("Skipping profile '{}': hybrid query error: {e}", backend.profile_id);
+                                    continue;
+                                }
+                            }
+                        }
+                        Ok(_) => {
+                            warn!(
+                                "Skipping profile '{}': embedding returned empty vector",
+                                backend.profile_id
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            // REQ-008: fallback to keyword on embedding failure
+                            warn!(
+                                "Embedding failed for profile '{}', falling back to keyword search: {e}",
+                                backend.profile_id
+                            );
+                            let fts_query = FullTextSearchQuery::new(query.to_string());
+                            let search = backend
+                                .table
+                                .query()
+                                .full_text_search(fts_query)
+                                .limit(per_backend_limit);
+
+                            match search.execute().await {
+                                Ok(stream) => match stream.try_collect().await {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        warn!("Skipping profile '{}': FTS fallback error: {e}", backend.profile_id);
+                                        continue;
+                                    }
+                                },
+                                Err(e) => {
+                                    warn!("Skipping profile '{}': FTS fallback query error: {e}", backend.profile_id);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                 }
             };
 
             succeeded += 1;
-            collect_search_hits(&batches, self.config.similarity_threshold, &mut merged);
+            collect_search_hits(&batches, self.config.similarity_threshold, mode, &mut merged);
         }
 
         if succeeded == 0 {
@@ -249,6 +389,7 @@ impl SearchEngine {
                 doc_type: doc.doc_type.clone(),
                 classification: doc.classification.clone(),
                 score: hit.score,
+                search_mode: mode,
             };
 
             let key = format!("{}:{}", result.file, result.text);
@@ -268,8 +409,9 @@ impl SearchEngine {
         &self,
         query: &str,
         limit: usize,
+        mode: SearchMode,
     ) -> Result<Vec<SearchResult>, ColibriError> {
-        self.search(query, None, Some("book"), limit).await
+        self.search(query, None, Some("book"), limit, mode).await
     }
 
     /// Search the entire library.
@@ -277,8 +419,9 @@ impl SearchEngine {
         &self,
         query: &str,
         limit: usize,
+        mode: SearchMode,
     ) -> Result<Vec<SearchResult>, ColibriError> {
-        self.search(query, None, None, limit).await
+        self.search(query, None, None, limit, mode).await
     }
 
     /// List all indexed books with metadata.
@@ -364,6 +507,7 @@ impl SearchEngine {
 fn collect_search_hits(
     batches: &[RecordBatch],
     similarity_threshold: f64,
+    mode: SearchMode,
     out: &mut Vec<SearchHit>,
 ) {
     for batch in batches {
@@ -375,14 +519,23 @@ fn collect_search_hits(
         let text_col = batch
             .column_by_name("text")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+
+        let score_col = batch
+            .column_by_name("_score")
+            .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
         let dist_col = batch
             .column_by_name("_distance")
             .and_then(|c| c.as_any().downcast_ref::<Float32Array>());
 
         for i in 0..num_rows {
-            let distance = dist_col.map(|c| c.value(i) as f64).unwrap_or(0.0);
-            let score = (-distance).exp();
-            if score < similarity_threshold {
+            let score = if let Some(sc) = score_col {
+                sc.value(i) as f64
+            } else {
+                let distance = dist_col.map(|c| c.value(i) as f64).unwrap_or(0.0);
+                (-distance).exp()
+            };
+
+            if mode == SearchMode::Semantic && score < similarity_threshold {
                 continue;
             }
 
@@ -393,5 +546,47 @@ fn collect_search_hits(
                 score: (score * 10000.0).round() / 10000.0,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_mode_default_is_hybrid() {
+        assert_eq!(SearchMode::default(), SearchMode::Hybrid);
+    }
+
+    #[test]
+    fn search_mode_from_str_valid() {
+        assert_eq!("hybrid".parse::<SearchMode>().unwrap(), SearchMode::Hybrid);
+        assert_eq!(
+            "semantic".parse::<SearchMode>().unwrap(),
+            SearchMode::Semantic
+        );
+        assert_eq!(
+            "keyword".parse::<SearchMode>().unwrap(),
+            SearchMode::Keyword
+        );
+        assert_eq!("HYBRID".parse::<SearchMode>().unwrap(), SearchMode::Hybrid);
+        assert_eq!(
+            "Semantic".parse::<SearchMode>().unwrap(),
+            SearchMode::Semantic
+        );
+    }
+
+    #[test]
+    fn search_mode_from_str_invalid() {
+        let err = "fuzzy".parse::<SearchMode>().unwrap_err();
+        assert!(err.contains("Invalid search mode"));
+        assert!(err.contains("fuzzy"));
+    }
+
+    #[test]
+    fn search_mode_display() {
+        assert_eq!(SearchMode::Hybrid.to_string(), "hybrid");
+        assert_eq!(SearchMode::Semantic.to_string(), "semantic");
+        assert_eq!(SearchMode::Keyword.to_string(), "keyword");
     }
 }
