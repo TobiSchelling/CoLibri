@@ -34,7 +34,7 @@ pub struct SearchResult {
 }
 
 /// Controls how search queries are executed against LanceDB.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum SearchMode {
     /// BM25 + vector combined via LanceDB native RRF.
     #[default]
@@ -71,7 +71,11 @@ impl FromStr for SearchMode {
 
 impl clap::ValueEnum for SearchMode {
     fn value_variants<'a>() -> &'a [Self] {
-        &[SearchMode::Hybrid, SearchMode::Semantic, SearchMode::Keyword]
+        &[
+            SearchMode::Hybrid,
+            SearchMode::Semantic,
+            SearchMode::Keyword,
+        ]
     }
 
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -196,6 +200,8 @@ impl SearchEngine {
             .min(500);
 
         for backend in &self.backends {
+            // Refresh to latest LanceDB version so externally-rebuilt indexes
+            // (including FTS indexes) are visible to this table handle.
             if let Err(e) = backend.table.checkout_latest().await {
                 warn!(
                     "Failed to refresh table for profile '{}': {e}",
@@ -239,12 +245,18 @@ impl SearchEngine {
                         Ok(stream) => match stream.try_collect().await {
                             Ok(b) => b,
                             Err(e) => {
-                                warn!("Skipping profile '{}': collect error: {e}", backend.profile_id);
+                                warn!(
+                                    "Skipping profile '{}': collect error: {e}",
+                                    backend.profile_id
+                                );
                                 continue;
                             }
                         },
                         Err(e) => {
-                            warn!("Skipping profile '{}': query error: {e}", backend.profile_id);
+                            warn!(
+                                "Skipping profile '{}': query error: {e}",
+                                backend.profile_id
+                            );
                             continue;
                         }
                     }
@@ -261,12 +273,18 @@ impl SearchEngine {
                         Ok(stream) => match stream.try_collect().await {
                             Ok(b) => b,
                             Err(e) => {
-                                warn!("Skipping profile '{}': FTS collect error: {e}", backend.profile_id);
+                                warn!(
+                                    "Skipping profile '{}': FTS collect error: {e}",
+                                    backend.profile_id
+                                );
                                 continue;
                             }
                         },
                         Err(e) => {
-                            warn!("Skipping profile '{}': FTS query error: {e}", backend.profile_id);
+                            warn!(
+                                "Skipping profile '{}': FTS query error: {e}",
+                                backend.profile_id
+                            );
                             continue;
                         }
                     }
@@ -286,19 +304,27 @@ impl SearchEngine {
                                 .query()
                                 .full_text_search(fts_query)
                                 .nearest_to(v[0].as_slice())
-                                .map_err(|e| ColibriError::Query(format!("Hybrid search failed: {e}")))?
+                                .map_err(|e| {
+                                    ColibriError::Query(format!("Hybrid search failed: {e}"))
+                                })?
                                 .limit(per_backend_limit);
 
                             match search.execute().await {
                                 Ok(stream) => match stream.try_collect().await {
                                     Ok(b) => b,
                                     Err(e) => {
-                                        warn!("Skipping profile '{}': hybrid collect error: {e}", backend.profile_id);
+                                        warn!(
+                                            "Skipping profile '{}': hybrid collect error: {e}",
+                                            backend.profile_id
+                                        );
                                         continue;
                                     }
                                 },
                                 Err(e) => {
-                                    warn!("Skipping profile '{}': hybrid query error: {e}", backend.profile_id);
+                                    warn!(
+                                        "Skipping profile '{}': hybrid query error: {e}",
+                                        backend.profile_id
+                                    );
                                     continue;
                                 }
                             }
@@ -327,12 +353,18 @@ impl SearchEngine {
                                 Ok(stream) => match stream.try_collect().await {
                                     Ok(b) => b,
                                     Err(e) => {
-                                        warn!("Skipping profile '{}': FTS fallback error: {e}", backend.profile_id);
+                                        warn!(
+                                            "Skipping profile '{}': FTS fallback error: {e}",
+                                            backend.profile_id
+                                        );
                                         continue;
                                     }
                                 },
                                 Err(e) => {
-                                    warn!("Skipping profile '{}': FTS fallback query error: {e}", backend.profile_id);
+                                    warn!(
+                                        "Skipping profile '{}': FTS fallback query error: {e}",
+                                        backend.profile_id
+                                    );
                                     continue;
                                 }
                             }
@@ -342,7 +374,12 @@ impl SearchEngine {
             };
 
             succeeded += 1;
-            collect_search_hits(&batches, self.config.similarity_threshold, mode, &mut merged);
+            collect_search_hits(
+                &batches,
+                self.config.similarity_threshold,
+                mode,
+                &mut merged,
+            );
         }
 
         if succeeded == 0 {

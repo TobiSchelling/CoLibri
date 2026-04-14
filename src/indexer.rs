@@ -13,6 +13,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema};
 use lancedb::database::CreateTableMode;
+use lancedb::index::Index;
 use tracing::info;
 
 use crate::config::{AppConfig, SCHEMA_VERSION};
@@ -447,13 +448,12 @@ async fn index_profile(
     let profile_index_dir = config.lancedb_dir_for_profile(profile_id);
     std::fs::create_dir_all(&profile_index_dir)?;
 
-    if profile_full_rebuild {
+    let written_table = if profile_full_rebuild {
         let batches = RecordBatchIterator::new(vec![Ok(batch)], schema);
-        let _new_table = db
-            .create_table(TABLE_NAME, Box::new(batches))
+        db.create_table(TABLE_NAME, Box::new(batches))
             .mode(CreateTableMode::Overwrite)
             .execute()
-            .await?;
+            .await?
     } else if let Some(tbl) = table.as_ref() {
         let indexed_docs: HashSet<&str> = rows.iter().map(|r| r.doc_id.as_str()).collect();
         for doc_id in &indexed_docs {
@@ -462,12 +462,26 @@ async fn index_profile(
         }
         let batches = RecordBatchIterator::new(vec![Ok(batch)], schema);
         tbl.add(Box::new(batches)).execute().await?;
+        tbl.clone()
     } else {
         let batches = RecordBatchIterator::new(vec![Ok(batch)], schema);
-        let _new_table = db
-            .create_table(TABLE_NAME, Box::new(batches))
+        db.create_table(TABLE_NAME, Box::new(batches))
             .execute()
-            .await?;
+            .await?
+    };
+
+    // Create FTS index on the text column for keyword/hybrid search.
+    if let Err(e) = written_table
+        .create_index(&["text"], Index::FTS(Default::default()))
+        .replace(true)
+        .execute()
+        .await
+    {
+        on_progress(IndexEvent::Warning {
+            message: format!(
+                "FTS index creation failed for profile '{profile_id}' (keyword/hybrid search may not work): {e}"
+            ),
+        });
     }
 
     // Update manifest + index state.

@@ -11,7 +11,7 @@ use tracing::{debug, info};
 
 use crate::config::AppConfig;
 use crate::error::ColibriError;
-use crate::query::SearchEngine;
+use crate::query::{SearchEngine, SearchMode};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StartupProfileCheck {
@@ -168,7 +168,7 @@ fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
             "tools": [
                 {
                     "name": "search_library",
-                    "description": "Search across all indexed content sources including technical books, architecture documents, notes, and other reference materials. Performs semantic search to find relevant passages.",
+                    "description": "Search across all indexed content sources including technical books, architecture documents, notes, and other reference materials. Performs hybrid search (combining BM25 keyword matching with semantic vector search) by default to find relevant passages.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -182,6 +182,11 @@ fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
                                 "default": top_k,
                                 "minimum": 1,
                                 "maximum": max_limit
+                            },
+                            "mode": {
+                                "type": "string",
+                                "description": "Search mode: 'hybrid' (default, combines keyword + semantic), 'semantic' (vector similarity only), or 'keyword' (BM25 text matching only)",
+                                "enum": ["hybrid", "semantic", "keyword"]
                             }
                         },
                         "required": ["query"]
@@ -189,7 +194,7 @@ fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
                 },
                 {
                     "name": "search_books",
-                    "description": "Search only imported technical books and reference materials. Filters to documents with type 'book'.",
+                    "description": "Search only imported technical books and reference materials. Filters to documents with type 'book'. Supports hybrid, semantic, and keyword search modes.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -203,6 +208,11 @@ fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
                                 "default": top_k,
                                 "minimum": 1,
                                 "maximum": max_limit
+                            },
+                            "mode": {
+                                "type": "string",
+                                "description": "Search mode: 'hybrid' (default, combines keyword + semantic), 'semantic' (vector similarity only), or 'keyword' (BM25 text matching only)",
+                                "enum": ["hybrid", "semantic", "keyword"]
                             }
                         },
                         "required": ["query"]
@@ -245,6 +255,20 @@ async fn handle_tools_call(
     let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
+    let mode = arguments
+        .get("mode")
+        .and_then(|m| m.as_str())
+        .map(|m| m.parse::<SearchMode>())
+        .transpose()
+        .map_err(|e| e.to_string());
+
+    let mode = match mode {
+        Ok(m) => m.unwrap_or_default(),
+        Err(e) => {
+            return error_response(id, -32602, &e);
+        }
+    };
+
     let result = match tool_name {
         "search_library" => {
             let query = arguments
@@ -257,10 +281,11 @@ async fn handle_tools_call(
                 .map(|l| (l as usize).min(max_limit))
                 .unwrap_or(top_k);
 
-            match engine.search_library(query, limit).await {
+            match engine.search_library(query, limit, mode).await {
                 Ok(results) => {
                     let output = json!({
                         "query": query,
+                        "search_mode": mode.to_string(),
                         "total_results": results.len(),
                         "results": results,
                     });
@@ -280,10 +305,11 @@ async fn handle_tools_call(
                 .map(|l| (l as usize).min(max_limit))
                 .unwrap_or(top_k);
 
-            match engine.search_books(query, limit).await {
+            match engine.search_books(query, limit, mode).await {
                 Ok(results) => {
                     let output = json!({
                         "query": query,
+                        "search_mode": mode.to_string(),
                         "total_results": results.len(),
                         "results": results,
                     });

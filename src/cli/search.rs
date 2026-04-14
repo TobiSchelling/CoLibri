@@ -1,7 +1,7 @@
-//! `colibri search` — semantic search command.
+//! `colibri search` — search command with hybrid/semantic/keyword modes.
 
 use crate::config::load_config;
-use crate::query::SearchEngine;
+use crate::query::{SearchEngine, SearchMode};
 
 pub async fn run(
     query: String,
@@ -9,6 +9,7 @@ pub async fn run(
     json: bool,
     doc_type: Option<String>,
     classification: Option<String>,
+    mode: SearchMode,
 ) -> anyhow::Result<()> {
     let config = load_config()?;
     let engine = SearchEngine::new(&config).await?;
@@ -20,12 +21,14 @@ pub async fn run(
             classification.as_deref(),
             doc_type.as_deref(),
             limit,
+            mode,
         )
         .await?;
 
     if json {
         let output = serde_json::json!({
             "query": query,
+            "search_mode": mode.to_string(),
             "total_results": results.len(),
             "results": results,
         });
@@ -42,7 +45,6 @@ pub async fn run(
             if !result.classification.is_empty() {
                 println!("   Classification: {}", result.classification);
             }
-            // Show truncated text preview
             let preview: String = result.text.chars().take(200).collect();
             let ellipsis = if result.text.len() > 200 { "..." } else { "" };
             println!("   {preview}{ellipsis}");
