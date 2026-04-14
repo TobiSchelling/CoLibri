@@ -12,7 +12,7 @@ env:
 jobs:
   check:
     name: Check, Lint & Test
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
