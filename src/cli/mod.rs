@@ -18,6 +18,8 @@ use std::process::Command;
 
 use clap::Subcommand;
 
+use crate::query::SearchMode;
+
 /// Check whether a tool is available on `$PATH` via `which`.
 pub(crate) fn tool_on_path(tool: &str) -> bool {
     Command::new("which")
@@ -171,6 +173,10 @@ pub enum Commands {
         /// Filter by classification
         #[arg(long)]
         classification: Option<String>,
+
+        /// Search mode: hybrid (default), semantic, or keyword
+        #[arg(long, value_enum, default_value_t = SearchMode::Hybrid)]
+        mode: SearchMode,
     },
 
     /// Start MCP stdio server

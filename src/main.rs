@@ -94,7 +94,8 @@ async fn main() -> anyhow::Result<()> {
             json,
             doc_type,
             classification,
-        } => cli::search::run(query, limit, json, doc_type, classification).await,
+            mode,
+        } => cli::search::run(query, limit, json, doc_type, classification, mode).await,
         cli::Commands::Serve { check, json } => cli::serve::run(check, json).await,
         cli::Commands::Import {
             input,

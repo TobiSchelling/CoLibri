@@ -29,8 +29,10 @@ Connectors → DocumentEnvelope[] → Canonical Store → Indexer → LanceDB
                                                   (batches of 32)
 
 SearchEngine ← LanceDB ← MCP Server / CLI
-     ↑
-Ollama /api/embed (single query)
+     ↑              ↑
+Ollama embed    FTS index (BM25)
+(semantic)      (keyword)
+     └──── hybrid mode: both + RRF fusion ────┘
 ```
 
 ### Key Types & Boundaries
@@ -40,7 +42,7 @@ Ollama /api/embed (single query)
 - **`DocumentEnvelope`** (`envelope.rs`): Canonical document representation with source, document, and metadata sections. Produced by connectors, consumed by canonical store.
 - **`ConnectorJob`** (`connectors/mod.rs`): Resolved connector config with `id`, `connector_type`, `enabled`, and `config: serde_json::Value`.
 - **`FilesystemConnector`** (`connectors/filesystem.rs`): Walks directories, reads/converts files (MD, PDF, DOCX, EPUB, PPTX), enriches PlantUML blocks, produces envelopes.
-- **`SearchEngine`** (`query.rs`): Wraps LanceDB table. L2 distance → similarity via `exp(-distance)`. Filters by `similarity_threshold`.
+- **`SearchEngine`** (`query.rs`): Wraps LanceDB table. Supports three search modes: `hybrid` (BM25 + vector via LanceDB native RRF, default), `semantic` (vector-only, L2 distance → similarity via `exp(-distance)`), `keyword` (BM25 full-text only). Filters by `similarity_threshold` in semantic mode only.
 - **`ColibriError`** (`error.rs`): `thiserror` enum with domain variants. CLI commands return `anyhow::Result` at the boundary.
 
 ### LanceDB Schema
@@ -49,7 +51,7 @@ Single table `"chunks"` with columns: `text`, `source_file`, `title`, `doc_type`
 
 ### MCP Server
 
-JSON-RPC over stdio (`mcp.rs`). Lazily initializes `SearchEngine` on first tool call. Exposes four tools: `search_library`, `search_books`, `list_books`, `browse_topics`.
+JSON-RPC over stdio (`mcp.rs`). Lazily initializes `SearchEngine` on first tool call. Exposes four tools: `search_library`, `search_books`, `list_books`, `browse_topics`. Search tools accept an optional `mode` parameter (`hybrid`/`semantic`/`keyword`).
 
 ### Key Patterns
 
