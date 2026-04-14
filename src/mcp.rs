@@ -185,7 +185,7 @@ fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
                             },
                             "mode": {
                                 "type": "string",
-                                "description": "Search mode: 'hybrid' (default, combines keyword + semantic), 'semantic' (vector similarity only), or 'keyword' (BM25 text matching only)",
+                                "description": "Search mode. Use 'keyword' for exact terms, names, acronyms, or IDs (e.g. 'ATAM', 'C4 model', test case IDs). Use 'semantic' for conceptual/natural language queries. Use 'hybrid' (default) for queries mixing concepts with specific terms.",
                                 "enum": ["hybrid", "semantic", "keyword"]
                             }
                         },
@@ -211,7 +211,7 @@ fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
                             },
                             "mode": {
                                 "type": "string",
-                                "description": "Search mode: 'hybrid' (default, combines keyword + semantic), 'semantic' (vector similarity only), or 'keyword' (BM25 text matching only)",
+                                "description": "Search mode. Use 'keyword' for exact terms, names, acronyms, or IDs (e.g. 'ATAM', 'C4 model', test case IDs). Use 'semantic' for conceptual/natural language queries. Use 'hybrid' (default) for queries mixing concepts with specific terms.",
                                 "enum": ["hybrid", "semantic", "keyword"]
                             }
                         },
