@@ -1,5 +1,11 @@
 //! CoLibri — Local RAG system for semantic search over markdown content.
 
+// Bump beyond default 128 — `lance` v1.0.1 macros otherwise overflow the depth
+// limit on macos-14 + rust 1.85.0 + newer cargo, causing release builds to fail
+// with "queries overflow the depth limit!". See past CI fix attempts in commit
+// log (3193899, d9b9cad) which pinned the runner/toolchain but didn't help.
+#![recursion_limit = "512"]
+
 mod canonical_store;
 mod cli;
 mod config;
