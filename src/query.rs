@@ -595,11 +595,14 @@ fn document_matches_filter(doc: &DocumentRow, filter: &SearchFilter) -> bool {
             return false;
         }
     }
+    // Path filters target the source-relative path (`external_id`),
+    // not the internal canonical path. Users think in source paths
+    // like `03_MY_PROJECTS/HEIMDALL/foo.md`.
     if !filter.path_includes.is_empty() {
         let any = filter
             .path_includes
             .iter()
-            .any(|needle| doc.markdown_path.contains(needle));
+            .any(|needle| doc.external_id.contains(needle));
         if !any {
             return false;
         }
@@ -607,7 +610,7 @@ fn document_matches_filter(doc: &DocumentRow, filter: &SearchFilter) -> bool {
     if filter
         .path_excludes
         .iter()
-        .any(|needle| doc.markdown_path.contains(needle))
+        .any(|needle| doc.external_id.contains(needle))
     {
         return false;
     }
@@ -655,7 +658,7 @@ fn chunk_level_results(
     for (hit, doc) in filtered {
         let result = SearchResult {
             text: hit.text,
-            file: doc.markdown_path.clone(),
+            file: doc.uri.clone().unwrap_or_else(|| doc.markdown_path.clone()),
             title: doc.title.clone(),
             doc_type: doc.doc_type.clone(),
             classification: doc.classification.clone(),
@@ -703,7 +706,7 @@ fn collapse_to_doc_results(
                 .and_then(|v| v.as_object().cloned());
             SearchResult {
                 text: hit.text,
-                file: doc.markdown_path.clone(),
+                file: doc.uri.clone().unwrap_or_else(|| doc.markdown_path.clone()),
                 title: doc.title.clone(),
                 doc_type: doc.doc_type.clone(),
                 classification: doc.classification.clone(),
@@ -822,11 +825,18 @@ mod tests {
                 .into(),
             doc_type: doc_type.into(),
             classification: classification.into(),
-            markdown_path: path.into(),
+            markdown_path: format!("internal/canonical/{doc_id}.md"),
             tags_json: "[]".into(),
             deleted: false,
             frontmatter_json: frontmatter_json.into(),
             source_updated_at: source_updated_at.into(),
+            // Path filters target external_id (source-side path), not the
+            // canonical markdown_path. Tests pass the user-facing path here.
+            external_id: path.into(),
+            // result.file falls back to markdown_path; tests that assert
+            // on `result.file` should expect the canonical form unless they
+            // explicitly set uri.
+            uri: None,
         }
     }
 
@@ -1008,11 +1018,12 @@ mod tests {
         let results = collapse_to_doc_results(filtered, SearchMode::Hybrid, 10);
         assert_eq!(results.len(), 2);
         // Best (d1@0.9) ranks first; chunk_count=2.
-        assert_eq!(results[0].file, "p1.md");
+        // make_doc sets uri=None, so result.file falls back to markdown_path.
+        assert_eq!(results[0].file, "internal/canonical/d1.md");
         assert_eq!(results[0].text, "high");
         assert_eq!(results[0].chunk_count, Some(2));
         // d2 ranks second with chunk_count=1.
-        assert_eq!(results[1].file, "p2.md");
+        assert_eq!(results[1].file, "internal/canonical/d2.md");
         assert_eq!(results[1].chunk_count, Some(1));
     }
 

@@ -84,8 +84,16 @@ pub struct DocumentRow {
     pub deleted: bool,
     /// JSON-serialised frontmatter map. `'{}'` when no frontmatter.
     pub frontmatter_json: String,
-    /// Source path used for path-includes/path-excludes filtering.
+    /// Last-modified timestamp from the source (RFC 3339).
     pub source_updated_at: String,
+    /// Path of the document at its source (relative to the connector's root).
+    /// This is what path filters target — users think in source paths
+    /// like `03_MY_PROJECTS/HEIMDALL/foo.md`, not internal hash-based paths.
+    pub external_id: String,
+    /// Absolute source URI (filesystem connector populates with full file path).
+    /// Used as the user-facing `file` in SearchResult when present, falling
+    /// back to the canonical `markdown_path` if not.
+    pub uri: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +143,15 @@ fn parse_document_row(row: &Value) -> Option<DocumentRow> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    let external_id = obj
+        .get("external_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let uri = obj
+        .get("uri")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
 
     Some(DocumentRow {
         doc_id,
@@ -147,6 +164,8 @@ fn parse_document_row(row: &Value) -> Option<DocumentRow> {
         deleted,
         frontmatter_json,
         source_updated_at,
+        external_id,
+        uri,
     })
 }
 
@@ -522,7 +541,7 @@ CREATE TABLE IF NOT EXISTS migration_log (
     pub fn list_documents(&self) -> Result<Vec<DocumentRow>, ColibriError> {
         let rows = self.query_json(
             "SELECT doc_id, title, content_hash, doc_type, classification, markdown_path, \
-                    tags_json, deleted, frontmatter_json, source_updated_at \
+                    tags_json, deleted, frontmatter_json, source_updated_at, external_id, uri \
              FROM documents ORDER BY doc_id",
         )?;
         let mut out = Vec::new();
@@ -544,7 +563,7 @@ CREATE TABLE IF NOT EXISTS migration_log (
         let in_list = doc_ids.iter().map(|id| q(id)).collect::<Vec<_>>().join(",");
         let rows = self.query_json(&format!(
             "SELECT doc_id, title, content_hash, doc_type, classification, markdown_path, \
-                    tags_json, deleted, frontmatter_json, source_updated_at \
+                    tags_json, deleted, frontmatter_json, source_updated_at, external_id, uri \
              FROM documents WHERE doc_id IN ({in_list})"
         ))?;
 
