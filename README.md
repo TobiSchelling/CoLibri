@@ -73,10 +73,22 @@ colibri sync --force
 colibri index
 colibri index --force
 
-# Semantic search
+# Semantic / hybrid / keyword search
 colibri search "microservices patterns"
 colibri search "clean architecture" --json --limit 10
 colibri search "architecture decisions" --classification internal
+
+# Filter by document path (substring match — repeatable)
+colibri search "stakeholder commitments" --path-includes 03_MY_PROJECTS
+
+# Filter by parsed YAML frontmatter (repeatable KEY=VALUE)
+colibri search "test plan" --frontmatter area=SIT --frontmatter status=active
+
+# Time-bound queries
+colibri search "decisions" --since 2026-04-01T00:00:00Z
+
+# Document-level grouping (best chunk per file + chunk_count + frontmatter)
+colibri search "Heimdall" --group-by-doc --limit 5
 
 # MCP server (for Claude integration)
 colibri serve --check
