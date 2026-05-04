@@ -104,6 +104,10 @@ fn build_document_upsert(
     let tags_json = serde_json::to_string(&envelope.metadata.tags.clone().unwrap_or_default())?;
     let acl_tags_json =
         serde_json::to_string(&envelope.metadata.acl_tags.clone().unwrap_or_default())?;
+    let frontmatter_json = match &envelope.metadata.frontmatter {
+        Some(map) => serde_json::to_string(map)?,
+        None => "{}".to_string(),
+    };
 
     Ok(DocumentUpsert {
         doc_id: envelope.document.doc_id.clone(),
@@ -122,6 +126,7 @@ fn build_document_upsert(
         acl_tags_json,
         language: envelope.metadata.language.clone(),
         created_at: existing_created_at,
+        frontmatter_json,
     })
 }
 
@@ -274,6 +279,7 @@ mod tests {
                 tags: None,
                 language: None,
                 acl_tags: None,
+                frontmatter: None,
             },
         }
     }

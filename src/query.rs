@@ -4,21 +4,23 @@
 //! with L2 distance converted to similarity score via `exp(-distance)`.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
 
 use arrow_array::{Float32Array, RecordBatch, StringArray};
+use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use lancedb::index::scalar::FullTextSearchQuery;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use serde::Serialize;
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use tracing::warn;
 
 use crate::config::AppConfig;
 use crate::embedding::embed_texts;
 use crate::error::ColibriError;
-use crate::metadata_store::MetadataStore;
+use crate::metadata_store::{DocumentRow, MetadataStore};
 
 /// A single search result.
 #[derive(Debug, Clone, Serialize)]
@@ -31,6 +33,43 @@ pub struct SearchResult {
     pub classification: String,
     pub score: f64,
     pub search_mode: SearchMode,
+    /// When `group_by_doc` was true: how many chunks of this document
+    /// matched the underlying search.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_count: Option<usize>,
+    /// When `group_by_doc` was true: the document's parsed frontmatter
+    /// (populated from metadata_store).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frontmatter: Option<JsonMap<String, JsonValue>>,
+}
+
+/// Optional filters applied to a search.
+///
+/// All fields default to "no filter". `Default::default()` yields the
+/// pre-feature behavior (returns all matching chunks).
+#[derive(Debug, Clone, Default)]
+pub struct SearchFilter {
+    pub classification: Option<String>,
+    pub doc_type: Option<String>,
+    /// Return only docs whose `markdown_path` contains *any* listed substring.
+    pub path_includes: Vec<String>,
+    /// Drop docs whose `markdown_path` contains *any* listed substring.
+    pub path_excludes: Vec<String>,
+    /// Equality match on parsed frontmatter fields. Multiple keys combine with AND.
+    pub frontmatter: BTreeMap<String, String>,
+    /// Drop docs with `source_updated_at` strictly before this timestamp.
+    pub since: Option<DateTime<Utc>>,
+}
+
+impl SearchFilter {
+    /// Convenience constructor preserving the pre-feature `(classification, doc_type)` shape.
+    pub fn legacy(classification: Option<&str>, doc_type: Option<&str>) -> Self {
+        Self {
+            classification: classification.map(|s| s.to_string()),
+            doc_type: doc_type.map(|s| s.to_string()),
+            ..Default::default()
+        }
+    }
 }
 
 /// Controls how search queries are executed against LanceDB.
@@ -181,12 +220,18 @@ impl SearchEngine {
         })
     }
 
-    /// Search with optional folder/doc_type filters.
+    /// Search with optional filters and grouping.
+    ///
+    /// `filter` allows constraining results by classification, doc_type,
+    /// path-includes/excludes, frontmatter equality, and `since` timestamp.
+    /// `group_by_doc = true` returns one result per document (best matching
+    /// chunk + chunk_count + frontmatter); `false` returns chunk-level results
+    /// (legacy behaviour).
     pub async fn search(
         &self,
         query: &str,
-        classification: Option<&str>,
-        doc_type: Option<&str>,
+        filter: &SearchFilter,
+        group_by_doc: bool,
         limit: usize,
         mode: SearchMode,
     ) -> Result<Vec<SearchResult>, ColibriError> {
@@ -390,6 +435,8 @@ impl SearchEngine {
 
         merged.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
 
+        // Look up document metadata once for all hit doc_ids — needed for
+        // every filter predicate plus (when grouping) the result frontmatter.
         let mut doc_ids_set = HashSet::new();
         for hit in &merged {
             doc_ids_set.insert(hit.doc_id.clone());
@@ -398,67 +445,62 @@ impl SearchEngine {
         let store = MetadataStore::open(&self.config.metadata_db_path)?;
         let docs_by_id = store.get_documents_by_ids(&doc_ids)?;
 
-        let mut deduped = Vec::new();
-        let mut seen = HashSet::new();
-        for hit in merged {
-            let Some(doc) = docs_by_id.get(&hit.doc_id) else {
-                continue;
-            };
-            if doc.deleted {
-                continue;
-            }
-
-            if let Some(dt) = doc_type {
-                if doc.doc_type != dt {
-                    continue;
+        // Stage 1: filter hits using metadata join. Drops anything failing
+        // any predicate; preserves chunk-level granularity.
+        let filtered: Vec<(SearchHit, &DocumentRow)> = merged
+            .into_iter()
+            .filter_map(|hit| {
+                let doc = docs_by_id.get(&hit.doc_id)?;
+                if doc.deleted {
+                    return None;
                 }
-            }
-            if let Some(classification) = classification {
-                if doc.classification != classification {
-                    continue;
+                if !document_matches_filter(doc, filter) {
+                    return None;
                 }
-            }
+                Some((hit, doc))
+            })
+            .collect();
 
-            let result = SearchResult {
-                text: hit.text,
-                file: doc.markdown_path.clone(),
-                title: doc.title.clone(),
-                doc_type: doc.doc_type.clone(),
-                classification: doc.classification.clone(),
-                score: hit.score,
-                search_mode: mode,
-            };
+        // Stage 2 + 3: group_by_doc OR chunk-level dedup, then truncate to limit.
+        let results = if group_by_doc {
+            collapse_to_doc_results(filtered, mode, limit)
+        } else {
+            chunk_level_results(filtered, mode, limit)
+        };
 
-            let key = format!("{}:{}", result.file, result.text);
-            if seen.insert(key) {
-                deduped.push(result);
-            }
-            if deduped.len() >= limit {
-                break;
-            }
-        }
-
-        Ok(deduped)
+        Ok(results)
     }
 
-    /// Search only books.
+    /// Search only books. Returns chunk-level results (legacy behavior).
+    /// Convenience wrapper around `search()`.
+    #[allow(dead_code)] // Public API — kept for external callers/tests after MCP refactor.
     pub async fn search_books(
         &self,
         query: &str,
         limit: usize,
         mode: SearchMode,
     ) -> Result<Vec<SearchResult>, ColibriError> {
-        self.search(query, None, Some("book"), limit, mode).await
+        self.search(
+            query,
+            &SearchFilter::legacy(None, Some("book")),
+            false,
+            limit,
+            mode,
+        )
+        .await
     }
 
-    /// Search the entire library.
+    /// Search the entire library. Returns chunk-level results (legacy behavior).
+    /// Convenience wrapper around `search()`.
+    #[allow(dead_code)] // Public API — kept for external callers/tests after MCP refactor.
     pub async fn search_library(
         &self,
         query: &str,
         limit: usize,
         mode: SearchMode,
     ) -> Result<Vec<SearchResult>, ColibriError> {
-        self.search(query, None, None, limit, mode).await
+        self.search(query, &SearchFilter::default(), false, limit, mode)
+            .await
     }
 
     /// List all indexed books with metadata.
@@ -539,6 +581,142 @@ impl SearchEngine {
         topics.sort_by(|a, b| b.document_count.cmp(&a.document_count));
         Ok(topics)
     }
+}
+
+/// Predicate: does this document satisfy every active filter?
+fn document_matches_filter(doc: &DocumentRow, filter: &SearchFilter) -> bool {
+    if let Some(dt) = &filter.doc_type {
+        if doc.doc_type != *dt {
+            return false;
+        }
+    }
+    if let Some(c) = &filter.classification {
+        if doc.classification != *c {
+            return false;
+        }
+    }
+    if !filter.path_includes.is_empty() {
+        let any = filter
+            .path_includes
+            .iter()
+            .any(|needle| doc.markdown_path.contains(needle));
+        if !any {
+            return false;
+        }
+    }
+    if filter
+        .path_excludes
+        .iter()
+        .any(|needle| doc.markdown_path.contains(needle))
+    {
+        return false;
+    }
+    if let Some(since) = &filter.since {
+        // doc.source_updated_at is RFC 3339 (validated upstream by envelope::validate).
+        // If parsing fails, conservatively drop the doc.
+        match DateTime::parse_from_rfc3339(&doc.source_updated_at) {
+            Ok(t) => {
+                if t.with_timezone(&Utc) < *since {
+                    return false;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    if !filter.frontmatter.is_empty() {
+        // Parse the doc's frontmatter_json once. Empty/missing → no match for any key.
+        let parsed: JsonValue = serde_json::from_str(&doc.frontmatter_json)
+            .unwrap_or(JsonValue::Object(JsonMap::new()));
+        let map = match parsed.as_object() {
+            Some(m) => m,
+            None => return false,
+        };
+        for (key, expected) in &filter.frontmatter {
+            match map.get(key) {
+                Some(JsonValue::String(s)) if s == expected => {}
+                Some(JsonValue::Number(n)) if &n.to_string() == expected => {}
+                Some(JsonValue::Bool(b)) if &b.to_string() == expected => {}
+                _ => return false,
+            }
+        }
+    }
+    true
+}
+
+/// Convert filtered (hit, doc) pairs into chunk-level results.
+/// Preserves the legacy text-dedup behavior: skip exact-text duplicates.
+fn chunk_level_results(
+    filtered: Vec<(SearchHit, &DocumentRow)>,
+    mode: SearchMode,
+    limit: usize,
+) -> Vec<SearchResult> {
+    let mut deduped = Vec::new();
+    let mut seen = HashSet::new();
+    for (hit, doc) in filtered {
+        let result = SearchResult {
+            text: hit.text,
+            file: doc.markdown_path.clone(),
+            title: doc.title.clone(),
+            doc_type: doc.doc_type.clone(),
+            classification: doc.classification.clone(),
+            score: hit.score,
+            search_mode: mode,
+            chunk_count: None,
+            frontmatter: None,
+        };
+        let key = format!("{}:{}", result.file, result.text);
+        if seen.insert(key) {
+            deduped.push(result);
+        }
+        if deduped.len() >= limit {
+            break;
+        }
+    }
+    deduped
+}
+
+/// Collapse filtered (hit, doc) pairs into one result per document.
+/// Keeps the highest-scoring chunk; counts how many chunks of that doc matched.
+/// Attaches the document's frontmatter map.
+fn collapse_to_doc_results(
+    filtered: Vec<(SearchHit, &DocumentRow)>,
+    mode: SearchMode,
+    limit: usize,
+) -> Vec<SearchResult> {
+    // Bucket by doc_id; for each, keep best-scoring hit and count.
+    let mut best: HashMap<String, (SearchHit, &DocumentRow, usize)> = HashMap::new();
+    for (hit, doc) in filtered {
+        let entry = best
+            .entry(hit.doc_id.clone())
+            .or_insert_with(|| (hit.clone(), doc, 0));
+        entry.2 += 1;
+        if hit.score > entry.0.score {
+            entry.0 = hit;
+            entry.1 = doc;
+        }
+    }
+    let mut results: Vec<SearchResult> = best
+        .into_values()
+        .map(|(hit, doc, count)| {
+            let frontmatter = serde_json::from_str::<JsonValue>(&doc.frontmatter_json)
+                .ok()
+                .and_then(|v| v.as_object().cloned());
+            SearchResult {
+                text: hit.text,
+                file: doc.markdown_path.clone(),
+                title: doc.title.clone(),
+                doc_type: doc.doc_type.clone(),
+                classification: doc.classification.clone(),
+                score: hit.score,
+                search_mode: mode,
+                chunk_count: Some(count),
+                frontmatter,
+            }
+        })
+        .collect();
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
+    results.truncate(limit);
+    results
 }
 
 fn collect_search_hits(
@@ -625,5 +803,277 @@ mod tests {
         assert_eq!(SearchMode::Hybrid.to_string(), "hybrid");
         assert_eq!(SearchMode::Semantic.to_string(), "semantic");
         assert_eq!(SearchMode::Keyword.to_string(), "keyword");
+    }
+
+    // ----- SearchFilter + helpers (Wave 2 Cluster E) -----
+
+    fn make_doc(
+        doc_id: &str,
+        path: &str,
+        doc_type: &str,
+        classification: &str,
+        frontmatter_json: &str,
+        source_updated_at: &str,
+    ) -> DocumentRow {
+        DocumentRow {
+            doc_id: doc_id.into(),
+            title: doc_id.into(),
+            content_hash: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                .into(),
+            doc_type: doc_type.into(),
+            classification: classification.into(),
+            markdown_path: path.into(),
+            tags_json: "[]".into(),
+            deleted: false,
+            frontmatter_json: frontmatter_json.into(),
+            source_updated_at: source_updated_at.into(),
+        }
+    }
+
+    #[test]
+    fn filter_default_matches_everything() {
+        let doc = make_doc(
+            "d1",
+            "internal/a.md",
+            "note",
+            "internal",
+            "{}",
+            "2026-01-01T00:00:00Z",
+        );
+        assert!(document_matches_filter(&doc, &SearchFilter::default()));
+    }
+
+    #[test]
+    fn filter_classification_and_doc_type() {
+        let doc = make_doc(
+            "d1",
+            "internal/a.md",
+            "note",
+            "internal",
+            "{}",
+            "2026-01-01T00:00:00Z",
+        );
+        let mut f = SearchFilter::default();
+        f.classification = Some("internal".into());
+        assert!(document_matches_filter(&doc, &f));
+        f.classification = Some("public".into());
+        assert!(!document_matches_filter(&doc, &f));
+
+        let mut f = SearchFilter::default();
+        f.doc_type = Some("note".into());
+        assert!(document_matches_filter(&doc, &f));
+        f.doc_type = Some("book".into());
+        assert!(!document_matches_filter(&doc, &f));
+    }
+
+    #[test]
+    fn filter_path_includes() {
+        let doc = make_doc(
+            "d1",
+            "03_MY_PROJECTS/02_HEIMDALL/foo.md",
+            "note",
+            "internal",
+            "{}",
+            "2026-01-01T00:00:00Z",
+        );
+        let mut f = SearchFilter::default();
+        f.path_includes = vec!["02_HEIMDALL".into()];
+        assert!(document_matches_filter(&doc, &f));
+        f.path_includes = vec!["03_GO_AI".into()];
+        assert!(!document_matches_filter(&doc, &f));
+        // Multiple substrings: ANY match wins
+        f.path_includes = vec!["03_GO_AI".into(), "HEIMDALL".into()];
+        assert!(document_matches_filter(&doc, &f));
+    }
+
+    #[test]
+    fn filter_path_excludes() {
+        let doc = make_doc(
+            "d1",
+            "06_ARCHIVE/old.md",
+            "note",
+            "internal",
+            "{}",
+            "2026-01-01T00:00:00Z",
+        );
+        let mut f = SearchFilter::default();
+        f.path_excludes = vec!["06_ARCHIVE".into()];
+        assert!(!document_matches_filter(&doc, &f));
+    }
+
+    #[test]
+    fn filter_frontmatter_string() {
+        let doc = make_doc(
+            "d1",
+            "internal/a.md",
+            "note",
+            "internal",
+            r#"{"area":"SIT","status":"active"}"#,
+            "2026-01-01T00:00:00Z",
+        );
+        let mut f = SearchFilter::default();
+        f.frontmatter.insert("area".into(), "SIT".into());
+        assert!(document_matches_filter(&doc, &f));
+        f.frontmatter.insert("status".into(), "draft".into());
+        assert!(!document_matches_filter(&doc, &f));
+    }
+
+    #[test]
+    fn filter_frontmatter_missing_key_excludes() {
+        let doc = make_doc(
+            "d1",
+            "internal/a.md",
+            "note",
+            "internal",
+            "{}",
+            "2026-01-01T00:00:00Z",
+        );
+        let mut f = SearchFilter::default();
+        f.frontmatter.insert("area".into(), "SIT".into());
+        assert!(!document_matches_filter(&doc, &f));
+    }
+
+    #[test]
+    fn filter_since() {
+        let doc = make_doc(
+            "d1",
+            "internal/a.md",
+            "note",
+            "internal",
+            "{}",
+            "2026-04-15T00:00:00Z",
+        );
+        let mut f = SearchFilter::default();
+        f.since = Some(
+            DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        assert!(document_matches_filter(&doc, &f));
+        f.since = Some(
+            DateTime::parse_from_rfc3339("2026-05-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        assert!(!document_matches_filter(&doc, &f));
+    }
+
+    #[test]
+    fn collapse_to_doc_keeps_best_chunk_and_counts() {
+        let docs = vec![
+            make_doc(
+                "d1",
+                "p1.md",
+                "note",
+                "internal",
+                "{}",
+                "2026-01-01T00:00:00Z",
+            ),
+            make_doc(
+                "d2",
+                "p2.md",
+                "note",
+                "internal",
+                "{}",
+                "2026-01-01T00:00:00Z",
+            ),
+        ];
+        // Three hits across two docs; d1 has chunks at 0.5 and 0.9, d2 at 0.7
+        let filtered: Vec<(SearchHit, &DocumentRow)> = vec![
+            (
+                SearchHit {
+                    doc_id: "d1".into(),
+                    text: "low".into(),
+                    score: 0.5,
+                },
+                &docs[0],
+            ),
+            (
+                SearchHit {
+                    doc_id: "d1".into(),
+                    text: "high".into(),
+                    score: 0.9,
+                },
+                &docs[0],
+            ),
+            (
+                SearchHit {
+                    doc_id: "d2".into(),
+                    text: "mid".into(),
+                    score: 0.7,
+                },
+                &docs[1],
+            ),
+        ];
+        let results = collapse_to_doc_results(filtered, SearchMode::Hybrid, 10);
+        assert_eq!(results.len(), 2);
+        // Best (d1@0.9) ranks first; chunk_count=2.
+        assert_eq!(results[0].file, "p1.md");
+        assert_eq!(results[0].text, "high");
+        assert_eq!(results[0].chunk_count, Some(2));
+        // d2 ranks second with chunk_count=1.
+        assert_eq!(results[1].file, "p2.md");
+        assert_eq!(results[1].chunk_count, Some(1));
+    }
+
+    #[test]
+    fn collapse_to_doc_attaches_frontmatter() {
+        let docs = vec![make_doc(
+            "d1",
+            "p1.md",
+            "note",
+            "internal",
+            r#"{"area":"SIT"}"#,
+            "2026-01-01T00:00:00Z",
+        )];
+        let filtered = vec![(
+            SearchHit {
+                doc_id: "d1".into(),
+                text: "x".into(),
+                score: 0.9,
+            },
+            &docs[0],
+        )];
+        let results = collapse_to_doc_results(filtered, SearchMode::Hybrid, 10);
+        assert_eq!(
+            results[0]
+                .frontmatter
+                .as_ref()
+                .and_then(|m| m.get("area"))
+                .and_then(JsonValue::as_str),
+            Some("SIT")
+        );
+    }
+
+    #[test]
+    fn collapse_truncates_to_limit() {
+        let docs: Vec<DocumentRow> = (0..5)
+            .map(|i| {
+                make_doc(
+                    &format!("d{i}"),
+                    &format!("p{i}.md"),
+                    "note",
+                    "internal",
+                    "{}",
+                    "2026-01-01T00:00:00Z",
+                )
+            })
+            .collect();
+        let filtered: Vec<(SearchHit, &DocumentRow)> = docs
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                (
+                    SearchHit {
+                        doc_id: format!("d{i}"),
+                        text: format!("t{i}"),
+                        score: 0.9 - (i as f64) * 0.01,
+                    },
+                    d,
+                )
+            })
+            .collect();
+        let results = collapse_to_doc_results(filtered, SearchMode::Hybrid, 3);
+        assert_eq!(results.len(), 3);
     }
 }

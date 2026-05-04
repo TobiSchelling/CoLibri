@@ -334,6 +334,7 @@ pub async fn run(
             tags: None,
             language: None,
             acl_tags: None,
+            frontmatter: None,
         },
     };
 

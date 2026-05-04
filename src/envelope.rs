@@ -52,6 +52,16 @@ pub struct EnvelopeMetadata {
     pub tags: Option<Vec<String>>,
     pub language: Option<String>,
     pub acl_tags: Option<Vec<String>>,
+    /// Parsed YAML frontmatter from the source document (if any).
+    ///
+    /// Connectors that read structured documents (e.g. the filesystem
+    /// connector reading Markdown with YAML frontmatter) populate this
+    /// with the top-level mapping. Carried through to the metadata store
+    /// as `frontmatter_json` for query-time filtering.
+    ///
+    /// Backwards-compatible default: `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontmatter: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -156,6 +166,7 @@ mod tests {
                 tags: None,
                 language: None,
                 acl_tags: None,
+                frontmatter: None,
             },
         }
     }

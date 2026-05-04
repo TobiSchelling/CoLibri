@@ -63,7 +63,7 @@ impl Connector for FilesystemConnector {
                 .map(|e| format!(".{}", e.to_string_lossy().to_lowercase()))
                 .unwrap_or_default();
 
-            let markdown = match ext.as_str() {
+            let raw = match ext.as_str() {
                 ".md" | ".markdown" => match std::fs::read_to_string(file_path) {
                     Ok(text) => text,
                     Err(e) => {
@@ -82,6 +82,16 @@ impl Connector for FilesystemConnector {
                 }
                 _ => continue,
             };
+
+            // Parse YAML frontmatter (only meaningful for .md/.markdown files
+            // — converters above don't produce frontmatter). The body is
+            // chunked/embedded; the frontmatter is carried as structured
+            // metadata.
+            let (parsed_tags, parsed_fm, body) = match ext.as_str() {
+                ".md" | ".markdown" => parse_frontmatter(&raw, &rel),
+                _ => (None, None, raw.as_str()),
+            };
+            let markdown = body.to_string();
 
             let markdown = if self.plantuml_summaries {
                 enrich_plantuml_blocks(&markdown)
@@ -112,9 +122,10 @@ impl Connector for FilesystemConnector {
                 metadata: EnvelopeMetadata {
                     doc_type: self.doc_type.clone(),
                     classification: self.classification.clone(),
-                    tags: None,
+                    tags: parsed_tags,
                     language: None,
                     acl_tags: None,
+                    frontmatter: parsed_fm,
                 },
             });
         }
@@ -203,6 +214,85 @@ fn should_exclude(rel_path: &str, exclude_globs: &[String]) -> bool {
         }
     }
     false
+}
+
+/// Parse a leading YAML frontmatter block from a Markdown source.
+///
+/// Returns `(tags, frontmatter_map, body)`:
+/// - `tags`: extracted from a `tags:` sequence in the frontmatter, normalized
+///   (trimmed, deduplicated, leading `#` stripped, empties dropped). `None`
+///   if no `tags:` key.
+/// - `frontmatter_map`: the entire top-level mapping serialised as
+///   `serde_json::Map`. `None` if no frontmatter.
+/// - `body`: the markdown content with the frontmatter stripped.
+///
+/// Behaviour for non-frontmatter or malformed input:
+/// - File doesn't start with `---\n`: returns `(None, None, full_text)`.
+/// - Closing `\n---` not found: log warning, return `(None, None, full_text)`.
+/// - Invalid YAML: log warning, return `(None, None, full_text)`.
+/// - `tags` value is a scalar (not a list): log warning at trace level,
+///   return `tags = None` but the rest of the frontmatter is still parsed.
+type FrontmatterParseResult<'a> = (
+    Option<Vec<String>>,
+    Option<serde_json::Map<String, serde_json::Value>>,
+    &'a str,
+);
+
+fn parse_frontmatter<'a>(text: &'a str, rel_path: &str) -> FrontmatterParseResult<'a> {
+    // Skip the leading marker line — try CRLF first, then LF; bail if neither.
+    let after_marker = if let Some(stripped) = text.strip_prefix("---\r\n") {
+        stripped
+    } else if let Some(stripped) = text.strip_prefix("---\n") {
+        stripped
+    } else {
+        return (None, None, text);
+    };
+
+    // Find closing marker — accepts "\n---\n", "\n---\r\n", or "\n---" at EOF
+    let (yaml_block, body) = if let Some(idx) = after_marker.find("\n---\n") {
+        (&after_marker[..idx], &after_marker[idx + 5..])
+    } else if let Some(idx) = after_marker.find("\n---\r\n") {
+        (&after_marker[..idx], &after_marker[idx + 6..])
+    } else if let Some(stripped) = after_marker.strip_suffix("\n---") {
+        (stripped, "")
+    } else {
+        eprintln!("[frontmatter] {rel_path}: no closing --- found; treating as body-only");
+        return (None, None, text);
+    };
+
+    let parsed: serde_yaml::Value = match serde_yaml::from_str(yaml_block) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[frontmatter] {rel_path}: parse error: {e}; treating as body-only");
+            return (None, None, text);
+        }
+    };
+
+    // Extract & normalise tags
+    let tags = parsed
+        .get("tags")
+        .and_then(|t| t.as_sequence())
+        .map(|seq| {
+            let mut seen = BTreeSet::new();
+            for v in seq {
+                if let Some(s) = v.as_str() {
+                    let normalised = s.trim().trim_start_matches('#').to_string();
+                    if !normalised.is_empty() {
+                        seen.insert(normalised);
+                    }
+                }
+            }
+            seen.into_iter().collect::<Vec<String>>()
+        })
+        .filter(|v: &Vec<String>| !v.is_empty());
+
+    // Convert top-level mapping to a serde_json::Map for portability
+    let frontmatter_map = match serde_json::to_value(&parsed) {
+        Ok(serde_json::Value::Object(map)) => Some(map),
+        _ => None,
+    };
+
+    (tags, frontmatter_map, body)
 }
 
 /// Extract the file modification time as an RFC 3339 string, falling back to now.
@@ -577,6 +667,124 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    // ----- Frontmatter parsing tests -----
+
+    #[test]
+    fn parse_frontmatter_extracts_tags_and_body() {
+        let text = "---\ntags:\n  - foo\n  - bar\nDocumentType: meeting\n---\n# Body\nContent";
+        let (tags, fm, body) = parse_frontmatter(text, "test.md");
+        assert_eq!(tags.unwrap(), vec!["bar".to_string(), "foo".to_string()]); // BTreeSet sorts
+        let fm = fm.unwrap();
+        assert_eq!(fm.get("DocumentType").unwrap(), "meeting");
+        assert_eq!(body, "# Body\nContent");
+    }
+
+    #[test]
+    fn parse_frontmatter_no_frontmatter_returns_full_body() {
+        let text = "# Just a body\nNo frontmatter here";
+        let (tags, fm, body) = parse_frontmatter(text, "test.md");
+        assert!(tags.is_none());
+        assert!(fm.is_none());
+        assert_eq!(body, text);
+    }
+
+    #[test]
+    fn parse_frontmatter_malformed_yaml_returns_full_body() {
+        let text = "---\ninvalid: yaml: : bad\n---\n# Body";
+        let (tags, fm, body) = parse_frontmatter(text, "test.md");
+        assert!(tags.is_none());
+        assert!(fm.is_none());
+        assert_eq!(body, text);
+    }
+
+    #[test]
+    fn parse_frontmatter_no_closing_marker_returns_full_body() {
+        let text = "---\ntags: [foo]\n# Body without closing";
+        let (tags, fm, body) = parse_frontmatter(text, "test.md");
+        assert!(tags.is_none());
+        assert!(fm.is_none());
+        assert_eq!(body, text);
+    }
+
+    #[test]
+    fn parse_frontmatter_normalizes_tag_strings() {
+        let text =
+            "---\ntags:\n  - \"  hashed  \"\n  - \"#leading-hash\"\n  - \"\"\n  - foo\n---\nbody";
+        let (tags, _fm, _body) = parse_frontmatter(text, "test.md");
+        let tags = tags.unwrap();
+        // BTreeSet dedup + sort
+        assert_eq!(
+            tags,
+            vec![
+                "foo".to_string(),
+                "hashed".to_string(),
+                "leading-hash".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_frontmatter_scalar_tags_yields_no_tags() {
+        let text = "---\ntags: not-a-list\nstatus: active\n---\nbody";
+        let (tags, fm, body) = parse_frontmatter(text, "test.md");
+        // tags is a scalar, so `as_sequence()` returns None → tags stays None
+        assert!(tags.is_none());
+        // Frontmatter map still parses fine
+        let fm = fm.unwrap();
+        assert_eq!(fm.get("status").unwrap(), "active");
+        assert_eq!(body, "body");
+    }
+
+    #[test]
+    fn parse_frontmatter_strips_body_correctly() {
+        let text = "---\nstatus: active\n---\n\n# Real content\n\nMore text\n";
+        let (_, _, body) = parse_frontmatter(text, "test.md");
+        assert_eq!(body, "\n# Real content\n\nMore text\n");
+    }
+
+    #[tokio::test]
+    async fn sync_populates_tags_from_frontmatter() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("tagged.md"),
+            "---\ntags: [aegis, sit]\narea: SIT\n---\n# Body\nWith tags",
+        )
+        .unwrap();
+        fs::write(dir.path().join("plain.md"), "# Plain\nNo frontmatter").unwrap();
+
+        let connector = FilesystemConnector {
+            id: "test".into(),
+            root_path: dir.path().to_path_buf(),
+            include_extensions: vec![".md".into()],
+            exclude_globs: vec![],
+            doc_type: "note".into(),
+            classification: "internal".into(),
+            plantuml_summaries: false,
+        };
+        let envelopes = connector.sync().await.unwrap();
+        assert_eq!(envelopes.len(), 2);
+
+        let tagged = envelopes
+            .iter()
+            .find(|e| e.document.title == "tagged")
+            .unwrap();
+        assert_eq!(
+            tagged.metadata.tags.as_ref().unwrap(),
+            &vec!["aegis".to_string(), "sit".to_string()]
+        );
+        let fm = tagged.metadata.frontmatter.as_ref().unwrap();
+        assert_eq!(fm.get("area").unwrap(), "SIT");
+        // Body shouldn't include the frontmatter
+        assert!(!tagged.document.markdown.contains("---"));
+
+        let plain = envelopes
+            .iter()
+            .find(|e| e.document.title == "plain")
+            .unwrap();
+        assert!(plain.metadata.tags.is_none());
+        assert!(plain.metadata.frontmatter.is_none());
+    }
 
     fn make_test_dir() -> TempDir {
         let dir = TempDir::new().unwrap();

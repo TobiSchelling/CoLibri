@@ -168,7 +168,7 @@ fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
             "tools": [
                 {
                     "name": "search_library",
-                    "description": "Search across all indexed content sources including technical books, architecture documents, notes, and other reference materials. Performs hybrid search (combining BM25 keyword matching with semantic vector search) by default to find relevant passages.",
+                    "description": "Search across all indexed content sources including technical books, architecture documents, notes, and other reference materials. Performs hybrid search (BM25 + semantic vectors) by default. Optional filters scope by classification, document path, parsed YAML frontmatter fields (e.g. area, status, DocumentType), and update time.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -187,6 +187,31 @@ fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
                                 "type": "string",
                                 "description": "Search mode. Use 'keyword' for exact terms, names, acronyms, or IDs (e.g. 'ATAM', 'C4 model', test case IDs). Use 'semantic' for conceptual/natural language queries. Use 'hybrid' (default) for queries mixing concepts with specific terms.",
                                 "enum": ["hybrid", "semantic", "keyword"]
+                            },
+                            "path_includes": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional. Restrict to docs whose canonical path contains ANY of these substrings. e.g. [\"03_MY_PROJECTS/02_HEIMDALL\"]. Combine multiple substrings to broaden inclusion."
+                            },
+                            "path_excludes": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional. Drop docs whose canonical path contains ANY of these substrings. e.g. [\"06_ARCHIVE\", \".trash\"]."
+                            },
+                            "frontmatter": {
+                                "type": "object",
+                                "additionalProperties": {"type": "string"},
+                                "description": "Optional equality match on parsed YAML frontmatter fields. Multiple keys combine with AND. Example: {\"area\":\"SIT\", \"status\":\"active\"}. Only string/number/bool values are matched (string-compared). Filters that target fields not present in a doc's frontmatter exclude that doc."
+                            },
+                            "since": {
+                                "type": "string",
+                                "format": "date-time",
+                                "description": "Optional. Only docs updated on or after this RFC 3339 timestamp. e.g. \"2026-04-01T00:00:00Z\"."
+                            },
+                            "group_by_doc": {
+                                "type": "boolean",
+                                "default": true,
+                                "description": "Default true. Returns one result per document with the best matching chunk plus chunk_count and frontmatter. Set false to get chunk-level results (legacy behavior)."
                             }
                         },
                         "required": ["query"]
@@ -194,7 +219,7 @@ fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
                 },
                 {
                     "name": "search_books",
-                    "description": "Search only imported technical books and reference materials. Filters to documents with type 'book'. Supports hybrid, semantic, and keyword search modes.",
+                    "description": "Search only imported technical books and reference materials. Filters to documents with type 'book'. Same filter and grouping options as search_library.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -213,6 +238,31 @@ fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
                                 "type": "string",
                                 "description": "Search mode. Use 'keyword' for exact terms, names, acronyms, or IDs (e.g. 'ATAM', 'C4 model', test case IDs). Use 'semantic' for conceptual/natural language queries. Use 'hybrid' (default) for queries mixing concepts with specific terms.",
                                 "enum": ["hybrid", "semantic", "keyword"]
+                            },
+                            "path_includes": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional. Restrict to books whose canonical path contains ANY of these substrings."
+                            },
+                            "path_excludes": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional. Drop books whose canonical path contains ANY of these substrings."
+                            },
+                            "frontmatter": {
+                                "type": "object",
+                                "additionalProperties": {"type": "string"},
+                                "description": "Optional equality match on parsed YAML frontmatter fields (typically empty for books)."
+                            },
+                            "since": {
+                                "type": "string",
+                                "format": "date-time",
+                                "description": "Optional. Only books updated on or after this RFC 3339 timestamp."
+                            },
+                            "group_by_doc": {
+                                "type": "boolean",
+                                "default": true,
+                                "description": "Default true. One result per book with the best matching chunk plus chunk_count. Set false for chunk-level results."
                             }
                         },
                         "required": ["query"]
@@ -244,6 +294,68 @@ fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
     })
 }
 
+/// Parse the new Wave 2 Cluster E filter inputs from MCP tool arguments.
+/// Returns `Err(msg)` if any field has an invalid type/format.
+fn parse_filter_extras(arguments: &Value) -> Result<crate::query::SearchFilter, String> {
+    use std::collections::BTreeMap;
+
+    let mut filter = crate::query::SearchFilter::default();
+
+    if let Some(arr) = arguments.get("path_includes") {
+        let arr = arr
+            .as_array()
+            .ok_or_else(|| "path_includes must be an array of strings".to_string())?;
+        for v in arr {
+            let s = v
+                .as_str()
+                .ok_or_else(|| "path_includes entries must be strings".to_string())?;
+            filter.path_includes.push(s.to_string());
+        }
+    }
+    if let Some(arr) = arguments.get("path_excludes") {
+        let arr = arr
+            .as_array()
+            .ok_or_else(|| "path_excludes must be an array of strings".to_string())?;
+        for v in arr {
+            let s = v
+                .as_str()
+                .ok_or_else(|| "path_excludes entries must be strings".to_string())?;
+            filter.path_excludes.push(s.to_string());
+        }
+    }
+    if let Some(obj) = arguments.get("frontmatter") {
+        let obj = obj
+            .as_object()
+            .ok_or_else(|| "frontmatter must be an object of {field: value} strings".to_string())?;
+        let mut map = BTreeMap::new();
+        for (k, v) in obj {
+            let s = match v {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                Value::Bool(b) => b.to_string(),
+                _ => {
+                    return Err(format!(
+                        "frontmatter[{k}] must be a string, number, or bool"
+                    ))
+                }
+            };
+            map.insert(k.clone(), s);
+        }
+        filter.frontmatter = map;
+    }
+    if let Some(v) = arguments.get("since") {
+        let s = v
+            .as_str()
+            .ok_or_else(|| "since must be an RFC 3339 string".to_string())?;
+        let parsed = chrono::DateTime::parse_from_rfc3339(s)
+            .map_err(|e| format!("since not RFC 3339: {e}"))?
+            .with_timezone(&chrono::Utc);
+        filter.since = Some(parsed);
+    }
+
+    Ok(filter)
+}
+
 async fn handle_tools_call(
     id: Option<Value>,
     request: &Value,
@@ -269,6 +381,18 @@ async fn handle_tools_call(
         }
     };
 
+    // Wave 2 Cluster E filter parsing — shared between search_library and search_books.
+    let filter_extras = match parse_filter_extras(&arguments) {
+        Ok(f) => f,
+        Err(msg) => return error_response(id, -32602, &msg),
+    };
+    // MCP default: group_by_doc = true (LLM clients almost always want
+    // document-level results, not chunk lists). Override with `group_by_doc: false`.
+    let group_by_doc = arguments
+        .get("group_by_doc")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
     let result = match tool_name {
         "search_library" => {
             let query = arguments
@@ -281,7 +405,15 @@ async fn handle_tools_call(
                 .map(|l| (l as usize).min(max_limit))
                 .unwrap_or(top_k);
 
-            match engine.search_library(query, limit, mode).await {
+            let filter = crate::query::SearchFilter {
+                classification: None,
+                doc_type: None,
+                ..filter_extras.clone()
+            };
+            match engine
+                .search(query, &filter, group_by_doc, limit, mode)
+                .await
+            {
                 Ok(results) => {
                     let output = json!({
                         "query": query,
@@ -305,7 +437,15 @@ async fn handle_tools_call(
                 .map(|l| (l as usize).min(max_limit))
                 .unwrap_or(top_k);
 
-            match engine.search_books(query, limit, mode).await {
+            let filter = crate::query::SearchFilter {
+                classification: None,
+                doc_type: Some("book".to_string()),
+                ..filter_extras.clone()
+            };
+            match engine
+                .search(query, &filter, group_by_doc, limit, mode)
+                .await
+            {
                 Ok(results) => {
                     let output = json!({
                         "query": query,

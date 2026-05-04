@@ -177,6 +177,30 @@ pub enum Commands {
         /// Search mode: hybrid (default), semantic, or keyword
         #[arg(long, value_enum, default_value_t = SearchMode::Hybrid)]
         mode: SearchMode,
+
+        /// Restrict results to documents whose path contains any of these
+        /// substrings. Repeatable: `--path-includes 03_PROJECTS --path-includes MEETINGS`.
+        #[arg(long, value_name = "SUBSTRING")]
+        path_includes: Vec<String>,
+
+        /// Drop documents whose path contains any of these substrings.
+        #[arg(long, value_name = "SUBSTRING")]
+        path_excludes: Vec<String>,
+
+        /// Equality filter on parsed frontmatter fields. KEY=VALUE, repeatable.
+        /// e.g. `--frontmatter area=SIT --frontmatter status=active`.
+        #[arg(long, value_name = "KEY=VALUE")]
+        frontmatter: Vec<String>,
+
+        /// Only return documents updated on or after this RFC 3339 timestamp.
+        /// e.g. `--since 2026-04-01T00:00:00Z`.
+        #[arg(long, value_name = "RFC3339")]
+        since: Option<String>,
+
+        /// Group results by document — best-matching chunk per file plus
+        /// chunk_count. Default: false (chunk-level results).
+        #[arg(long)]
+        group_by_doc: bool,
     },
 
     /// Start MCP stdio server

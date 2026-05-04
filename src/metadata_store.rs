@@ -68,6 +68,8 @@ pub struct DocumentUpsert {
     pub acl_tags_json: String,
     pub language: Option<String>,
     pub created_at: Option<String>,
+    /// JSON-serialised frontmatter map. Empty `{}` when no frontmatter.
+    pub frontmatter_json: String,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +82,10 @@ pub struct DocumentRow {
     pub markdown_path: String,
     pub tags_json: String,
     pub deleted: bool,
+    /// JSON-serialised frontmatter map. `'{}'` when no frontmatter.
+    pub frontmatter_json: String,
+    /// Source path used for path-includes/path-excludes filtering.
+    pub source_updated_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +99,55 @@ pub struct DocumentIndexStateRow {
 
 pub struct MetadataStore {
     path: PathBuf,
+}
+
+/// Decode a `documents` row from JSON-shaped query output into a `DocumentRow`.
+/// Returns `None` if any required column is missing/malformed.
+fn parse_document_row(row: &Value) -> Option<DocumentRow> {
+    let obj = row.as_object()?;
+    let doc_id = obj.get("doc_id").and_then(Value::as_str)?.to_string();
+    let title = obj.get("title").and_then(Value::as_str)?.to_string();
+    let content_hash = obj.get("content_hash").and_then(Value::as_str)?.to_string();
+    let doc_type = obj.get("doc_type").and_then(Value::as_str)?.to_string();
+    let classification = obj
+        .get("classification")
+        .and_then(Value::as_str)?
+        .to_string();
+    let markdown_path = obj
+        .get("markdown_path")
+        .and_then(Value::as_str)?
+        .to_string();
+    let tags_json = obj
+        .get("tags_json")
+        .and_then(Value::as_str)
+        .unwrap_or("[]")
+        .to_string();
+    let deleted = obj.get("deleted").and_then(Value::as_i64).unwrap_or(0) != 0;
+    // New columns (Wave 2 Cluster E): may be missing on rows from pre-migration
+    // DBs the first time around; ALTER TABLE provides defaults thereafter.
+    let frontmatter_json = obj
+        .get("frontmatter_json")
+        .and_then(Value::as_str)
+        .unwrap_or("{}")
+        .to_string();
+    let source_updated_at = obj
+        .get("source_updated_at")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    Some(DocumentRow {
+        doc_id,
+        title,
+        content_hash,
+        doc_type,
+        classification,
+        markdown_path,
+        tags_json,
+        deleted,
+        frontmatter_json,
+        source_updated_at,
+    })
 }
 
 impl MetadataStore {
@@ -271,7 +326,18 @@ CREATE TABLE IF NOT EXISTS migration_log (
         sql.push_str("COMMIT;\n");
         self.exec_script(&sql)?;
         self.ensure_document_index_state_columns()?;
+        self.ensure_documents_frontmatter_column()?;
         Ok(())
+    }
+
+    /// Wave 2 Cluster E (frontmatter-aware-search): add the `frontmatter_json`
+    /// column to the documents table on existing DBs. Idempotent —
+    /// `ensure_columns` checks `PRAGMA table_info` first.
+    fn ensure_documents_frontmatter_column(&self) -> Result<(), ColibriError> {
+        self.ensure_columns(
+            "documents",
+            &[("frontmatter_json", "TEXT NOT NULL DEFAULT '{}'")],
+        )
     }
 
     fn ensure_document_index_state_columns(&self) -> Result<(), ColibriError> {
@@ -369,8 +435,8 @@ CREATE TABLE IF NOT EXISTS migration_log (
             "INSERT INTO documents(\
                 doc_id, plugin_id, connector_instance, external_id, title, content_hash,\
                 source_updated_at, deleted, classification, doc_type, markdown_path,\
-                uri, tags_json, acl_tags_json, language, created_at, updated_at\
-            ) VALUES ({doc_id}, {plugin_id}, {connector_instance}, {external_id}, {title}, {content_hash}, {source_updated_at}, {deleted}, {classification}, {doc_type}, {markdown_path}, {uri}, {tags_json}, {acl_tags_json}, {language}, {created_at}, {updated_at}) \
+                uri, tags_json, acl_tags_json, language, created_at, updated_at, frontmatter_json\
+            ) VALUES ({doc_id}, {plugin_id}, {connector_instance}, {external_id}, {title}, {content_hash}, {source_updated_at}, {deleted}, {classification}, {doc_type}, {markdown_path}, {uri}, {tags_json}, {acl_tags_json}, {language}, {created_at}, {updated_at}, {frontmatter_json}) \
             ON CONFLICT(doc_id) DO UPDATE SET \
                 plugin_id=excluded.plugin_id,\
                 connector_instance=excluded.connector_instance,\
@@ -387,7 +453,8 @@ CREATE TABLE IF NOT EXISTS migration_log (
                 acl_tags_json=excluded.acl_tags_json,\
                 language=excluded.language,\
                 created_at=documents.created_at,\
-                updated_at=excluded.updated_at;",
+                updated_at=excluded.updated_at,\
+                frontmatter_json=excluded.frontmatter_json;",
             doc_id = q(&row.doc_id),
             plugin_id = q(&row.plugin_id),
             connector_instance = q(&row.connector_instance),
@@ -402,6 +469,7 @@ CREATE TABLE IF NOT EXISTS migration_log (
             uri = q_opt(row.uri.as_deref()),
             tags_json = q(&row.tags_json),
             acl_tags_json = q(&row.acl_tags_json),
+            frontmatter_json = q(&row.frontmatter_json),
             language = q_opt(row.language.as_deref()),
             created_at = q(&created_at),
             updated_at = q(&now),
@@ -453,49 +521,15 @@ CREATE TABLE IF NOT EXISTS migration_log (
 
     pub fn list_documents(&self) -> Result<Vec<DocumentRow>, ColibriError> {
         let rows = self.query_json(
-            "SELECT doc_id, title, content_hash, doc_type, classification, markdown_path, tags_json, deleted \
+            "SELECT doc_id, title, content_hash, doc_type, classification, markdown_path, \
+                    tags_json, deleted, frontmatter_json, source_updated_at \
              FROM documents ORDER BY doc_id",
         )?;
         let mut out = Vec::new();
         for row in rows {
-            let Some(obj) = row.as_object() else {
-                continue;
-            };
-            let Some(doc_id) = obj.get("doc_id").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(title) = obj.get("title").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(content_hash) = obj.get("content_hash").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(doc_type) = obj.get("doc_type").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(classification) = obj.get("classification").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(markdown_path) = obj.get("markdown_path").and_then(Value::as_str) else {
-                continue;
-            };
-            let tags_json = obj
-                .get("tags_json")
-                .and_then(Value::as_str)
-                .unwrap_or("[]")
-                .to_string();
-            let deleted = obj.get("deleted").and_then(Value::as_i64).unwrap_or(0) != 0;
-
-            out.push(DocumentRow {
-                doc_id: doc_id.to_string(),
-                title: title.to_string(),
-                content_hash: content_hash.to_string(),
-                doc_type: doc_type.to_string(),
-                classification: classification.to_string(),
-                markdown_path: markdown_path.to_string(),
-                tags_json,
-                deleted,
-            });
+            if let Some(doc_row) = parse_document_row(&row) {
+                out.push(doc_row);
+            }
         }
         Ok(out)
     }
@@ -509,53 +543,16 @@ CREATE TABLE IF NOT EXISTS migration_log (
         }
         let in_list = doc_ids.iter().map(|id| q(id)).collect::<Vec<_>>().join(",");
         let rows = self.query_json(&format!(
-            "SELECT doc_id, title, content_hash, doc_type, classification, markdown_path, tags_json, deleted \
+            "SELECT doc_id, title, content_hash, doc_type, classification, markdown_path, \
+                    tags_json, deleted, frontmatter_json, source_updated_at \
              FROM documents WHERE doc_id IN ({in_list})"
         ))?;
 
         let mut out = HashMap::new();
         for row in rows {
-            let Some(obj) = row.as_object() else {
-                continue;
-            };
-            let Some(doc_id) = obj.get("doc_id").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(title) = obj.get("title").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(content_hash) = obj.get("content_hash").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(doc_type) = obj.get("doc_type").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(classification) = obj.get("classification").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(markdown_path) = obj.get("markdown_path").and_then(Value::as_str) else {
-                continue;
-            };
-            let tags_json = obj
-                .get("tags_json")
-                .and_then(Value::as_str)
-                .unwrap_or("[]")
-                .to_string();
-            let deleted = obj.get("deleted").and_then(Value::as_i64).unwrap_or(0) != 0;
-
-            out.insert(
-                doc_id.to_string(),
-                DocumentRow {
-                    doc_id: doc_id.to_string(),
-                    title: title.to_string(),
-                    content_hash: content_hash.to_string(),
-                    doc_type: doc_type.to_string(),
-                    classification: classification.to_string(),
-                    markdown_path: markdown_path.to_string(),
-                    tags_json,
-                    deleted,
-                },
-            );
+            if let Some(doc_row) = parse_document_row(&row) {
+                out.insert(doc_row.doc_id.clone(), doc_row);
+            }
         }
         Ok(out)
     }
@@ -838,6 +835,7 @@ mod tests {
             acl_tags_json: "[]".into(),
             language: Some("en".into()),
             created_at: None,
+            frontmatter_json: "{}".into(),
         };
         store.upsert_document(&row).expect("upsert document");
 

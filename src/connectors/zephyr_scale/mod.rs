@@ -181,6 +181,7 @@ impl Connector for ZephyrScaleConnector {
                     tags: Some(tags),
                     language: None,
                     acl_tags: None,
+                    frontmatter: None,
                 },
             });
         }
