@@ -1,6 +1,6 @@
 //! `colibri serve` — MCP stdio server command.
 
-use crate::config::load_config;
+use crate::config::load_config_no_bootstrap;
 use crate::mcp;
 
 pub async fn run(check: bool, json: bool) -> anyhow::Result<()> {
@@ -8,7 +8,7 @@ pub async fn run(check: bool, json: bool) -> anyhow::Result<()> {
         anyhow::bail!("`--json` requires `--check`");
     }
 
-    let config = load_config()?;
+    let config = load_config_no_bootstrap()?;
     if check {
         let report = mcp::startup_report(&config)?;
         if json {

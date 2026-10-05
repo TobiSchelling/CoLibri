@@ -17,6 +17,8 @@ use crate::config::{
 use crate::error::ColibriError;
 
 const FORMAT_NAME: &str = "colibri-metadata-db";
+/// How long `sqlite3` waits for a lock held by another colibri process.
+const SQLITE_BUSY_TIMEOUT_MS: u32 = 5000;
 
 pub fn require_sqlite3() -> Result<(), ColibriError> {
     let output = match Command::new("sqlite3").arg("-version").output() {
@@ -722,9 +724,19 @@ CREATE TABLE IF NOT EXISTS migration_log (
         ))
     }
 
+    /// `sqlite3` invocation that waits for locks held by concurrent colibri
+    /// processes (e.g. several `colibri serve` instances) instead of failing
+    /// immediately with "database is locked".
+    fn sqlite3_command(&self) -> Command {
+        let mut cmd = Command::new("sqlite3");
+        cmd.arg("-cmd")
+            .arg(format!(".timeout {SQLITE_BUSY_TIMEOUT_MS}"));
+        cmd
+    }
+
     fn exec_script(&self, sql: &str) -> Result<(), ColibriError> {
         require_sqlite3()?;
-        let output = Command::new("sqlite3").arg(&self.path).arg(sql).output()?;
+        let output = self.sqlite3_command().arg(&self.path).arg(sql).output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             return Err(ColibriError::Config(format!(
@@ -742,7 +754,8 @@ CREATE TABLE IF NOT EXISTS migration_log (
 
     fn query_json(&self, sql: &str) -> Result<Vec<Value>, ColibriError> {
         require_sqlite3()?;
-        let output = Command::new("sqlite3")
+        let output = self
+            .sqlite3_command()
             .arg("-json")
             .arg(&self.path)
             .arg(sql)

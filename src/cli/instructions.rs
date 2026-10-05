@@ -2,12 +2,12 @@
 
 use std::path::PathBuf;
 
-use crate::config::{load_config, AppConfig};
+use crate::config::{load_config_no_bootstrap, AppConfig};
 use crate::metadata_store::MetadataStore;
 
 /// Run the instructions command.
 pub async fn run(output: Option<PathBuf>) -> anyhow::Result<()> {
-    let config = load_config()?;
+    let config = load_config_no_bootstrap()?;
     let instructions = generate_instructions(&config)?;
 
     let output_path = output.unwrap_or_else(|| {

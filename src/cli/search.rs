@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 
-use crate::config::load_config;
+use crate::config::load_config_no_bootstrap;
 use crate::query::{SearchEngine, SearchFilter, SearchMode};
 
 #[allow(clippy::too_many_arguments)]
@@ -21,7 +21,7 @@ pub async fn run(
     since: Option<String>,
     group_by_doc: bool,
 ) -> anyhow::Result<()> {
-    let config = load_config()?;
+    let config = load_config_no_bootstrap()?;
     let engine = SearchEngine::new(&config).await?;
 
     let limit = limit.min(config.top_k);

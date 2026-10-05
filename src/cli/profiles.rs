@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::config::{load_config, EmbeddingLocality, SCHEMA_VERSION};
+use crate::config::{load_config_no_bootstrap, EmbeddingLocality, SCHEMA_VERSION};
 
 #[derive(Debug, Clone, Serialize)]
 struct ProfileStatusRow {
@@ -31,7 +31,7 @@ struct ProfilesReport {
 }
 
 pub async fn run(json: bool) -> anyhow::Result<()> {
-    let config = load_config()?;
+    let config = load_config_no_bootstrap()?;
     let checks = crate::serve_ready::profile_checks(&config)?;
     let check_map: HashMap<String, crate::serve_ready::ServeReadyProfileCheck> = checks
         .into_iter()

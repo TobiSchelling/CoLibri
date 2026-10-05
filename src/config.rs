@@ -566,29 +566,22 @@ fn ensure_metadata_db(
         std::fs::create_dir_all(parent)?;
     }
 
+    // Never move or recreate an existing database on failure: a transient
+    // error (e.g. a lock held by a concurrent `colibri serve`) must not wipe
+    // the document metadata.
     let mut store = MetadataStore::open(metadata_db_path)?;
-    match store.bootstrap(
-        embedding_profiles,
-        routing_policy,
-        default_embedding_profile,
-    ) {
-        Ok(()) => Ok(()),
-        Err(first_err) => {
-            if metadata_db_path.exists() {
-                let backup = metadata_db_path.with_extension("legacy-json.bak");
-                let _ = std::fs::rename(metadata_db_path, backup);
-                let mut store = MetadataStore::open(metadata_db_path)?;
-                store.bootstrap(
-                    embedding_profiles,
-                    routing_policy,
-                    default_embedding_profile,
-                )?;
-                Ok(())
-            } else {
-                Err(first_err)
-            }
-        }
-    }
+    store
+        .bootstrap(
+            embedding_profiles,
+            routing_policy,
+            default_embedding_profile,
+        )
+        .map_err(|e| {
+            ColibriError::Config(format!(
+                "Failed to initialize metadata DB {} (left unchanged): {e}",
+                metadata_db_path.display()
+            ))
+        })
 }
 
 /// Resolved application configuration.
@@ -903,7 +896,8 @@ pub fn load_config_no_bootstrap() -> Result<AppConfig, ColibriError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        enforce_local_only_routing, load_config, AppConfig, EmbeddingLocality, EmbeddingProfile,
+        enforce_local_only_routing, load_config, load_config_no_bootstrap, AppConfig,
+        EmbeddingLocality, EmbeddingProfile,
     };
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
@@ -1079,6 +1073,59 @@ mod tests {
         set_env_opt("COLIBRI_CONFIG", Some(cfg.to_string_lossy().as_ref()));
         let p2 = AppConfig::config_path();
         assert_eq!(p2, cfg);
+
+        snap.restore();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Point config + COLIBRI_HOME at a fresh temp dir; returns (root, colibri_home).
+    fn isolated_colibri_home(prefix: &str) -> (PathBuf, PathBuf) {
+        let root = unique_tmp_dir(prefix);
+        let cfg = root.join("config.yaml");
+        let colibri_home = root.join("colibri");
+        std::fs::create_dir_all(&root).expect("create tmp root");
+        std::fs::write(&cfg, "{}\n").expect("write config");
+        set_env_opt("COLIBRI_CONFIG_PATH", Some(cfg.to_string_lossy().as_ref()));
+        set_env_opt("COLIBRI_CONFIG", None);
+        set_env_opt(
+            "COLIBRI_HOME",
+            Some(colibri_home.to_string_lossy().as_ref()),
+        );
+        (root, colibri_home)
+    }
+
+    #[test]
+    fn bootstrap_failure_leaves_existing_metadata_db_untouched() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let snap = EnvSnapshot::capture();
+        let (root, colibri_home) = isolated_colibri_home("colibri-no-wipe");
+
+        std::fs::create_dir_all(&colibri_home).expect("create colibri home");
+        let db_path = colibri_home.join("metadata.db");
+        let original = b"definitely not a sqlite database\n".to_vec();
+        std::fs::write(&db_path, &original).expect("write corrupt db");
+
+        let err = load_config().expect_err("bootstrap must fail on a corrupt DB");
+        assert!(err.to_string().contains("left unchanged"), "{err}");
+        assert_eq!(
+            std::fs::read(&db_path).expect("db still in place"),
+            original
+        );
+        assert!(!colibri_home.join("metadata.legacy-json.bak").exists());
+
+        snap.restore();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_config_no_bootstrap_does_not_create_metadata_db() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let snap = EnvSnapshot::capture();
+        let (root, colibri_home) = isolated_colibri_home("colibri-read-only");
+
+        let cfg = load_config_no_bootstrap().expect("load config");
+        assert_eq!(cfg.metadata_db_path, colibri_home.join("metadata.db"));
+        assert!(!cfg.metadata_db_path.exists());
 
         snap.restore();
         let _ = std::fs::remove_dir_all(root);
