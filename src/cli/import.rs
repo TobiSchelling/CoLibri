@@ -10,8 +10,9 @@ use tokio::process::Command;
 
 use crate::canonical_store::ingest_envelopes;
 use crate::config::load_config;
+use crate::embedding::OllamaEmbedder;
 use crate::envelope::{DocumentEnvelope, EnvelopeDocument, EnvelopeMetadata, EnvelopeSource};
-use crate::indexer::index_library;
+use crate::indexer::{index_library, IndexOptions};
 
 const IMPORT_PLUGIN_ID: &str = "cli_import";
 
@@ -330,7 +331,6 @@ pub async fn run(
         },
         metadata: EnvelopeMetadata {
             doc_type: "book".into(),
-            classification: "internal".into(),
             tags: None,
             language: None,
             acl_tags: None,
@@ -338,7 +338,8 @@ pub async fn run(
         },
     };
 
-    let report = ingest_envelopes(&config, &[envelope], false)?;
+    let (_lock, store) = config.open_for_write()?;
+    let report = ingest_envelopes(&config, Some(&store), "books", &[envelope], false)?;
     eprintln!(
         "✓ Ingested into canonical store: written={} unchanged={} tombstoned={}",
         report.written, report.unchanged, report.tombstoned
@@ -347,7 +348,14 @@ pub async fn run(
     // Re-index if requested
     if reindex {
         eprintln!("Indexing canonical store...");
-        let result = index_library(&config, false, |_| {}).await?;
+        let result = index_library(
+            &config,
+            &store,
+            &OllamaEmbedder::from_config(&config),
+            &IndexOptions::default(),
+            |_| {},
+        )
+        .await?;
 
         if result.errors > 0 {
             eprintln!("Warning: {} indexing errors occurred", result.errors);

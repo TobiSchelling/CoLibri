@@ -29,7 +29,6 @@ pub struct FilesystemConnector {
     pub include_extensions: Vec<String>,
     pub exclude_globs: Vec<String>,
     pub doc_type: String,
-    pub classification: String,
     /// Whether to enrich PlantUML code blocks with text summaries (Task 5).
     pub plantuml_summaries: bool,
 }
@@ -121,7 +120,6 @@ impl Connector for FilesystemConnector {
                 },
                 metadata: EnvelopeMetadata {
                     doc_type: self.doc_type.clone(),
-                    classification: self.classification.clone(),
                     tags: parsed_tags,
                     language: None,
                     acl_tags: None,
@@ -759,7 +757,6 @@ mod tests {
             include_extensions: vec![".md".into()],
             exclude_globs: vec![],
             doc_type: "note".into(),
-            classification: "internal".into(),
             plantuml_summaries: false,
         };
         let envelopes = connector.sync().await.unwrap();
@@ -804,7 +801,6 @@ mod tests {
             include_extensions: vec![".md".into()],
             exclude_globs: vec![],
             doc_type: "note".into(),
-            classification: "internal".into(),
             plantuml_summaries: false,
         };
         let envelopes = connector.sync().await.unwrap();
@@ -826,7 +822,6 @@ mod tests {
             include_extensions: vec![".md".into()],
             exclude_globs: vec!["sub/**".into()],
             doc_type: "note".into(),
-            classification: "internal".into(),
             plantuml_summaries: false,
         };
         let envelopes = connector.sync().await.unwrap();
@@ -843,7 +838,6 @@ mod tests {
             include_extensions: vec![".md".into()],
             exclude_globs: vec![],
             doc_type: "note".into(),
-            classification: "internal".into(),
             plantuml_summaries: false,
         };
         let envelopes = connector.sync().await.unwrap();
@@ -862,7 +856,6 @@ mod tests {
             include_extensions: vec![".md".into()],
             exclude_globs: vec![],
             doc_type: "note".into(),
-            classification: "internal".into(),
             plantuml_summaries: false,
         };
         let envelopes = connector.sync().await.unwrap();
@@ -904,7 +897,6 @@ mod tests {
             include_extensions: vec![".md".into()],
             exclude_globs: vec!["sub/**".into()],
             doc_type: "note".into(),
-            classification: "internal".into(),
             plantuml_summaries: false,
         };
         let envelopes = connector.sync().await.unwrap();
@@ -928,7 +920,6 @@ mod tests {
             include_extensions: vec![".md".into()],
             exclude_globs: vec![],
             doc_type: "note".into(),
-            classification: "internal".into(),
             plantuml_summaries: false,
         };
         let envelopes = connector.sync().await.unwrap();
@@ -949,7 +940,6 @@ mod tests {
             include_extensions: vec![".csv".into()],
             exclude_globs: vec![],
             doc_type: "note".into(),
-            classification: "internal".into(),
             plantuml_summaries: false,
         };
         let envelopes = connector.sync().await.unwrap();
@@ -1122,7 +1112,6 @@ More text.
             include_extensions: vec![".md".into()],
             exclude_globs: vec![],
             doc_type: "note".into(),
-            classification: "internal".into(),
             plantuml_summaries: true,
         };
         let envelopes = connector.sync().await.unwrap();
@@ -1147,7 +1136,6 @@ More text.
             include_extensions: vec![".md".into()],
             exclude_globs: vec![],
             doc_type: "note".into(),
-            classification: "internal".into(),
             plantuml_summaries: false,
         };
         let envelopes = connector.sync().await.unwrap();

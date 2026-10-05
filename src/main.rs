@@ -15,6 +15,7 @@ mod envelope;
 mod error;
 mod index_meta;
 mod indexer;
+mod lock;
 mod mcp;
 mod metadata_store;
 mod query;
@@ -51,7 +52,6 @@ async fn main() -> anyhow::Result<()> {
             config_path,
             data_dir,
             init_path,
-            classification,
             non_interactive,
             json,
         } => {
@@ -59,15 +59,13 @@ async fn main() -> anyhow::Result<()> {
                 config_path,
                 data_dir,
                 init_path,
-                classification,
                 non_interactive,
                 json,
             })
             .await
         }
         cli::Commands::Doctor { strict, json } => cli::doctor::run(strict, json).await,
-        cli::Commands::Migrate { dry_run, json } => cli::migrate::run(dry_run, json).await,
-        cli::Commands::Profiles { json } => cli::profiles::run(json).await,
+        cli::Commands::Reset { yes } => cli::reset::run(yes).await,
         cli::Commands::Connectors { command } => match command {
             cli::ConnectorCommands::List { json } => cli::connectors::list(json).await,
         },
@@ -99,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
             limit,
             json,
             doc_type,
-            classification,
+            collection,
             mode,
             path_includes,
             path_excludes,
@@ -112,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
                 limit,
                 json,
                 doc_type,
-                classification,
+                collection,
                 mode,
                 path_includes,
                 path_excludes,

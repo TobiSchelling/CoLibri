@@ -1,54 +1,47 @@
-//! Index the canonical corpus for semantic search.
+//! Index the canonical corpus for semantic and keyword search.
 //!
-//! CoLibri ingests content into a managed canonical markdown store (`COLIBRI_HOME/canonical`)
-//! and indexes *only* that store into LanceDB. Direct indexing of arbitrary user folders is not
-//! supported.
+//! The metadata DB is the source of truth for what should be searchable;
+//! the single LanceDB table `chunks` (doc_id, text, vector) follows it.
+//! Each document records the content hash its chunks were built from
+//! (`indexed_hash`), so an interrupted run resumes where it stopped.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 
 use arrow_array::{
-    ArrayRef, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator, StringArray,
+    Array, ArrayRef, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator,
+    StringArray,
 };
 use arrow_schema::{DataType, Field, Schema};
-use lancedb::database::CreateTableMode;
+use futures::TryStreamExt;
 use lancedb::index::Index;
-use tracing::info;
+use lancedb::query::{ExecutableQuery, QueryBase, Select};
+use lancedb::table::{CompactionOptions, Duration, OptimizeAction};
 
 use crate::config::{AppConfig, SCHEMA_VERSION};
-use crate::embedding::embed_texts_with_progress;
+use crate::embedding::Embedder;
 use crate::error::ColibriError;
 use crate::index_meta::{read_index_meta, write_index_meta};
-use crate::metadata_store::{DocumentIndexStateRow, DocumentRow, MetadataStore};
+use crate::metadata_store::{DocumentRecord, MetadataStore};
 
-// ---------------------------------------------------------------------------
-// Progress events
-// ---------------------------------------------------------------------------
-
-/// Events emitted during indexing for progress reporting.
+/// Progress events emitted during indexing.
 #[derive(Debug, Clone)]
 pub enum IndexEvent {
-    /// A profile is about to be indexed.
-    SourceStart { name: String },
-    /// File reading progress within the current profile.
-    Reading { done: usize, total: usize },
-    /// Embedding progress (chunks processed so far).
-    Embedding {
+    /// Work planned for this run.
+    Start {
+        to_index: usize,
+        unchanged: usize,
+        removed: usize,
+    },
+    /// Documents embedded and committed so far.
+    Progress {
+        docs_done: usize,
         chunks_done: usize,
-        total_chunks: usize,
     },
-    /// Writing embedded chunks to LanceDB.
-    Writing,
-    /// A profile completed successfully.
-    SourceComplete { name: String, result: IndexResult },
-    /// A profile had no changes (all files skipped).
-    SourceUnchanged {
-        name: String,
-        skipped: usize,
-        deleted: usize,
-    },
-    /// A non-fatal warning (e.g. unreadable file).
+    /// Rebuilding the keyword index and compacting the table.
+    Finalizing,
+    /// A non-fatal problem (e.g. unreadable canonical file).
     Warning { message: String },
 }
 
@@ -58,24 +51,40 @@ const MAX_CHUNK_CHARS: usize = 16000;
 /// LanceDB table name.
 const TABLE_NAME: &str = "chunks";
 
-/// Summary of an indexing operation.
+/// Doc ids per LanceDB delete predicate.
+const DELETE_BATCH: usize = 200;
+
+/// Old table versions younger than this are kept for concurrent readers.
+const PRUNE_GRACE_MINUTES: i64 = 10;
+
+/// Options for an indexing run.
+#[derive(Debug, Clone)]
+pub struct IndexOptions {
+    /// Drop the table and re-embed every searchable document.
+    pub force: bool,
+    /// Embed and commit once this many chunks are pending.
+    pub batch_chunks: usize,
+}
+
+impl Default for IndexOptions {
+    fn default() -> Self {
+        Self {
+            force: false,
+            batch_chunks: 256,
+        }
+    }
+}
+
+/// Summary of an indexing run.
 #[derive(Debug, Default, Clone)]
 pub struct IndexResult {
     pub total_chunks: usize,
     pub files_indexed: usize,
     pub files_skipped: usize,
     pub files_deleted: usize,
+    /// Doc ids found in the index without a searchable document.
+    pub orphans_removed: usize,
     pub errors: usize,
-}
-
-impl IndexResult {
-    fn accumulate(&mut self, other: &IndexResult) {
-        self.total_chunks += other.total_chunks;
-        self.files_indexed += other.files_indexed;
-        self.files_skipped += other.files_skipped;
-        self.files_deleted += other.files_deleted;
-        self.errors += other.errors;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -224,7 +233,7 @@ fn rows_to_batch(
 }
 
 // ---------------------------------------------------------------------------
-// Canonical document helpers
+// Index orchestration
 // ---------------------------------------------------------------------------
 
 fn read_lossy(path: &Path) -> Result<String, ColibriError> {
@@ -232,492 +241,663 @@ fn read_lossy(path: &Path) -> Result<String, ColibriError> {
     Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
-fn abs_markdown_path(config: &AppConfig, markdown_path: &str) -> PathBuf {
-    let rel = PathBuf::from(markdown_path);
-    config.canonical_dir.join(rel)
+fn chunk_document(text: &str, config: &AppConfig) -> Vec<String> {
+    split_text(text, config.chunk_size, config.chunk_overlap)
+        .into_iter()
+        .map(|mut chunk| {
+            if chunk.len() > MAX_CHUNK_CHARS {
+                let safe = floor_char_boundary(&chunk, MAX_CHUNK_CHARS);
+                chunk.truncate(safe);
+                chunk.push_str("...");
+            }
+            chunk
+        })
+        .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Per-profile indexing
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-struct IndexDoc<'a> {
-    row: &'a DocumentRow,
-    abs_path: PathBuf,
+fn id_list_predicate(ids: &[String]) -> String {
+    let quoted: Vec<String> = ids
+        .iter()
+        .map(|id| format!("'{}'", id.replace('\'', "''")))
+        .collect();
+    format!("doc_id IN ({})", quoted.join(", "))
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn index_profile(
-    profile_id: &str,
-    embedding_profile: &crate::config::EmbeddingProfile,
-    docs: &[IndexDoc<'_>],
-    config: &AppConfig,
-    metadata_store: &MetadataStore,
-    generation_id: &str,
-    profile_force: bool,
-    profile_full_rebuild: bool,
-    docs_to_delete: &[(String, String)],
-    index_state: &HashMap<String, DocumentIndexStateRow>,
-    on_progress: &(impl Fn(IndexEvent) + Send + Sync),
-) -> Result<IndexResult, ColibriError> {
-    let name = format!("profile:{profile_id}");
-    on_progress(IndexEvent::SourceStart { name: name.clone() });
+async fn delete_doc_chunks(table: &lancedb::Table, ids: &[String]) -> Result<(), ColibriError> {
+    for batch in ids.chunks(DELETE_BATCH) {
+        table.delete(&id_list_predicate(batch)).await?;
+    }
+    Ok(())
+}
 
-    let db = lancedb::connect(
-        config
-            .lancedb_dir_for_profile(profile_id)
-            .to_string_lossy()
-            .as_ref(),
-    )
-    .execute()
-    .await?;
-
-    let table: Option<lancedb::Table> = if profile_full_rebuild {
-        None
-    } else {
-        db.open_table(TABLE_NAME).execute().await.ok()
-    };
-
-    // If we are not rebuilding the table, apply deletions first.
-    let mut deleted = 0usize;
-    if !profile_full_rebuild && !docs_to_delete.is_empty() {
-        if let Some(tbl) = table.as_ref() {
-            for (doc_id, markdown_path) in docs_to_delete {
-                let escaped = doc_id.replace('\'', "''");
-                if let Err(e) = tbl.delete(&format!("doc_id = '{escaped}'")).await {
-                    on_progress(IndexEvent::Warning {
-                        message: format!("Delete failed for doc {doc_id} ({markdown_path}): {e}"),
-                    });
-                } else {
-                    deleted += 1;
-                }
+/// Distinct doc ids present in the table.
+async fn indexed_doc_ids(table: &lancedb::Table) -> Result<HashSet<String>, ColibriError> {
+    let batches: Vec<RecordBatch> = table
+        .query()
+        .select(Select::Columns(vec!["doc_id".into()]))
+        .execute()
+        .await?
+        .try_collect()
+        .await?;
+    let mut ids = HashSet::new();
+    for batch in &batches {
+        let Some(col) = batch
+            .column_by_name("doc_id")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+        else {
+            continue;
+        };
+        for i in 0..col.len() {
+            if col.is_valid(i) {
+                ids.insert(col.value(i).to_string());
             }
         }
     }
+    Ok(ids)
+}
 
-    // We always update index state for deletions, even if the table is being rebuilt.
-    for (doc_id, markdown_path) in docs_to_delete {
-        metadata_store.upsert_document_index_state(
-            doc_id,
-            generation_id,
-            profile_id,
-            "deleted",
-            None,
-            None,
-            Some(markdown_path.as_str()),
-        )?;
-    }
+/// Documents whose chunks are waiting to be embedded and committed.
+#[derive(Default)]
+struct PendingBatch {
+    rows: Vec<ChunkRow>,
+    /// (doc_id, content_hash, chunk_count)
+    docs: Vec<(String, String, usize)>,
+}
 
-    // Decide which documents to index.
-    let mut to_index: Vec<&IndexDoc<'_>> = Vec::new();
-    let mut skipped = 0usize;
-    for doc in docs {
-        let row = doc.row;
-        if row.deleted {
-            continue;
+struct Writer<'a, E: Embedder> {
+    db: lancedb::Connection,
+    table: Option<lancedb::Table>,
+    store: &'a MetadataStore,
+    embedder: &'a E,
+    wrote: bool,
+}
+
+impl<E: Embedder> Writer<'_, E> {
+    /// Embed the pending chunks, replace the documents' chunks, mark them indexed.
+    async fn flush(&mut self, batch: &mut PendingBatch) -> Result<usize, ColibriError> {
+        if batch.docs.is_empty() {
+            return Ok(0);
         }
-        let state = index_state.get(&row.doc_id);
-        let already_indexed = state
-            .map(|s| s.status.as_str() == "indexed")
-            .unwrap_or(false);
-        let indexed_hash = state.and_then(|s| s.indexed_content_hash.as_deref());
-        let indexed_path = state.and_then(|s| s.indexed_markdown_path.as_deref());
-
-        let changed = profile_force
-            || !already_indexed
-            || indexed_hash != Some(row.content_hash.as_str())
-            || indexed_path != Some(row.markdown_path.as_str());
-
-        if changed {
-            to_index.push(doc);
+        let texts: Vec<String> = batch.rows.iter().map(|r| r.text.clone()).collect();
+        let vectors = if texts.is_empty() {
+            Vec::new()
         } else {
-            skipped += 1;
+            self.embedder.embed(&texts).await?
+        };
+        if vectors.len() != texts.len() {
+            return Err(ColibriError::Embedding(format!(
+                "Embedding provider returned {} vectors for {} chunks",
+                vectors.len(),
+                texts.len()
+            )));
+        }
+
+        let doc_ids: Vec<String> = batch.docs.iter().map(|(id, _, _)| id.clone()).collect();
+        if let Some(table) = &self.table {
+            delete_doc_chunks(table, &doc_ids).await?;
+            self.wrote = true;
+        }
+        if !batch.rows.is_empty() {
+            let dim = vectors[0].len();
+            let schema = chunks_schema(dim);
+            let record_batch = rows_to_batch(&batch.rows, &vectors, dim)?;
+            let reader = RecordBatchIterator::new(vec![Ok(record_batch)], schema);
+            match &self.table {
+                Some(table) => {
+                    table.add(Box::new(reader)).execute().await?;
+                }
+                None => {
+                    let table = self
+                        .db
+                        .create_table(TABLE_NAME, Box::new(reader))
+                        .execute()
+                        .await?;
+                    self.table = Some(table);
+                }
+            }
+            self.wrote = true;
+        }
+
+        let tx = self.store.begin()?;
+        for (doc_id, hash, chunk_count) in &batch.docs {
+            self.store.mark_indexed(doc_id, hash, *chunk_count)?;
+        }
+        tx.commit()?;
+
+        let chunks = batch.rows.len();
+        *batch = PendingBatch::default();
+        Ok(chunks)
+    }
+}
+
+/// Open the existing table if it can be extended, otherwise start fresh.
+///
+/// Starting fresh clears all recorded index state *before* dropping the
+/// table, and the index metadata is written before anything is embedded, so
+/// an interrupted run is resumed by the next one instead of rebuilt again.
+async fn prepare_table(
+    config: &AppConfig,
+    store: &MetadataStore,
+    db: &lancedb::Connection,
+    force: bool,
+    on_progress: &impl Fn(IndexEvent),
+) -> Result<(Option<lancedb::Table>, bool), ColibriError> {
+    let meta = read_index_meta(&config.index_dir).unwrap_or_else(|e| {
+        on_progress(IndexEvent::Warning {
+            message: format!("Ignoring unreadable index metadata: {e}"),
+        });
+        serde_json::Map::new()
+    });
+    let built_compatibly = meta.get("schema_version").and_then(|v| v.as_u64())
+        == Some(SCHEMA_VERSION as u64)
+        && meta.get("embedding_model").and_then(|v| v.as_str())
+            == Some(config.embedding_model.as_str());
+    let table = match db.open_table(TABLE_NAME).execute().await {
+        Ok(t) => Some(t),
+        Err(lancedb::Error::TableNotFound { .. }) => None,
+        Err(e) => return Err(e.into()),
+    };
+
+    if table.is_some() && built_compatibly && !force {
+        return Ok((table, false));
+    }
+    store.clear_all_index_state()?;
+    if table.is_some() {
+        db.drop_table(TABLE_NAME, &[]).await?;
+    }
+    write_index_meta(
+        &config.index_dir,
+        &config.embedding_model,
+        &serde_json::Map::new(),
+    )?;
+    Ok((None, true))
+}
+
+async fn has_keyword_index(table: &lancedb::Table) -> bool {
+    table
+        .list_indices()
+        .await
+        .map(|indices| {
+            indices.iter().any(|i| {
+                matches!(i.index_type, lancedb::index::IndexType::FTS)
+                    && i.columns.iter().any(|c| c == "text")
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Bring the index in line with the metadata DB: drop chunks of documents
+/// that are no longer searchable or unknown, and embed documents whose
+/// content changed since they were indexed.
+pub async fn index_library<E: Embedder>(
+    config: &AppConfig,
+    store: &MetadataStore,
+    embedder: &E,
+    opts: &IndexOptions,
+    on_progress: impl Fn(IndexEvent),
+) -> Result<IndexResult, ColibriError> {
+    std::fs::create_dir_all(&config.index_dir)?;
+    let db = lancedb::connect(config.index_dir.to_string_lossy().as_ref())
+        .execute()
+        .await?;
+
+    let (table, rebuild) = prepare_table(config, store, &db, opts.force, &on_progress).await?;
+
+    let docs = store.list_documents()?;
+    let mut result = IndexResult::default();
+
+    // 1. Chunks of documents that are no longer searchable.
+    let stale: Vec<String> = docs
+        .iter()
+        .filter(|d| !d.is_searchable() && d.indexed_hash.is_some())
+        .map(|d| d.doc_id.clone())
+        .collect();
+    if !stale.is_empty() {
+        if let Some(t) = &table {
+            delete_doc_chunks(t, &stale).await?;
+        }
+        let tx = store.begin()?;
+        for id in &stale {
+            store.clear_index_state(id)?;
+        }
+        tx.commit()?;
+    }
+    result.files_deleted = stale.len();
+
+    // 2. Searchable documents whose chunks are missing or outdated.
+    let to_index: Vec<&DocumentRecord> = docs
+        .iter()
+        .filter(|d| d.is_searchable() && !d.is_index_current())
+        .collect();
+    result.files_skipped = docs
+        .iter()
+        .filter(|d| d.is_searchable())
+        .count()
+        .saturating_sub(to_index.len());
+    on_progress(IndexEvent::Start {
+        to_index: to_index.len(),
+        unchanged: result.files_skipped,
+        removed: result.files_deleted,
+    });
+
+    let mut writer = Writer {
+        db: db.clone(),
+        table,
+        store,
+        embedder,
+        wrote: !stale.is_empty(),
+    };
+    let embed_outcome = embed_documents(
+        config,
+        &to_index,
+        &mut writer,
+        opts,
+        &mut result,
+        &on_progress,
+    )
+    .await;
+
+    // 3. Orphans: chunks whose doc_id has no searchable, indexed document.
+    if embed_outcome.is_ok() {
+        if let Some(t) = &writer.table {
+            let live: HashSet<String> = store
+                .list_documents()?
+                .into_iter()
+                .filter(|d| d.is_searchable() && d.indexed_hash.is_some())
+                .map(|d| d.doc_id)
+                .collect();
+            let orphans: Vec<String> = indexed_doc_ids(t)
+                .await?
+                .into_iter()
+                .filter(|id| !live.contains(id))
+                .collect();
+            if !orphans.is_empty() {
+                delete_doc_chunks(t, &orphans).await?;
+                writer.wrote = true;
+            }
+            result.orphans_removed = orphans.len();
         }
     }
 
-    if to_index.is_empty() {
-        on_progress(IndexEvent::SourceUnchanged {
-            name,
-            skipped,
-            deleted,
-        });
-        return Ok(IndexResult {
-            total_chunks: 0,
-            files_indexed: 0,
-            files_skipped: skipped,
-            files_deleted: deleted,
-            errors: 0,
-        });
+    // 4. Keyword index and compaction, also after a failed run so that what
+    //    was committed stays searchable.
+    if let Some(t) = &writer.table {
+        if writer.wrote || rebuild || !has_keyword_index(t).await {
+            on_progress(IndexEvent::Finalizing);
+            if let Err(e) = t
+                .create_index(&["text"], Index::FTS(Default::default()))
+                .replace(true)
+                .execute()
+                .await
+            {
+                on_progress(IndexEvent::Warning {
+                    message: format!("Keyword index creation failed: {e}"),
+                });
+            }
+            compact(t, &on_progress).await;
+        }
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "chunk_count".into(),
+            serde_json::Value::from(t.count_rows(None).await?),
+        );
+        write_index_meta(&config.index_dir, &config.embedding_model, &extra)?;
     }
 
-    // Read + chunk
-    let total_files = to_index.len();
-    let mut rows = Vec::new();
-    let mut file_chunk_counts: HashMap<String, usize> = HashMap::new();
-    let mut errors = 0usize;
+    embed_outcome?;
+    Ok(result)
+}
 
-    for (i, doc) in to_index.iter().enumerate() {
-        on_progress(IndexEvent::Reading {
-            done: i + 1,
-            total: total_files,
-        });
-
-        let row = doc.row;
-        let content = match read_lossy(&doc.abs_path) {
+async fn embed_documents<E: Embedder>(
+    config: &AppConfig,
+    to_index: &[&DocumentRecord],
+    writer: &mut Writer<'_, E>,
+    opts: &IndexOptions,
+    result: &mut IndexResult,
+    on_progress: &impl Fn(IndexEvent),
+) -> Result<(), ColibriError> {
+    let mut batch = PendingBatch::default();
+    let mut docs_done = 0usize;
+    for doc in to_index {
+        let path = config.canonical_dir.join(&doc.markdown_path);
+        let content = match read_lossy(&path) {
             Ok(c) => c,
             Err(e) => {
-                errors += 1;
+                result.errors += 1;
                 on_progress(IndexEvent::Warning {
-                    message: format!("Failed to read {}: {e}", row.markdown_path),
+                    message: format!("Failed to read {} ({}): {e}", doc.doc_id, path.display()),
                 });
                 continue;
             }
         };
+        let chunks = chunk_document(&content, config);
+        batch
+            .docs
+            .push((doc.doc_id.clone(), doc.content_hash.clone(), chunks.len()));
+        batch.rows.extend(chunks.into_iter().map(|text| ChunkRow {
+            doc_id: doc.doc_id.clone(),
+            text,
+        }));
 
-        let chunks = split_text(&content, config.chunk_size, config.chunk_overlap);
-        file_chunk_counts.insert(row.markdown_path.clone(), chunks.len());
-
-        for mut chunk_text in chunks {
-            if chunk_text.len() > MAX_CHUNK_CHARS {
-                let safe = floor_char_boundary(&chunk_text, MAX_CHUNK_CHARS);
-                chunk_text.truncate(safe);
-                chunk_text.push_str("...");
-            }
-            rows.push(ChunkRow {
-                doc_id: row.doc_id.clone(),
-                text: chunk_text,
+        if batch.rows.len() >= opts.batch_chunks.max(1) {
+            let n = batch.docs.len();
+            result.total_chunks += writer.flush(&mut batch).await?;
+            result.files_indexed += n;
+            docs_done += n;
+            on_progress(IndexEvent::Progress {
+                docs_done,
+                chunks_done: result.total_chunks,
             });
         }
     }
-
-    if rows.is_empty() {
-        on_progress(IndexEvent::SourceComplete {
-            name,
-            result: IndexResult {
-                total_chunks: 0,
-                files_indexed: 0,
-                files_skipped: skipped,
-                files_deleted: deleted,
-                errors,
-            },
-        });
-        return Ok(IndexResult {
-            total_chunks: 0,
-            files_indexed: 0,
-            files_skipped: skipped,
-            files_deleted: deleted,
-            errors,
+    let n = batch.docs.len();
+    result.total_chunks += writer.flush(&mut batch).await?;
+    result.files_indexed += n;
+    if n > 0 {
+        on_progress(IndexEvent::Progress {
+            docs_done: docs_done + n,
+            chunks_done: result.total_chunks,
         });
     }
-
-    // Embed
-    let total_chunks = rows.len();
-    on_progress(IndexEvent::Embedding {
-        chunks_done: 0,
-        total_chunks,
-    });
-
-    let texts: Vec<String> = rows.iter().map(|r| r.text.clone()).collect();
-    let vectors = embed_texts_with_progress(
-        &texts,
-        &embedding_profile.model,
-        &embedding_profile.endpoint,
-        |done, _total| {
-            on_progress(IndexEvent::Embedding {
-                chunks_done: done,
-                total_chunks,
-            });
-        },
-    )
-    .await?;
-
-    if vectors.is_empty() {
-        return Err(ColibriError::Embedding(
-            "Embedding provider returned no embeddings".into(),
-        ));
-    }
-
-    let vector_dim = vectors[0].len();
-    let batch = rows_to_batch(&rows, &vectors, vector_dim)?;
-    let schema = chunks_schema(vector_dim);
-
-    // Write
-    on_progress(IndexEvent::Writing);
-
-    let profile_index_dir = config.lancedb_dir_for_profile(profile_id);
-    std::fs::create_dir_all(&profile_index_dir)?;
-
-    let written_table = if profile_full_rebuild {
-        let batches = RecordBatchIterator::new(vec![Ok(batch)], schema);
-        db.create_table(TABLE_NAME, Box::new(batches))
-            .mode(CreateTableMode::Overwrite)
-            .execute()
-            .await?
-    } else if let Some(tbl) = table.as_ref() {
-        let indexed_docs: HashSet<&str> = rows.iter().map(|r| r.doc_id.as_str()).collect();
-        for doc_id in &indexed_docs {
-            let escaped = doc_id.replace('\'', "''");
-            tbl.delete(&format!("doc_id = '{escaped}'")).await?;
-        }
-        let batches = RecordBatchIterator::new(vec![Ok(batch)], schema);
-        tbl.add(Box::new(batches)).execute().await?;
-        tbl.clone()
-    } else {
-        let batches = RecordBatchIterator::new(vec![Ok(batch)], schema);
-        db.create_table(TABLE_NAME, Box::new(batches))
-            .execute()
-            .await?
-    };
-
-    // Create FTS index on the text column for keyword/hybrid search.
-    if let Err(e) = written_table
-        .create_index(&["text"], Index::FTS(Default::default()))
-        .replace(true)
-        .execute()
-        .await
-    {
-        on_progress(IndexEvent::Warning {
-            message: format!(
-                "FTS index creation failed for profile '{profile_id}' (keyword/hybrid search may not work): {e}"
-            ),
-        });
-    }
-
-    // Update manifest + index state.
-    let mut files_indexed = 0usize;
-    for doc in &to_index {
-        let row = doc.row;
-        if row.deleted {
-            continue;
-        }
-        let Some(chunk_count) = file_chunk_counts.get(&row.markdown_path).copied() else {
-            continue;
-        };
-        metadata_store.upsert_document_index_state(
-            &row.doc_id,
-            generation_id,
-            profile_id,
-            "indexed",
-            Some(chunk_count as u64),
-            Some(row.content_hash.as_str()),
-            Some(row.markdown_path.as_str()),
-        )?;
-        files_indexed += 1;
-    }
-
-    let result = IndexResult {
-        total_chunks,
-        files_indexed,
-        files_skipped: skipped,
-        files_deleted: deleted,
-        errors,
-    };
-
-    on_progress(IndexEvent::SourceComplete {
-        name,
-        result: result.clone(),
-    });
-
-    Ok(result)
+    Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Public entry point
-// ---------------------------------------------------------------------------
-
-/// Index the managed canonical store into per-profile LanceDB indexes.
-pub async fn index_library(
-    config: &AppConfig,
-    force: bool,
-    on_progress: impl Fn(IndexEvent) + Send + Sync,
-) -> Result<IndexResult, ColibriError> {
-    config.ensure_storage_layout()?;
-    let metadata_store = MetadataStore::open(&config.metadata_db_path)?;
-    let docs = metadata_store.list_documents()?;
-
-    // Build desired profile for each live doc based on classification routing.
-    let mut desired_profile: HashMap<String, String> = HashMap::new();
-    let mut doc_by_id: HashMap<String, &DocumentRow> = HashMap::new();
-    for row in &docs {
-        doc_by_id.insert(row.doc_id.clone(), row);
-        if row.deleted {
-            continue;
+/// Merge small data files and drop table versions older than
+/// [`PRUNE_GRACE_MINUTES`]. The grace window keeps the files that a search
+/// running concurrently in `colibri serve` may still be reading.
+async fn compact(table: &lancedb::Table, on_progress: &impl Fn(IndexEvent)) {
+    let steps = [
+        OptimizeAction::Compact {
+            options: CompactionOptions::default(),
+            remap_options: None,
+        },
+        OptimizeAction::Prune {
+            older_than: Some(Duration::minutes(PRUNE_GRACE_MINUTES)),
+            delete_unverified: Some(true),
+            error_if_tagged_old_versions: Some(false),
+        },
+    ];
+    for step in steps {
+        if let Err(e) = table.optimize(step).await {
+            on_progress(IndexEvent::Warning {
+                message: format!("Index compaction step failed: {e}"),
+            });
         }
-        let pid = config.resolve_embedding_profile_id(&row.classification);
-        config.embedding_profile(&pid)?;
-        desired_profile.insert(row.doc_id.clone(), pid);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::metadata_store::DocStatus;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Deterministic 4-dim vectors; optionally fails on the n-th call.
+    pub(crate) struct FakeEmbedder {
+        pub calls: AtomicUsize,
+        pub fail_on_call: Option<usize>,
     }
 
-    // Index state for move/deletion reconciliation.
-    let index_state_rows =
-        metadata_store.list_document_index_state_for_generation(&config.active_generation)?;
-
-    // Per-profile deletions to apply before indexing.
-    let mut deletions_by_profile: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    for state in &index_state_rows {
-        if state.status != "indexed" {
-            continue;
+    impl FakeEmbedder {
+        pub(crate) fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                fail_on_call: None,
+            }
         }
-        let current = doc_by_id.get(&state.doc_id).copied();
-        let should_remove = match current {
-            None => true,
-            Some(doc) if doc.deleted => true,
-            Some(doc) => {
-                let desired_profile_id = config.resolve_embedding_profile_id(&doc.classification);
-                if desired_profile_id != state.embedding_profile_id {
-                    true
+    }
+
+    impl Embedder for FakeEmbedder {
+        fn embed(
+            &self,
+            texts: &[String],
+        ) -> impl std::future::Future<Output = Result<Vec<Vec<f32>>, ColibriError>> + Send {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let fail = self.fail_on_call == Some(call);
+            let out: Vec<Vec<f32>> = texts
+                .iter()
+                .map(|t| vec![t.len() as f32, 1.0, 0.5, 0.25])
+                .collect();
+            async move {
+                if fail {
+                    Err(ColibriError::Embedding("fake failure".into()))
                 } else {
-                    state
-                        .indexed_markdown_path
-                        .as_deref()
-                        .is_some_and(|prev| prev != doc.markdown_path)
+                    Ok(out)
                 }
             }
-        };
-
-        if should_remove {
-            let delete_path = state
-                .indexed_markdown_path
-                .clone()
-                .or_else(|| current.map(|r| r.markdown_path.clone()))
-                .unwrap_or_default();
-            if !delete_path.is_empty() {
-                deletions_by_profile
-                    .entry(state.embedding_profile_id.clone())
-                    .or_default()
-                    .push((state.doc_id.clone(), delete_path));
-            }
         }
     }
 
-    // Group live docs by embedding profile.
-    let mut grouped: BTreeMap<String, Vec<IndexDoc<'_>>> = BTreeMap::new();
-    for row in &docs {
-        if row.deleted {
-            continue;
+    fn add_doc(config: &AppConfig, store: &MetadataStore, id: &str, text: &str) {
+        let rel = format!("t/{id}.md");
+        let path = config.canonical_dir.join(&rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+        let mut doc = DocumentRecord::new(id, "t", id);
+        doc.title = id.into();
+        doc.doc_type = "note".into();
+        doc.content_hash = crate::envelope::content_hash(text);
+        doc.markdown_path = rel;
+        store.upsert_document(&doc).unwrap();
+    }
+
+    async fn table_ids(config: &AppConfig) -> HashSet<String> {
+        let db = lancedb::connect(config.index_dir.to_string_lossy().as_ref())
+            .execute()
+            .await
+            .unwrap();
+        let t = db.open_table(TABLE_NAME).execute().await.unwrap();
+        indexed_doc_ids(&t).await.unwrap()
+    }
+
+    fn opts_per_doc() -> IndexOptions {
+        IndexOptions {
+            force: false,
+            batch_chunks: 1,
         }
-        let Some(profile_id) = desired_profile.get(&row.doc_id) else {
-            continue;
-        };
-        let abs_path = abs_markdown_path(config, &row.markdown_path);
-        grouped
-            .entry(profile_id.clone())
-            .or_default()
-            .push(IndexDoc { row, abs_path });
     }
 
-    let mut index_state_by_profile: HashMap<String, HashMap<String, DocumentIndexStateRow>> =
-        HashMap::new();
-    for row in &index_state_rows {
-        index_state_by_profile
-            .entry(row.embedding_profile_id.clone())
-            .or_default()
-            .insert(row.doc_id.clone(), row.clone());
+    #[tokio::test]
+    async fn indexes_changed_docs_only_and_removes_unsearchable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = AppConfig::for_test(dir.path());
+        let (_lock, store) = config.open_for_write().unwrap();
+        add_doc(&config, &store, "a", "alpha text");
+        add_doc(&config, &store, "b", "beta text");
+        let fake = FakeEmbedder::new();
+
+        let r = index_library(&config, &store, &fake, &opts_per_doc(), |_| {})
+            .await
+            .unwrap();
+        assert_eq!((r.files_indexed, r.files_skipped), (2, 0));
+        assert_eq!(table_ids(&config).await.len(), 2);
+
+        let r = index_library(&config, &store, &fake, &opts_per_doc(), |_| {})
+            .await
+            .unwrap();
+        assert_eq!((r.files_indexed, r.files_skipped), (0, 2));
+
+        store
+            .set_status("b", DocStatus::Removed, Some("user"))
+            .unwrap();
+        let r = index_library(&config, &store, &fake, &opts_per_doc(), |_| {})
+            .await
+            .unwrap();
+        assert_eq!(r.files_deleted, 1);
+        assert_eq!(table_ids(&config).await, HashSet::from(["a".to_string()]));
+        assert_eq!(store.get_document("b").unwrap().unwrap().indexed_hash, None);
     }
 
-    let mut aggregate = IndexResult::default();
-    let empty_state: HashMap<String, DocumentIndexStateRow> = HashMap::new();
-
-    for (profile_id, profile_docs) in grouped {
-        let embedding_profile = config.embedding_profile(&profile_id)?.clone();
-
-        let profile_index_dir = config.lancedb_dir_for_profile(&profile_id);
-        std::fs::create_dir_all(&profile_index_dir)?;
-
-        // Decide per-profile rebuild if schema is outdated.
-        let mut profile_force = force;
-        let meta = read_index_meta(&profile_index_dir)?;
-        let stored_version = meta
-            .get("schema_version")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32;
-        if stored_version != SCHEMA_VERSION && !profile_force {
-            info!(
-                "Index schema outdated for profile '{}' (v{} -> v{}). Forcing rebuild for this profile.",
-                profile_id, stored_version, SCHEMA_VERSION
-            );
-            profile_force = true;
+    // AC-005.1: a failure on document 3 keeps documents 1-2; the rerun embeds 3-5 only.
+    #[tokio::test]
+    async fn interrupted_run_resumes_with_remaining_documents() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = AppConfig::for_test(dir.path());
+        let (_lock, store) = config.open_for_write().unwrap();
+        for id in ["d1", "d2", "d3", "d4", "d5"] {
+            add_doc(&config, &store, id, &format!("text of {id}"));
         }
-        let profile_full_rebuild = profile_force;
 
-        let docs_to_delete = deletions_by_profile
-            .get(&profile_id)
-            .cloned()
-            .unwrap_or_default();
-        let state_for_profile = index_state_by_profile
-            .get(&profile_id)
-            .unwrap_or(&empty_state);
-
-        let profile_result = match index_profile(
-            &profile_id,
-            &embedding_profile,
-            &profile_docs,
-            config,
-            &metadata_store,
-            &config.active_generation,
-            profile_force,
-            profile_full_rebuild,
-            &docs_to_delete,
-            state_for_profile,
-            &on_progress,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => return Err(e),
+        let failing = FakeEmbedder {
+            calls: AtomicUsize::new(0),
+            fail_on_call: Some(3),
         };
+        assert!(
+            index_library(&config, &store, &failing, &opts_per_doc(), |_| {})
+                .await
+                .is_err()
+        );
+        let indexed: Vec<String> = store
+            .list_documents()
+            .unwrap()
+            .into_iter()
+            .filter(|d| d.is_index_current())
+            .map(|d| d.doc_id)
+            .collect();
+        assert_eq!(indexed, vec!["d1", "d2"]);
 
-        aggregate.accumulate(&profile_result);
-
-        // Write index meta for this profile.
-        let mut profile_extra = serde_json::Map::new();
-        profile_extra.insert(
-            "embedding_profile_id".into(),
-            serde_json::Value::String(profile_id.clone()),
-        );
-        profile_extra.insert(
-            "embedding_provider".into(),
-            serde_json::Value::String(embedding_profile.provider.clone()),
-        );
-        profile_extra.insert(
-            "embedding_locality".into(),
-            serde_json::Value::String(
-                match embedding_profile.locality {
-                    crate::config::EmbeddingLocality::Local => "local",
-                    crate::config::EmbeddingLocality::Cloud => "cloud",
-                }
-                .to_string(),
-            ),
-        );
-        profile_extra.insert(
-            "files_indexed_last_run".into(),
-            serde_json::Value::Number(profile_result.files_indexed.into()),
-        );
-        profile_extra.insert(
-            "file_count".into(),
-            serde_json::Value::Number(
-                (profile_result.files_indexed + profile_result.files_skipped).into(),
-            ),
-        );
-        profile_extra.insert(
-            "chunk_count".into(),
-            serde_json::Value::Number(profile_result.total_chunks.into()),
-        );
-        profile_extra.insert(
-            "files_skipped_last_run".into(),
-            serde_json::Value::Number(profile_result.files_skipped.into()),
-        );
-        profile_extra.insert(
-            "files_deleted_last_run".into(),
-            serde_json::Value::Number(profile_result.files_deleted.into()),
-        );
-        profile_extra.insert(
-            "errors_last_run".into(),
-            serde_json::Value::Number(profile_result.errors.into()),
-        );
-        write_index_meta(&profile_index_dir, &embedding_profile.model, &profile_extra)?;
+        let ok = FakeEmbedder::new();
+        let r = index_library(&config, &store, &ok, &opts_per_doc(), |_| {})
+            .await
+            .unwrap();
+        assert_eq!((r.files_indexed, r.files_skipped), (3, 2));
+        assert_eq!(ok.calls.load(Ordering::SeqCst), 3);
     }
 
-    Ok(aggregate)
+    // AC-006.1: chunks of unknown doc ids are purged; live ones stay.
+    #[tokio::test]
+    async fn orphan_chunks_are_purged() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = AppConfig::for_test(dir.path());
+        let (_lock, store) = config.open_for_write().unwrap();
+        add_doc(&config, &store, "keep", "kept text");
+        add_doc(&config, &store, "ghost", "ghost text");
+        let fake = FakeEmbedder::new();
+        index_library(&config, &store, &fake, &opts_per_doc(), |_| {})
+            .await
+            .unwrap();
+
+        // Simulate lost metadata: the row disappears, its chunks stay.
+        let conn = rusqlite::Connection::open(&config.metadata_db_path).unwrap();
+        conn.execute("DELETE FROM documents WHERE doc_id = 'ghost'", [])
+            .unwrap();
+        drop(conn);
+
+        let r = index_library(&config, &store, &fake, &opts_per_doc(), |_| {})
+            .await
+            .unwrap();
+        assert_eq!(r.orphans_removed, 1);
+        assert_eq!(
+            table_ids(&config).await,
+            HashSet::from(["keep".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn model_change_triggers_full_rebuild() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut config = AppConfig::for_test(dir.path());
+        let (_lock, store) = config.open_for_write().unwrap();
+        add_doc(&config, &store, "a", "alpha");
+        let fake = FakeEmbedder::new();
+        index_library(&config, &store, &fake, &opts_per_doc(), |_| {})
+            .await
+            .unwrap();
+
+        config.embedding_model = "other".into();
+        let r = index_library(&config, &store, &fake, &opts_per_doc(), |_| {})
+            .await
+            .unwrap();
+        assert_eq!(r.files_indexed, 1);
+        let meta = read_index_meta(&config.index_dir).unwrap();
+        assert_eq!(
+            meta.get("embedding_model").and_then(|v| v.as_str()),
+            Some("other")
+        );
+    }
+
+    // Review fix: a run killed after its first commits must be resumed, not
+    // rebuilt, so the metadata has to exist before anything is embedded.
+    #[tokio::test]
+    async fn index_meta_is_written_before_embedding() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = AppConfig::for_test(dir.path());
+        let (_lock, store) = config.open_for_write().unwrap();
+        add_doc(&config, &store, "a", "alpha");
+        let failing = FakeEmbedder {
+            calls: AtomicUsize::new(0),
+            fail_on_call: Some(1),
+        };
+        assert!(
+            index_library(&config, &store, &failing, &opts_per_doc(), |_| {})
+                .await
+                .is_err()
+        );
+        let meta = read_index_meta(&config.index_dir).unwrap();
+        assert_eq!(
+            meta.get("embedding_model").and_then(|v| v.as_str()),
+            Some("fake")
+        );
+        assert_eq!(
+            meta.get("schema_version").and_then(|v| v.as_u64()),
+            Some(SCHEMA_VERSION as u64)
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_table_is_rebuilt_even_if_documents_claim_indexed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = AppConfig::for_test(dir.path());
+        let (_lock, store) = config.open_for_write().unwrap();
+        add_doc(&config, &store, "a", "alpha");
+        add_doc(&config, &store, "b", "beta");
+        let fake = FakeEmbedder::new();
+        index_library(&config, &store, &fake, &opts_per_doc(), |_| {})
+            .await
+            .unwrap();
+
+        std::fs::remove_dir_all(&config.index_dir).unwrap();
+        let r = index_library(&config, &store, &fake, &opts_per_doc(), |_| {})
+            .await
+            .unwrap();
+        assert_eq!(r.files_indexed, 2);
+        assert_eq!(table_ids(&config).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn missing_keyword_index_is_repaired_without_changes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = AppConfig::for_test(dir.path());
+        let (_lock, store) = config.open_for_write().unwrap();
+        add_doc(&config, &store, "a", "alpha");
+        let fake = FakeEmbedder::new();
+        index_library(&config, &store, &fake, &opts_per_doc(), |_| {})
+            .await
+            .unwrap();
+
+        let db = lancedb::connect(config.index_dir.to_string_lossy().as_ref())
+            .execute()
+            .await
+            .unwrap();
+        let t = db.open_table(TABLE_NAME).execute().await.unwrap();
+        for idx in t.list_indices().await.unwrap() {
+            t.drop_index(&idx.name).await.unwrap();
+        }
+        assert!(!has_keyword_index(&t).await);
+
+        let r = index_library(&config, &store, &fake, &opts_per_doc(), |_| {})
+            .await
+            .unwrap();
+        assert_eq!(r.files_indexed, 0);
+        t.checkout_latest().await.unwrap();
+        assert!(has_keyword_index(&t).await);
+    }
+
+    #[test]
+    fn id_predicate_escapes_quotes() {
+        assert_eq!(
+            id_list_predicate(&["a".into(), "it's".into()]),
+            "doc_id IN ('a', 'it''s')"
+        );
+    }
 }

@@ -32,7 +32,6 @@ pub struct ZephyrScaleConnector {
     pub token: String,
     pub folder_path: Option<String>,
     pub doc_type: String,
-    pub classification: String,
     pub include_steps: bool,
     pub include_links: bool,
 }
@@ -177,7 +176,6 @@ impl Connector for ZephyrScaleConnector {
                 },
                 metadata: EnvelopeMetadata {
                     doc_type: self.doc_type.clone(),
-                    classification: self.classification.clone(),
                     tags: Some(tags),
                     language: None,
                     acl_tags: None,

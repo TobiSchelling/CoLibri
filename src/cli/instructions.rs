@@ -2,12 +2,11 @@
 
 use std::path::PathBuf;
 
-use crate::config::{load_config_no_bootstrap, AppConfig};
-use crate::metadata_store::MetadataStore;
+use crate::config::{load_config, AppConfig};
 
 /// Run the instructions command.
 pub async fn run(output: Option<PathBuf>) -> anyhow::Result<()> {
-    let config = load_config_no_bootstrap()?;
+    let config = load_config()?;
     let instructions = generate_instructions(&config)?;
 
     let output_path = output.unwrap_or_else(|| {
@@ -42,14 +41,14 @@ fn generate_instructions(config: &AppConfig) -> anyhow::Result<String> {
     md.push_str("## Available Content\n\n");
     md.push_str("Content is ingested into CoLibri's managed canonical markdown store and indexed from there.\n\n");
 
-    if config.metadata_db_path.exists() {
-        if let Ok(store) = MetadataStore::open(&config.metadata_db_path) {
+    {
+        if let Ok(store) = config.open_read() {
             if let Ok(rows) = store.list_documents() {
                 let mut total_live = 0usize;
                 let mut by_type: std::collections::BTreeMap<String, usize> =
                     std::collections::BTreeMap::new();
                 for row in rows {
-                    if row.deleted {
+                    if !row.is_searchable() {
                         continue;
                     }
                     total_live += 1;

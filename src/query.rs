@@ -1,7 +1,5 @@
-//! Query engine for semantic search over content sources.
-//!
-//! Mirrors the Python `query.py` module. Uses LanceDB vector search
-//! with L2 distance converted to similarity score via `exp(-distance)`.
+//! Query engine: hybrid (BM25 + vector), semantic and keyword search over the
+//! single LanceDB `chunks` table, joined with document metadata from SQLite.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -20,7 +18,10 @@ use tracing::warn;
 use crate::config::AppConfig;
 use crate::embedding::embed_texts;
 use crate::error::ColibriError;
-use crate::metadata_store::{DocumentRow, MetadataStore};
+use crate::metadata_store::DocumentRecord;
+
+/// LanceDB table name (shared with the indexer).
+const TABLE_NAME: &str = "chunks";
 
 /// A single search result.
 #[derive(Debug, Clone, Serialize)]
@@ -30,46 +31,32 @@ pub struct SearchResult {
     pub title: String,
     #[serde(rename = "type")]
     pub doc_type: String,
-    pub classification: String,
+    pub collection: String,
     pub score: f64,
     pub search_mode: SearchMode,
     /// When `group_by_doc` was true: how many chunks of this document
     /// matched the underlying search.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk_count: Option<usize>,
-    /// When `group_by_doc` was true: the document's parsed frontmatter
-    /// (populated from metadata_store).
+    /// When `group_by_doc` was true: the document's parsed frontmatter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frontmatter: Option<JsonMap<String, JsonValue>>,
 }
 
-/// Optional filters applied to a search.
-///
-/// All fields default to "no filter". `Default::default()` yields the
-/// pre-feature behavior (returns all matching chunks).
+/// Optional filters applied to a search. `Default` means no filter.
 #[derive(Debug, Clone, Default)]
 pub struct SearchFilter {
-    pub classification: Option<String>,
+    pub collection: Option<String>,
     pub doc_type: Option<String>,
-    /// Return only docs whose `markdown_path` contains *any* listed substring.
+    /// Keep only docs whose source key (path relative to the source root)
+    /// contains *any* listed substring.
     pub path_includes: Vec<String>,
-    /// Drop docs whose `markdown_path` contains *any* listed substring.
+    /// Drop docs whose source key contains *any* listed substring.
     pub path_excludes: Vec<String>,
     /// Equality match on parsed frontmatter fields. Multiple keys combine with AND.
     pub frontmatter: BTreeMap<String, String>,
     /// Drop docs with `source_updated_at` strictly before this timestamp.
     pub since: Option<DateTime<Utc>>,
-}
-
-impl SearchFilter {
-    /// Convenience constructor preserving the pre-feature `(classification, doc_type)` shape.
-    pub fn legacy(classification: Option<&str>, doc_type: Option<&str>) -> Self {
-        Self {
-            classification: classification.map(|s| s.to_string()),
-            doc_type: doc_type.map(|s| s.to_string()),
-            ..Default::default()
-        }
-    }
 }
 
 /// Controls how search queries are executed against LanceDB.
@@ -78,7 +65,7 @@ pub enum SearchMode {
     /// BM25 + vector combined via LanceDB native RRF.
     #[default]
     Hybrid,
-    /// Vector-only search (original behavior).
+    /// Vector-only search.
     Semantic,
     /// BM25 full-text search only.
     Keyword,
@@ -126,12 +113,13 @@ impl clap::ValueEnum for SearchMode {
     }
 }
 
-/// Book entry from the index.
+/// Book entry for `list_books`.
 #[derive(Debug, Clone, Serialize)]
 pub struct BookEntry {
     pub title: String,
+    pub authors: Vec<String>,
+    pub source_path: Option<String>,
     pub chunks: usize,
-    pub file: String,
 }
 
 /// Topic entry with document count.
@@ -141,9 +129,9 @@ pub struct TopicEntry {
     pub document_count: usize,
 }
 
-/// Search engine backed by LanceDB.
+/// Search engine backed by the LanceDB `chunks` table.
 pub struct SearchEngine {
-    backends: Vec<ProfileBackend>,
+    table: lancedb::Table,
     config: AppConfig,
 }
 
@@ -154,79 +142,82 @@ struct SearchHit {
     score: f64,
 }
 
-struct ProfileBackend {
-    profile_id: String,
-    embedding_model: String,
-    embedding_endpoint: String,
-    table: lancedb::Table,
-}
-
 impl SearchEngine {
-    /// Create a new search engine, verifying schema version.
+    /// Open the index read-only after checking it matches the config.
     pub async fn new(config: &AppConfig) -> Result<Self, ColibriError> {
-        let mut backends = Vec::new();
-        let checks = crate::serve_ready::profile_checks(config)?;
-
-        for check in checks {
-            if !check.queryable {
-                warn!(
-                    "Skipping profile '{}' for active generation (not serve-ready): {}",
-                    check.profile_id,
-                    check.issues.join("; ")
-                );
-                continue;
-            }
-
-            let profile_id = check.profile_id;
-            let profile = config.embedding_profile(&profile_id)?;
-            let lancedb_dir = config.lancedb_dir_for_profile(&profile_id);
-
-            let db = match lancedb::connect(lancedb_dir.to_string_lossy().as_ref())
-                .execute()
-                .await
-            {
-                Ok(db) => db,
-                Err(e) => {
-                    warn!("Skipping profile '{profile_id}' (connect failed): {e}");
-                    continue;
-                }
-            };
-
-            let table = match db.open_table("chunks").execute().await {
-                Ok(table) => table,
-                Err(e) => {
-                    warn!("Skipping profile '{profile_id}' (open table failed): {e}");
-                    continue;
-                }
-            };
-
-            backends.push(ProfileBackend {
-                profile_id,
-                embedding_model: profile.model.clone(),
-                embedding_endpoint: profile.endpoint.clone(),
-                table,
-            });
+        let ready = crate::serve_ready::check(config)?;
+        if !ready.queryable {
+            return Err(ColibriError::Query(format!(
+                "Index not ready: {}",
+                ready.issues.join("; ")
+            )));
         }
-
-        if backends.is_empty() {
-            return Err(ColibriError::Query(
-                "No searchable embedding profile is currently available. Run `colibri doctor`, then `colibri index --force`.".into(),
-            ));
-        }
-
+        let db = lancedb::connect(config.index_dir.to_string_lossy().as_ref())
+            .execute()
+            .await?;
+        let table = db.open_table(TABLE_NAME).execute().await?;
         Ok(Self {
-            backends,
+            table,
             config: config.clone(),
         })
     }
 
-    /// Search with optional filters and grouping.
-    ///
-    /// `filter` allows constraining results by classification, doc_type,
-    /// path-includes/excludes, frontmatter equality, and `since` timestamp.
-    /// `group_by_doc = true` returns one result per document (best matching
-    /// chunk + chunk_count + frontmatter); `false` returns chunk-level results
-    /// (legacy behaviour).
+    async fn embed_query(&self, query: &str) -> Result<Vec<f32>, ColibriError> {
+        embed_texts(
+            &[query.to_string()],
+            &self.config.embedding_model,
+            &self.config.embedding_endpoint,
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| ColibriError::Embedding("embedding returned no vector".into()))
+    }
+
+    async fn fetch(
+        &self,
+        query: &str,
+        mode: SearchMode,
+        limit: usize,
+    ) -> Result<Vec<RecordBatch>, ColibriError> {
+        let keyword = || {
+            self.table
+                .query()
+                .full_text_search(FullTextSearchQuery::new(query.to_string()))
+                .limit(limit)
+        };
+        let batches = match mode {
+            SearchMode::Keyword => keyword().execute().await?.try_collect().await?,
+            SearchMode::Semantic => {
+                let vector = self.embed_query(query).await?;
+                self.table
+                    .vector_search(vector)?
+                    .limit(limit)
+                    .execute()
+                    .await?
+                    .try_collect()
+                    .await?
+            }
+            SearchMode::Hybrid => match self.embed_query(query).await {
+                Ok(vector) => {
+                    keyword()
+                        .nearest_to(vector.as_slice())?
+                        .execute()
+                        .await?
+                        .try_collect()
+                        .await?
+                }
+                Err(e) => {
+                    warn!("Embedding failed, falling back to keyword search: {e}");
+                    keyword().execute().await?.try_collect().await?
+                }
+            },
+        };
+        Ok(batches)
+    }
+
+    /// Search with optional filters. `group_by_doc = true` returns one result
+    /// per document (best chunk + chunk_count + frontmatter).
     pub async fn search(
         &self,
         query: &str,
@@ -235,404 +226,145 @@ impl SearchEngine {
         limit: usize,
         mode: SearchMode,
     ) -> Result<Vec<SearchResult>, ColibriError> {
-        let mut merged: Vec<SearchHit> = Vec::new();
-        let mut succeeded = 0usize;
-        let per_backend_limit = self
+        // Refresh so an index rebuilt by another process is visible.
+        if let Err(e) = self.table.checkout_latest().await {
+            warn!("Failed to refresh index table: {e}");
+        }
+        let candidates = self
             .config
             .top_k
             .saturating_mul(5)
             .max(limit.saturating_mul(5))
             .min(500);
+        let batches = self.fetch(query, mode, candidates).await?;
 
-        for backend in &self.backends {
-            // Refresh to latest LanceDB version so externally-rebuilt indexes
-            // (including FTS indexes) are visible to this table handle.
-            if let Err(e) = backend.table.checkout_latest().await {
-                warn!(
-                    "Failed to refresh table for profile '{}': {e}",
-                    backend.profile_id
-                );
-            }
+        let mut hits = Vec::new();
+        collect_search_hits(&batches, self.config.similarity_threshold, mode, &mut hits);
+        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
 
-            let batches: Vec<RecordBatch> = match mode {
-                SearchMode::Semantic => {
-                    let query_vector = match embed_texts(
-                        &[query.to_string()],
-                        &backend.embedding_model,
-                        &backend.embedding_endpoint,
-                    )
-                    .await
-                    {
-                        Ok(v) if !v.is_empty() => v,
-                        Ok(_) => {
-                            warn!(
-                                "Skipping profile '{}': embedding returned empty vector",
-                                backend.profile_id
-                            );
-                            continue;
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Skipping profile '{}': embed error: {e}",
-                                backend.profile_id
-                            );
-                            continue;
-                        }
-                    };
+        let doc_ids: Vec<String> = hits
+            .iter()
+            .map(|h| h.doc_id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let docs_by_id = self.config.open_read()?.get_documents_by_ids(&doc_ids)?;
 
-                    let search = backend
-                        .table
-                        .vector_search(query_vector[0].clone())
-                        .map_err(|e| ColibriError::Query(format!("Vector search failed: {e}")))?
-                        .limit(per_backend_limit);
-
-                    match search.execute().await {
-                        Ok(stream) => match stream.try_collect().await {
-                            Ok(b) => b,
-                            Err(e) => {
-                                warn!(
-                                    "Skipping profile '{}': collect error: {e}",
-                                    backend.profile_id
-                                );
-                                continue;
-                            }
-                        },
-                        Err(e) => {
-                            warn!(
-                                "Skipping profile '{}': query error: {e}",
-                                backend.profile_id
-                            );
-                            continue;
-                        }
-                    }
-                }
-                SearchMode::Keyword => {
-                    let fts_query = FullTextSearchQuery::new(query.to_string());
-                    let search = backend
-                        .table
-                        .query()
-                        .full_text_search(fts_query)
-                        .limit(per_backend_limit);
-
-                    match search.execute().await {
-                        Ok(stream) => match stream.try_collect().await {
-                            Ok(b) => b,
-                            Err(e) => {
-                                warn!(
-                                    "Skipping profile '{}': FTS collect error: {e}",
-                                    backend.profile_id
-                                );
-                                continue;
-                            }
-                        },
-                        Err(e) => {
-                            warn!(
-                                "Skipping profile '{}': FTS query error: {e}",
-                                backend.profile_id
-                            );
-                            continue;
-                        }
-                    }
-                }
-                SearchMode::Hybrid => {
-                    match embed_texts(
-                        &[query.to_string()],
-                        &backend.embedding_model,
-                        &backend.embedding_endpoint,
-                    )
-                    .await
-                    {
-                        Ok(v) if !v.is_empty() => {
-                            let fts_query = FullTextSearchQuery::new(query.to_string());
-                            let search = backend
-                                .table
-                                .query()
-                                .full_text_search(fts_query)
-                                .nearest_to(v[0].as_slice())
-                                .map_err(|e| {
-                                    ColibriError::Query(format!("Hybrid search failed: {e}"))
-                                })?
-                                .limit(per_backend_limit);
-
-                            match search.execute().await {
-                                Ok(stream) => match stream.try_collect().await {
-                                    Ok(b) => b,
-                                    Err(e) => {
-                                        warn!(
-                                            "Skipping profile '{}': hybrid collect error: {e}",
-                                            backend.profile_id
-                                        );
-                                        continue;
-                                    }
-                                },
-                                Err(e) => {
-                                    warn!(
-                                        "Skipping profile '{}': hybrid query error: {e}",
-                                        backend.profile_id
-                                    );
-                                    continue;
-                                }
-                            }
-                        }
-                        Ok(_) => {
-                            warn!(
-                                "Skipping profile '{}': embedding returned empty vector",
-                                backend.profile_id
-                            );
-                            continue;
-                        }
-                        Err(e) => {
-                            // REQ-008: fallback to keyword on embedding failure
-                            warn!(
-                                "Embedding failed for profile '{}', falling back to keyword search: {e}",
-                                backend.profile_id
-                            );
-                            let fts_query = FullTextSearchQuery::new(query.to_string());
-                            let search = backend
-                                .table
-                                .query()
-                                .full_text_search(fts_query)
-                                .limit(per_backend_limit);
-
-                            match search.execute().await {
-                                Ok(stream) => match stream.try_collect().await {
-                                    Ok(b) => b,
-                                    Err(e) => {
-                                        warn!(
-                                            "Skipping profile '{}': FTS fallback error: {e}",
-                                            backend.profile_id
-                                        );
-                                        continue;
-                                    }
-                                },
-                                Err(e) => {
-                                    warn!(
-                                        "Skipping profile '{}': FTS fallback query error: {e}",
-                                        backend.profile_id
-                                    );
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-                }
-            };
-
-            succeeded += 1;
-            collect_search_hits(
-                &batches,
-                self.config.similarity_threshold,
-                mode,
-                &mut merged,
-            );
-        }
-
-        if succeeded == 0 {
-            return Err(ColibriError::Query(
-                "No searchable embedding profile is currently available.".into(),
-            ));
-        }
-
-        merged.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
-
-        // Look up document metadata once for all hit doc_ids — needed for
-        // every filter predicate plus (when grouping) the result frontmatter.
-        let mut doc_ids_set = HashSet::new();
-        for hit in &merged {
-            doc_ids_set.insert(hit.doc_id.clone());
-        }
-        let doc_ids: Vec<String> = doc_ids_set.into_iter().collect();
-        let store = MetadataStore::open(&self.config.metadata_db_path)?;
-        let docs_by_id = store.get_documents_by_ids(&doc_ids)?;
-
-        // Stage 1: filter hits using metadata join. Drops anything failing
-        // any predicate; preserves chunk-level granularity.
-        let filtered: Vec<(SearchHit, &DocumentRow)> = merged
+        let filtered: Vec<(SearchHit, &DocumentRecord)> = hits
             .into_iter()
             .filter_map(|hit| {
                 let doc = docs_by_id.get(&hit.doc_id)?;
-                if doc.deleted {
-                    return None;
-                }
-                if !document_matches_filter(doc, filter) {
-                    return None;
-                }
-                Some((hit, doc))
+                (doc.is_searchable() && document_matches_filter(doc, filter)).then_some((hit, doc))
             })
             .collect();
 
-        // Stage 2 + 3: group_by_doc OR chunk-level dedup, then truncate to limit.
-        let results = if group_by_doc {
+        Ok(if group_by_doc {
             collapse_to_doc_results(filtered, mode, limit)
         } else {
             chunk_level_results(filtered, mode, limit)
-        };
-
-        Ok(results)
+        })
     }
 
-    /// Search only books. Returns chunk-level results (legacy behavior).
-    /// Convenience wrapper around `search()`.
-    #[allow(dead_code)] // Public API — kept for external callers/tests after MCP refactor.
-    pub async fn search_books(
-        &self,
-        query: &str,
-        limit: usize,
-        mode: SearchMode,
-    ) -> Result<Vec<SearchResult>, ColibriError> {
-        self.search(
-            query,
-            &SearchFilter::legacy(None, Some("book")),
-            false,
-            limit,
-            mode,
-        )
-        .await
-    }
-
-    /// Search the entire library. Returns chunk-level results (legacy behavior).
-    /// Convenience wrapper around `search()`.
-    #[allow(dead_code)] // Public API — kept for external callers/tests after MCP refactor.
-    pub async fn search_library(
-        &self,
-        query: &str,
-        limit: usize,
-        mode: SearchMode,
-    ) -> Result<Vec<SearchResult>, ColibriError> {
-        self.search(query, &SearchFilter::default(), false, limit, mode)
-            .await
-    }
-
-    /// List all indexed books with metadata.
+    /// All searchable books, sorted by title.
     pub async fn list_books(&self) -> Result<Vec<BookEntry>, ColibriError> {
-        let store = MetadataStore::open(&self.config.metadata_db_path)?;
-        let docs = store.list_documents()?;
-        let chunk_counts =
-            store.indexed_chunk_counts_for_generation(&self.config.active_generation)?;
-
-        let mut books = Vec::new();
-        for doc in docs {
-            if doc.deleted || doc.doc_type != "book" {
-                continue;
-            }
-            let profile_id = self
-                .config
-                .resolve_embedding_profile_id(&doc.classification);
-            let chunks = chunk_counts
-                .get(&(doc.doc_id.clone(), profile_id))
-                .copied()
-                .unwrap_or(0) as usize;
-            books.push(BookEntry {
-                title: doc.title,
-                chunks,
-                file: doc.markdown_path,
-            });
-        }
-
+        let mut books: Vec<BookEntry> = self
+            .config
+            .open_read()?
+            .list_documents()?
+            .into_iter()
+            .filter(|d| d.is_searchable() && d.doc_type == "book")
+            .map(|d| BookEntry {
+                authors: serde_json::from_str(&d.authors_json).unwrap_or_default(),
+                title: d.title,
+                source_path: d.source_path,
+                chunks: d.chunk_count.unwrap_or(0).max(0) as usize,
+            })
+            .collect();
         books.sort_by(|a, b| a.title.cmp(&b.title));
         Ok(books)
     }
 
-    /// List all topics (tags) with document counts.
+    /// Tags with document counts, optionally limited to one collection.
     pub async fn browse_topics(
         &self,
-        classification: Option<&str>,
+        collection: Option<&str>,
     ) -> Result<Vec<TopicEntry>, ColibriError> {
-        let store = MetadataStore::open(&self.config.metadata_db_path)?;
-        let docs = store.list_documents()?;
         let mut tag_counter: HashMap<String, usize> = HashMap::new();
-
-        for doc in docs {
-            if doc.deleted {
+        for doc in self.config.open_read()?.list_documents()? {
+            if !doc.is_searchable() || collection.is_some_and(|c| doc.collection != c) {
                 continue;
             }
-            if let Some(classification) = classification {
-                if doc.classification != classification {
-                    continue;
-                }
-            }
-
-            let tags: Result<Vec<String>, _> = serde_json::from_str(&doc.tags_json);
-            let tags = match tags {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            let mut seen = HashSet::new();
-            for tag in tags {
-                let tag = tag.trim().to_string();
-                if tag.is_empty() {
-                    continue;
-                }
-                if seen.insert(tag.clone()) {
-                    *tag_counter.entry(tag).or_default() += 1;
-                }
+            let tags: Vec<String> = serde_json::from_str(&doc.tags_json).unwrap_or_default();
+            let unique: HashSet<String> = tags
+                .into_iter()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            for tag in unique {
+                *tag_counter.entry(tag).or_default() += 1;
             }
         }
-
         let mut topics: Vec<TopicEntry> = tag_counter
             .into_iter()
-            .map(|(tag, count)| TopicEntry {
+            .map(|(tag, document_count)| TopicEntry {
                 tag,
-                document_count: count,
+                document_count,
             })
             .collect();
-
-        // Sort by count descending
-        topics.sort_by(|a, b| b.document_count.cmp(&a.document_count));
+        topics.sort_by(|a, b| {
+            b.document_count
+                .cmp(&a.document_count)
+                .then_with(|| a.tag.cmp(&b.tag))
+        });
         Ok(topics)
     }
 }
 
 /// Predicate: does this document satisfy every active filter?
-fn document_matches_filter(doc: &DocumentRow, filter: &SearchFilter) -> bool {
-    if let Some(dt) = &filter.doc_type {
-        if doc.doc_type != *dt {
-            return false;
-        }
+fn document_matches_filter(doc: &DocumentRecord, filter: &SearchFilter) -> bool {
+    if filter
+        .collection
+        .as_ref()
+        .is_some_and(|c| doc.collection != *c)
+    {
+        return false;
     }
-    if let Some(c) = &filter.classification {
-        if doc.classification != *c {
-            return false;
-        }
+    if filter.doc_type.as_ref().is_some_and(|t| doc.doc_type != *t) {
+        return false;
     }
-    // Path filters target the source-relative path (`external_id`),
-    // not the internal canonical path. Users think in source paths
-    // like `03_MY_PROJECTS/HEIMDALL/foo.md`.
-    if !filter.path_includes.is_empty() {
-        let any = filter
+    // Path filters target the source key (e.g. `03_PROJECTS/HEIMDALL/foo.md`),
+    // not the internal canonical path.
+    if !filter.path_includes.is_empty()
+        && !filter
             .path_includes
             .iter()
-            .any(|needle| doc.external_id.contains(needle));
-        if !any {
-            return false;
-        }
+            .any(|needle| doc.key.contains(needle))
+    {
+        return false;
     }
     if filter
         .path_excludes
         .iter()
-        .any(|needle| doc.external_id.contains(needle))
+        .any(|needle| doc.key.contains(needle))
     {
         return false;
     }
     if let Some(since) = &filter.since {
-        // doc.source_updated_at is RFC 3339 (validated upstream by envelope::validate).
-        // If parsing fails, conservatively drop the doc.
-        match DateTime::parse_from_rfc3339(&doc.source_updated_at) {
-            Ok(t) => {
-                if t.with_timezone(&Utc) < *since {
-                    return false;
-                }
-            }
-            Err(_) => return false,
+        // Docs without a parseable source timestamp are dropped.
+        match doc
+            .source_updated_at
+            .as_deref()
+            .map(DateTime::parse_from_rfc3339)
+        {
+            Some(Ok(t)) if t.with_timezone(&Utc) >= *since => {}
+            _ => return false,
         }
     }
     if !filter.frontmatter.is_empty() {
-        // Parse the doc's frontmatter_json once. Empty/missing → no match for any key.
         let parsed: JsonValue = serde_json::from_str(&doc.frontmatter_json)
             .unwrap_or(JsonValue::Object(JsonMap::new()));
-        let map = match parsed.as_object() {
-            Some(m) => m,
-            None => return false,
+        let Some(map) = parsed.as_object() else {
+            return false;
         };
         for (key, expected) in &filter.frontmatter {
             match map.get(key) {
@@ -646,29 +378,34 @@ fn document_matches_filter(doc: &DocumentRow, filter: &SearchFilter) -> bool {
     true
 }
 
-/// Convert filtered (hit, doc) pairs into chunk-level results.
-/// Preserves the legacy text-dedup behavior: skip exact-text duplicates.
+fn result_for(hit: SearchHit, doc: &DocumentRecord, mode: SearchMode) -> SearchResult {
+    SearchResult {
+        text: hit.text,
+        file: doc
+            .source_path
+            .clone()
+            .unwrap_or_else(|| doc.markdown_path.clone()),
+        title: doc.title.clone(),
+        doc_type: doc.doc_type.clone(),
+        collection: doc.collection.clone(),
+        score: hit.score,
+        search_mode: mode,
+        chunk_count: None,
+        frontmatter: None,
+    }
+}
+
+/// Chunk-level results, skipping exact-text duplicates within a file.
 fn chunk_level_results(
-    filtered: Vec<(SearchHit, &DocumentRow)>,
+    filtered: Vec<(SearchHit, &DocumentRecord)>,
     mode: SearchMode,
     limit: usize,
 ) -> Vec<SearchResult> {
     let mut deduped = Vec::new();
     let mut seen = HashSet::new();
     for (hit, doc) in filtered {
-        let result = SearchResult {
-            text: hit.text,
-            file: doc.uri.clone().unwrap_or_else(|| doc.markdown_path.clone()),
-            title: doc.title.clone(),
-            doc_type: doc.doc_type.clone(),
-            classification: doc.classification.clone(),
-            score: hit.score,
-            search_mode: mode,
-            chunk_count: None,
-            frontmatter: None,
-        };
-        let key = format!("{}:{}", result.file, result.text);
-        if seen.insert(key) {
+        let result = result_for(hit, doc, mode);
+        if seen.insert(format!("{}:{}", result.file, result.text)) {
             deduped.push(result);
         }
         if deduped.len() >= limit {
@@ -678,16 +415,14 @@ fn chunk_level_results(
     deduped
 }
 
-/// Collapse filtered (hit, doc) pairs into one result per document.
-/// Keeps the highest-scoring chunk; counts how many chunks of that doc matched.
-/// Attaches the document's frontmatter map.
+/// One result per document: its best chunk, the number of matching chunks
+/// and its frontmatter.
 fn collapse_to_doc_results(
-    filtered: Vec<(SearchHit, &DocumentRow)>,
+    filtered: Vec<(SearchHit, &DocumentRecord)>,
     mode: SearchMode,
     limit: usize,
 ) -> Vec<SearchResult> {
-    // Bucket by doc_id; for each, keep best-scoring hit and count.
-    let mut best: HashMap<String, (SearchHit, &DocumentRow, usize)> = HashMap::new();
+    let mut best: HashMap<String, (SearchHit, &DocumentRecord, usize)> = HashMap::new();
     for (hit, doc) in filtered {
         let entry = best
             .entry(hit.doc_id.clone())
@@ -695,26 +430,17 @@ fn collapse_to_doc_results(
         entry.2 += 1;
         if hit.score > entry.0.score {
             entry.0 = hit;
-            entry.1 = doc;
         }
     }
     let mut results: Vec<SearchResult> = best
         .into_values()
         .map(|(hit, doc, count)| {
-            let frontmatter = serde_json::from_str::<JsonValue>(&doc.frontmatter_json)
+            let mut result = result_for(hit, doc, mode);
+            result.chunk_count = Some(count);
+            result.frontmatter = serde_json::from_str::<JsonValue>(&doc.frontmatter_json)
                 .ok()
                 .and_then(|v| v.as_object().cloned());
-            SearchResult {
-                text: hit.text,
-                file: doc.uri.clone().unwrap_or_else(|| doc.markdown_path.clone()),
-                title: doc.title.clone(),
-                doc_type: doc.doc_type.clone(),
-                classification: doc.classification.clone(),
-                score: hit.score,
-                search_mode: mode,
-                chunk_count: Some(count),
-                frontmatter,
-            }
+            result
         })
         .collect();
     results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
@@ -772,280 +498,133 @@ mod tests {
     use super::*;
 
     #[test]
-    fn search_mode_default_is_hybrid() {
+    fn search_mode_parsing_and_display() {
         assert_eq!(SearchMode::default(), SearchMode::Hybrid);
-    }
-
-    #[test]
-    fn search_mode_from_str_valid() {
-        assert_eq!("hybrid".parse::<SearchMode>().unwrap(), SearchMode::Hybrid);
+        assert_eq!("HYBRID".parse::<SearchMode>().unwrap(), SearchMode::Hybrid);
         assert_eq!(
-            "semantic".parse::<SearchMode>().unwrap(),
+            "Semantic".parse::<SearchMode>().unwrap(),
             SearchMode::Semantic
         );
         assert_eq!(
             "keyword".parse::<SearchMode>().unwrap(),
             SearchMode::Keyword
         );
-        assert_eq!("HYBRID".parse::<SearchMode>().unwrap(), SearchMode::Hybrid);
-        assert_eq!(
-            "Semantic".parse::<SearchMode>().unwrap(),
-            SearchMode::Semantic
-        );
-    }
-
-    #[test]
-    fn search_mode_from_str_invalid() {
         let err = "fuzzy".parse::<SearchMode>().unwrap_err();
-        assert!(err.contains("Invalid search mode"));
-        assert!(err.contains("fuzzy"));
-    }
-
-    #[test]
-    fn search_mode_display() {
-        assert_eq!(SearchMode::Hybrid.to_string(), "hybrid");
+        assert!(err.contains("Invalid search mode") && err.contains("fuzzy"));
         assert_eq!(SearchMode::Semantic.to_string(), "semantic");
-        assert_eq!(SearchMode::Keyword.to_string(), "keyword");
     }
-
-    // ----- SearchFilter + helpers (Wave 2 Cluster E) -----
 
     fn make_doc(
         doc_id: &str,
-        path: &str,
-        doc_type: &str,
-        classification: &str,
+        key: &str,
+        collection: &str,
         frontmatter_json: &str,
-        source_updated_at: &str,
-    ) -> DocumentRow {
-        DocumentRow {
+    ) -> DocumentRecord {
+        let mut doc = DocumentRecord::new(doc_id, collection, key);
+        doc.title = doc_id.into();
+        doc.doc_type = "note".into();
+        doc.content_hash = "sha256:00".into();
+        doc.markdown_path = format!("{collection}/{doc_id}.md");
+        doc.frontmatter_json = frontmatter_json.into();
+        doc.source_updated_at = Some("2026-04-15T00:00:00Z".into());
+        doc
+    }
+
+    fn hit(doc_id: &str, text: &str, score: f64) -> SearchHit {
+        SearchHit {
             doc_id: doc_id.into(),
-            title: doc_id.into(),
-            content_hash: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-                .into(),
-            doc_type: doc_type.into(),
-            classification: classification.into(),
-            markdown_path: format!("internal/canonical/{doc_id}.md"),
-            tags_json: "[]".into(),
-            deleted: false,
-            frontmatter_json: frontmatter_json.into(),
-            source_updated_at: source_updated_at.into(),
-            // Path filters target external_id (source-side path), not the
-            // canonical markdown_path. Tests pass the user-facing path here.
-            external_id: path.into(),
-            // result.file falls back to markdown_path; tests that assert
-            // on `result.file` should expect the canonical form unless they
-            // explicitly set uri.
-            uri: None,
+            text: text.into(),
+            score,
         }
     }
 
     #[test]
     fn filter_default_matches_everything() {
-        let doc = make_doc(
-            "d1",
-            "internal/a.md",
-            "note",
-            "internal",
-            "{}",
-            "2026-01-01T00:00:00Z",
-        );
+        let doc = make_doc("d1", "a.md", "vault", "{}");
         assert!(document_matches_filter(&doc, &SearchFilter::default()));
     }
 
+    // AC-007.1 (filter part): collection and doc_type filters.
     #[test]
-    fn filter_classification_and_doc_type() {
-        let doc = make_doc(
-            "d1",
-            "internal/a.md",
-            "note",
-            "internal",
-            "{}",
-            "2026-01-01T00:00:00Z",
-        );
-        let mut f = SearchFilter::default();
-        f.classification = Some("internal".into());
+    fn filter_collection_and_doc_type() {
+        let doc = make_doc("d1", "a.md", "books", "{}");
+        let mut f = SearchFilter {
+            collection: Some("books".into()),
+            ..Default::default()
+        };
         assert!(document_matches_filter(&doc, &f));
-        f.classification = Some("public".into());
+        f.collection = Some("vault".into());
         assert!(!document_matches_filter(&doc, &f));
 
-        let mut f = SearchFilter::default();
-        f.doc_type = Some("note".into());
+        let mut f = SearchFilter {
+            doc_type: Some("note".into()),
+            ..Default::default()
+        };
         assert!(document_matches_filter(&doc, &f));
         f.doc_type = Some("book".into());
         assert!(!document_matches_filter(&doc, &f));
     }
 
     #[test]
-    fn filter_path_includes() {
-        let doc = make_doc(
-            "d1",
-            "03_MY_PROJECTS/02_HEIMDALL/foo.md",
-            "note",
-            "internal",
-            "{}",
-            "2026-01-01T00:00:00Z",
-        );
-        let mut f = SearchFilter::default();
-        f.path_includes = vec!["02_HEIMDALL".into()];
+    fn filter_paths_target_source_key() {
+        let doc = make_doc("d1", "03_MY_PROJECTS/02_HEIMDALL/foo.md", "vault", "{}");
+        let mut f = SearchFilter {
+            path_includes: vec!["02_HEIMDALL".into()],
+            ..Default::default()
+        };
         assert!(document_matches_filter(&doc, &f));
         f.path_includes = vec!["03_GO_AI".into()];
         assert!(!document_matches_filter(&doc, &f));
-        // Multiple substrings: ANY match wins
         f.path_includes = vec!["03_GO_AI".into(), "HEIMDALL".into()];
         assert!(document_matches_filter(&doc, &f));
-    }
 
-    #[test]
-    fn filter_path_excludes() {
-        let doc = make_doc(
-            "d1",
-            "06_ARCHIVE/old.md",
-            "note",
-            "internal",
-            "{}",
-            "2026-01-01T00:00:00Z",
-        );
-        let mut f = SearchFilter::default();
-        f.path_excludes = vec!["06_ARCHIVE".into()];
+        let f = SearchFilter {
+            path_excludes: vec!["03_MY".into()],
+            ..Default::default()
+        };
         assert!(!document_matches_filter(&doc, &f));
     }
 
     #[test]
-    fn filter_frontmatter_string() {
-        let doc = make_doc(
-            "d1",
-            "internal/a.md",
-            "note",
-            "internal",
-            r#"{"area":"SIT","status":"active"}"#,
-            "2026-01-01T00:00:00Z",
-        );
+    fn filter_frontmatter_and_since() {
+        let doc = make_doc("d1", "a.md", "vault", r#"{"area":"SIT","n":3,"ok":true}"#);
         let mut f = SearchFilter::default();
         f.frontmatter.insert("area".into(), "SIT".into());
+        f.frontmatter.insert("n".into(), "3".into());
+        f.frontmatter.insert("ok".into(), "true".into());
         assert!(document_matches_filter(&doc, &f));
         f.frontmatter.insert("status".into(), "draft".into());
         assert!(!document_matches_filter(&doc, &f));
-    }
 
-    #[test]
-    fn filter_frontmatter_missing_key_excludes() {
-        let doc = make_doc(
-            "d1",
-            "internal/a.md",
-            "note",
-            "internal",
-            "{}",
-            "2026-01-01T00:00:00Z",
-        );
-        let mut f = SearchFilter::default();
-        f.frontmatter.insert("area".into(), "SIT".into());
-        assert!(!document_matches_filter(&doc, &f));
-    }
-
-    #[test]
-    fn filter_since() {
-        let doc = make_doc(
-            "d1",
-            "internal/a.md",
-            "note",
-            "internal",
-            "{}",
-            "2026-04-15T00:00:00Z",
-        );
-        let mut f = SearchFilter::default();
-        f.since = Some(
-            DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
-        );
+        let at = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let mut f = SearchFilter {
+            since: Some(at("2026-04-01T00:00:00Z")),
+            ..Default::default()
+        };
         assert!(document_matches_filter(&doc, &f));
-        f.since = Some(
-            DateTime::parse_from_rfc3339("2026-05-01T00:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
-        );
+        f.since = Some(at("2026-05-01T00:00:00Z"));
         assert!(!document_matches_filter(&doc, &f));
+        let mut undated = doc.clone();
+        undated.source_updated_at = None;
+        assert!(!document_matches_filter(&undated, &f));
     }
 
     #[test]
-    fn collapse_to_doc_keeps_best_chunk_and_counts() {
-        let docs = vec![
-            make_doc(
-                "d1",
-                "p1.md",
-                "note",
-                "internal",
-                "{}",
-                "2026-01-01T00:00:00Z",
-            ),
-            make_doc(
-                "d2",
-                "p2.md",
-                "note",
-                "internal",
-                "{}",
-                "2026-01-01T00:00:00Z",
-            ),
-        ];
-        // Three hits across two docs; d1 has chunks at 0.5 and 0.9, d2 at 0.7
-        let filtered: Vec<(SearchHit, &DocumentRow)> = vec![
-            (
-                SearchHit {
-                    doc_id: "d1".into(),
-                    text: "low".into(),
-                    score: 0.5,
-                },
-                &docs[0],
-            ),
-            (
-                SearchHit {
-                    doc_id: "d1".into(),
-                    text: "high".into(),
-                    score: 0.9,
-                },
-                &docs[0],
-            ),
-            (
-                SearchHit {
-                    doc_id: "d2".into(),
-                    text: "mid".into(),
-                    score: 0.7,
-                },
-                &docs[1],
-            ),
+    fn collapse_to_doc_keeps_best_chunk_counts_and_frontmatter() {
+        let mut d1 = make_doc("d1", "p1.md", "vault", r#"{"area":"SIT"}"#);
+        d1.source_path = Some("/src/p1.md".into());
+        let d2 = make_doc("d2", "p2.md", "vault", "{}");
+        let filtered = vec![
+            (hit("d1", "low", 0.5), &d1),
+            (hit("d1", "high", 0.9), &d1),
+            (hit("d2", "mid", 0.7), &d2),
         ];
         let results = collapse_to_doc_results(filtered, SearchMode::Hybrid, 10);
         assert_eq!(results.len(), 2);
-        // Best (d1@0.9) ranks first; chunk_count=2.
-        // make_doc sets uri=None, so result.file falls back to markdown_path.
-        assert_eq!(results[0].file, "internal/canonical/d1.md");
+        assert_eq!(results[0].file, "/src/p1.md");
         assert_eq!(results[0].text, "high");
         assert_eq!(results[0].chunk_count, Some(2));
-        // d2 ranks second with chunk_count=1.
-        assert_eq!(results[1].file, "internal/canonical/d2.md");
-        assert_eq!(results[1].chunk_count, Some(1));
-    }
-
-    #[test]
-    fn collapse_to_doc_attaches_frontmatter() {
-        let docs = vec![make_doc(
-            "d1",
-            "p1.md",
-            "note",
-            "internal",
-            r#"{"area":"SIT"}"#,
-            "2026-01-01T00:00:00Z",
-        )];
-        let filtered = vec![(
-            SearchHit {
-                doc_id: "d1".into(),
-                text: "x".into(),
-                score: 0.9,
-            },
-            &docs[0],
-        )];
-        let results = collapse_to_doc_results(filtered, SearchMode::Hybrid, 10);
+        assert_eq!(results[0].collection, "vault");
         assert_eq!(
             results[0]
                 .frontmatter
@@ -1054,37 +633,140 @@ mod tests {
                 .and_then(JsonValue::as_str),
             Some("SIT")
         );
+        // No source path: falls back to the canonical path.
+        assert_eq!(results[1].file, "vault/d2.md");
+        assert_eq!(results[1].chunk_count, Some(1));
     }
 
     #[test]
-    fn collapse_truncates_to_limit() {
-        let docs: Vec<DocumentRow> = (0..5)
-            .map(|i| {
-                make_doc(
-                    &format!("d{i}"),
-                    &format!("p{i}.md"),
-                    "note",
-                    "internal",
-                    "{}",
-                    "2026-01-01T00:00:00Z",
-                )
-            })
+    fn collapse_truncates_and_chunk_level_dedups() {
+        let docs: Vec<DocumentRecord> = (0..5)
+            .map(|i| make_doc(&format!("d{i}"), &format!("p{i}.md"), "vault", "{}"))
             .collect();
-        let filtered: Vec<(SearchHit, &DocumentRow)> = docs
+        let filtered: Vec<(SearchHit, &DocumentRecord)> = docs
             .iter()
             .enumerate()
-            .map(|(i, d)| {
-                (
-                    SearchHit {
-                        doc_id: format!("d{i}"),
-                        text: format!("t{i}"),
-                        score: 0.9 - (i as f64) * 0.01,
-                    },
-                    d,
-                )
-            })
+            .map(|(i, d)| (hit(&format!("d{i}"), "same", 0.9 - i as f64 * 0.01), d))
             .collect();
-        let results = collapse_to_doc_results(filtered, SearchMode::Hybrid, 3);
-        assert_eq!(results.len(), 3);
+        assert_eq!(
+            collapse_to_doc_results(filtered, SearchMode::Hybrid, 3).len(),
+            3
+        );
+
+        let d = &docs[0];
+        let dupes = vec![(hit("d0", "x", 0.9), d), (hit("d0", "x", 0.8), d)];
+        assert_eq!(chunk_level_results(dupes, SearchMode::Keyword, 10).len(), 1);
+    }
+
+    // -- end-to-end over a real (temp) index --------------------------------
+
+    use crate::indexer::tests::FakeEmbedder;
+    use crate::indexer::{index_library, IndexOptions};
+    use std::collections::BTreeMap as Snapshot;
+    use std::path::{Path, PathBuf};
+
+    fn snapshot(root: &Path) -> Snapshot<PathBuf, (u64, std::time::SystemTime)> {
+        let mut out = Snapshot::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                let meta = std::fs::metadata(&path).unwrap();
+                if meta.is_dir() {
+                    stack.push(path.clone());
+                }
+                out.insert(path, (meta.len(), meta.modified().unwrap()));
+            }
+        }
+        out
+    }
+
+    async fn build_index(config: &AppConfig) {
+        let (_lock, store) = config.open_for_write().unwrap();
+        let docs = [
+            (
+                "books",
+                "book",
+                "Pro Git",
+                r#"["Scott Chacon","Ben Straub"]"#,
+                "alpha branching and merging",
+            ),
+            ("vault", "note", "Note", "[]", "alpha meeting notes"),
+        ];
+        for (collection, doc_type, title, authors, text) in docs {
+            let key = format!("{title}.md");
+            let mut doc = DocumentRecord::new(format!("{collection}:{key}"), collection, &key);
+            doc.title = title.into();
+            doc.doc_type = doc_type.into();
+            doc.authors_json = authors.into();
+            doc.tags_json = r#"["t1"]"#.into();
+            doc.source_path = Some(format!("/src/{key}"));
+            doc.content_hash = crate::envelope::content_hash(text);
+            doc.markdown_path = format!("{collection}/{title}.md");
+            let path = config.canonical_dir.join(&doc.markdown_path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+            store.upsert_document(&doc).unwrap();
+        }
+        index_library(
+            config,
+            &store,
+            &FakeEmbedder::new(),
+            &IndexOptions::default(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+    }
+
+    // AC-002.1, AC-007.1, AC-008.2
+    #[tokio::test]
+    async fn read_paths_filter_by_collection_and_leave_data_dir_untouched() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = AppConfig::for_test(dir.path());
+        build_index(&config).await;
+        let before = snapshot(dir.path());
+
+        let engine = SearchEngine::new(&config).await.unwrap();
+        let all = engine
+            .search(
+                "alpha",
+                &SearchFilter::default(),
+                true,
+                10,
+                SearchMode::Keyword,
+            )
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 2);
+
+        let books_only = SearchFilter {
+            collection: Some("books".into()),
+            ..Default::default()
+        };
+        let hits = engine
+            .search("alpha", &books_only, true, 10, SearchMode::Keyword)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].collection, "books");
+        assert_eq!(hits[0].file, "/src/Pro Git.md");
+
+        let books = engine.list_books().await.unwrap();
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].title, "Pro Git");
+        assert_eq!(books[0].authors, ["Scott Chacon", "Ben Straub"]);
+        assert_eq!(books[0].source_path.as_deref(), Some("/src/Pro Git.md"));
+        assert_eq!(books[0].chunks, 1);
+        let json = serde_json::to_value(&books[0]).unwrap();
+        let mut keys: Vec<&String> = json.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["authors", "chunks", "source_path", "title"]);
+
+        let topics = engine.browse_topics(Some("vault")).await.unwrap();
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].document_count, 1);
+
+        assert_eq!(snapshot(dir.path()), before, "read paths must not write");
     }
 }

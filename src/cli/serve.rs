@@ -1,6 +1,6 @@
 //! `colibri serve` — MCP stdio server command.
 
-use crate::config::load_config_no_bootstrap;
+use crate::config::load_config;
 use crate::mcp;
 
 pub async fn run(check: bool, json: bool) -> anyhow::Result<()> {
@@ -8,28 +8,21 @@ pub async fn run(check: bool, json: bool) -> anyhow::Result<()> {
         anyhow::bail!("`--json` requires `--check`");
     }
 
-    let config = load_config_no_bootstrap()?;
+    let config = load_config()?;
     if check {
-        let report = mcp::startup_report(&config)?;
+        let ready = crate::serve_ready::check(&config)?;
         if json {
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            println!("{}", serde_json::to_string_pretty(&ready)?);
+        } else if ready.queryable {
+            eprintln!("Index is ready to serve ({}).", ready.index_path);
         } else {
-            eprintln!(
-                "MCP startup profile check: queryable_profiles={}/{} (active generation: {})",
-                report.queryable_profiles, report.total_profiles, report.active_generation
-            );
-            for issue in &report.issues {
-                eprintln!("  - {}", issue);
-            }
-            if report.issues.is_empty() {
-                eprintln!("All profiles are serve-ready.");
+            eprintln!("Index is not ready to serve:");
+            for issue in &ready.issues {
+                eprintln!("  - {issue}");
             }
         }
-
-        if report.queryable_profiles == 0 {
-            anyhow::bail!(
-                "No queryable embedding profile is ready for serving. Run `colibri doctor`."
-            );
+        if !ready.queryable {
+            anyhow::bail!("Index not ready for serving. Run `colibri doctor`.");
         }
         return Ok(());
     }

@@ -5,11 +5,13 @@ use serde_json::Value;
 
 use crate::canonical_store::{ingest_envelopes, CanonicalIngestReport};
 use crate::cli::config_string;
-use crate::config::{load_config, load_config_no_bootstrap, AppConfig};
+use crate::config::{load_config, AppConfig};
 use crate::connectors::filesystem::FilesystemConnector;
 use crate::connectors::zephyr_scale::ZephyrScaleConnector;
 use crate::connectors::{Connector, ConnectorJob};
-use crate::indexer::index_library;
+use crate::embedding::OllamaEmbedder;
+use crate::indexer::{index_library, IndexOptions};
+use crate::metadata_store::MetadataStore;
 
 /// Build a concrete `Connector` from a resolved `ConnectorJob`.
 fn build_connector(job: &ConnectorJob) -> anyhow::Result<Box<dyn Connector>> {
@@ -27,9 +29,6 @@ fn build_connector(job: &ConnectorJob) -> anyhow::Result<Box<dyn Connector>> {
 
             let doc_type = config_string(&job.config, "doc_type").unwrap_or_else(|| "note".into());
 
-            let classification =
-                config_string(&job.config, "classification").unwrap_or_else(|| "internal".into());
-
             let plantuml_summaries = job
                 .config
                 .get("plantuml_summaries")
@@ -42,7 +41,6 @@ fn build_connector(job: &ConnectorJob) -> anyhow::Result<Box<dyn Connector>> {
                 include_extensions,
                 exclude_globs,
                 doc_type,
-                classification,
                 plantuml_summaries,
             }))
         }
@@ -71,9 +69,6 @@ fn build_connector(job: &ConnectorJob) -> anyhow::Result<Box<dyn Connector>> {
             let doc_type =
                 config_string(&job.config, "doc_type").unwrap_or_else(|| "test_case".into());
 
-            let classification =
-                config_string(&job.config, "classification").unwrap_or_else(|| "internal".into());
-
             let include_steps = job
                 .config
                 .get("include_steps")
@@ -93,7 +88,6 @@ fn build_connector(job: &ConnectorJob) -> anyhow::Result<Box<dyn Connector>> {
                 token,
                 folder_path,
                 doc_type,
-                classification,
                 include_steps,
                 include_links,
             }))
@@ -183,7 +177,7 @@ pub struct SyncAllOptions {
 
 /// List configured connectors.
 pub async fn list(json: bool) -> anyhow::Result<()> {
-    let config = load_config_no_bootstrap()?;
+    let config = load_config()?;
 
     if json {
         let view: Vec<_> = config
@@ -222,10 +216,20 @@ pub async fn sync_all(mut opts: SyncAllOptions) -> anyhow::Result<()> {
         opts.index = false;
     }
 
-    let app_config = if opts.dry_run {
-        load_config_no_bootstrap()?
+    let app_config = load_config()?;
+    // Dry runs read existing state (if any) without the lock; real runs hold
+    // the write lock for ingest and indexing.
+    let (_lock, store) = if opts.dry_run {
+        // A missing DB means a first run; an unusable one must be reported.
+        let store = if app_config.metadata_db_path.exists() {
+            Some(app_config.open_read()?)
+        } else {
+            None
+        };
+        (None, store)
     } else {
-        load_config()?
+        let (lock, store) = app_config.open_for_write()?;
+        (Some(lock), Some(store))
     };
 
     let mut selected = select_connectors(&app_config.connector_jobs, &opts.requested_connectors)?;
@@ -258,7 +262,7 @@ pub async fn sync_all(mut opts: SyncAllOptions) -> anyhow::Result<()> {
 
         run_count += 1;
 
-        match run_connector(&app_config, job, opts.dry_run).await {
+        match run_connector(&app_config, store.as_ref(), job, opts.dry_run).await {
             Ok(report) => {
                 succeeded += 1;
                 results.push(report);
@@ -305,16 +309,19 @@ pub async fn sync_all(mut opts: SyncAllOptions) -> anyhow::Result<()> {
                 errors: None,
                 error: None,
             });
-        } else {
-            let index_run = if opts.json {
-                index_library(&app_config, opts.index_force, |_e| {}).await
-            } else {
-                let progress = crate::cli::index::CliProgress::new();
-                index_library(&app_config, opts.index_force, |e| {
-                    progress.handle(e);
-                })
-                .await
+        } else if let Some(store) = store.as_ref() {
+            let embedder = OllamaEmbedder::from_config(&app_config);
+            let index_opts = IndexOptions {
+                force: opts.index_force,
+                ..Default::default()
             };
+            let progress = crate::cli::index::CliProgress::new();
+            let index_run = index_library(&app_config, store, &embedder, &index_opts, |e| {
+                if !opts.json {
+                    progress.handle(e);
+                }
+            })
+            .await;
 
             match index_run {
                 Ok(index_result) => {
@@ -438,6 +445,7 @@ fn select_connectors<'a>(
 /// Build, sync, and ingest a single connector.
 async fn run_connector(
     config: &AppConfig,
+    store: Option<&MetadataStore>,
     job: &ConnectorJob,
     dry_run: bool,
 ) -> anyhow::Result<SyncReport> {
@@ -445,7 +453,8 @@ async fn run_connector(
     let connector_id = connector.id().to_string();
     let envelopes = connector.sync().await?;
     let envelope_count = envelopes.len();
-    let ingest_report = ingest_envelopes(config, &envelopes, dry_run)?;
+    // The connector id is the collection name.
+    let ingest_report = ingest_envelopes(config, store, &job.id, &envelopes, dry_run)?;
 
     Ok(SyncReport {
         connector_id,

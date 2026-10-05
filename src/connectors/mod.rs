@@ -64,7 +64,6 @@ exclude_globs:
   - "**/.git/**"
 mode: incremental
 doc_type: book
-classification: internal
 "#;
         let raw: ConnectorRawConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(raw.connector_type, "filesystem");

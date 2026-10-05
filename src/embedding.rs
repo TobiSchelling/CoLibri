@@ -90,6 +90,38 @@ pub async fn embed_texts_with_progress(
     Ok(all_embeddings)
 }
 
+/// Source of embedding vectors for the indexer (Ollama, or a fake in tests).
+pub trait Embedder: Sync {
+    fn embed(
+        &self,
+        texts: &[String],
+    ) -> impl std::future::Future<Output = Result<Vec<Vec<f32>>, ColibriError>> + Send;
+}
+
+/// Embeds via Ollama's `/api/embed`.
+pub struct OllamaEmbedder {
+    pub endpoint: String,
+    pub model: String,
+}
+
+impl OllamaEmbedder {
+    pub fn from_config(config: &crate::config::AppConfig) -> Self {
+        Self {
+            endpoint: config.embedding_endpoint.clone(),
+            model: config.embedding_model.clone(),
+        }
+    }
+}
+
+impl Embedder for OllamaEmbedder {
+    fn embed(
+        &self,
+        texts: &[String],
+    ) -> impl std::future::Future<Output = Result<Vec<Vec<f32>>, ColibriError>> + Send {
+        embed_texts(texts, &self.model, &self.endpoint)
+    }
+}
+
 /// Check if Ollama is reachable by requesting the root endpoint.
 pub async fn check_ollama(base_url: &str) -> Result<bool, ColibriError> {
     let client = reqwest::Client::builder()

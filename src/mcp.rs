@@ -5,7 +5,6 @@
 
 use std::io::{BufRead, Write};
 
-use serde::Serialize;
 use serde_json::{json, Value};
 use tracing::{debug, info};
 
@@ -13,37 +12,15 @@ use crate::config::AppConfig;
 use crate::error::ColibriError;
 use crate::query::{SearchEngine, SearchMode};
 
-#[derive(Debug, Clone, Serialize)]
-pub struct StartupProfileCheck {
-    pub profile_id: String,
-    pub queryable: bool,
-    pub issues: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct StartupReport {
-    pub active_generation: String,
-    pub total_profiles: usize,
-    pub queryable_profiles: usize,
-    pub issues: Vec<String>,
-    pub profiles: Vec<StartupProfileCheck>,
-}
-
 /// Run the MCP server, reading JSON-RPC from stdin and writing to stdout.
 pub async fn run_server(config: &AppConfig) -> Result<(), ColibriError> {
     info!("Starting CoLibri MCP server...");
-    let report = startup_report(config)?;
-    eprintln!(
-        "MCP startup profile check: queryable_profiles={}/{} (active generation: {})",
-        report.queryable_profiles, report.total_profiles, report.active_generation
-    );
-    for issue in &report.issues {
-        eprintln!("  - {}", issue);
-    }
-    if report.queryable_profiles == 0 {
-        return Err(ColibriError::Mcp(
-            "No queryable embedding profile is ready for serving. Run `colibri doctor`, then rebuild/activate a ready generation.".into(),
-        ));
+    let ready = crate::serve_ready::check(config)?;
+    if !ready.queryable {
+        return Err(ColibriError::Mcp(format!(
+            "Index not ready for serving: {}. Run `colibri doctor`.",
+            ready.issues.join("; ")
+        )));
     }
 
     let engine = SearchEngine::new(config).await.map_err(|e| {
@@ -114,34 +91,6 @@ pub async fn run_server(config: &AppConfig) -> Result<(), ColibriError> {
     Ok(())
 }
 
-pub fn startup_report(config: &AppConfig) -> Result<StartupReport, ColibriError> {
-    let checks = crate::serve_ready::profile_checks(config)?;
-    let profiles = checks
-        .iter()
-        .map(|c| StartupProfileCheck {
-            profile_id: c.profile_id.clone(),
-            queryable: c.queryable,
-            issues: c.issues.clone(),
-        })
-        .collect::<Vec<_>>();
-
-    let queryable_profiles = profiles.iter().filter(|p| p.queryable).count();
-    let mut issues = Vec::new();
-    for p in &profiles {
-        if !p.queryable {
-            issues.push(format!("{}: {}", p.profile_id, p.issues.join("; ")));
-        }
-    }
-
-    Ok(StartupReport {
-        active_generation: config.active_generation.clone(),
-        total_profiles: config.embedding_profiles.len(),
-        queryable_profiles,
-        issues,
-        profiles,
-    })
-}
-
 fn handle_initialize(id: Option<Value>) -> Value {
     json!({
         "jsonrpc": "2.0",
@@ -168,7 +117,7 @@ fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
             "tools": [
                 {
                     "name": "search_library",
-                    "description": "Search across all indexed content sources including technical books, architecture documents, notes, and other reference materials. Performs hybrid search (BM25 + semantic vectors) by default. Optional filters scope by classification, document path, parsed YAML frontmatter fields (e.g. area, status, DocumentType), and update time.",
+                    "description": "Search across all indexed content sources including technical books, architecture documents, notes, and other reference materials. Performs hybrid search (BM25 + semantic vectors) by default. Optional filters scope by collection (e.g. books, vault), document path, parsed YAML frontmatter fields (e.g. area, status, DocumentType), and update time.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -188,15 +137,19 @@ fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
                                 "description": "Search mode. Use 'keyword' for exact terms, names, acronyms, or IDs (e.g. 'ATAM', 'C4 model', test case IDs). Use 'semantic' for conceptual/natural language queries. Use 'hybrid' (default) for queries mixing concepts with specific terms.",
                                 "enum": ["hybrid", "semantic", "keyword"]
                             },
+                            "collection": {
+                                "type": "string",
+                                "description": "Optional. Restrict to one collection (e.g. \"books\", \"vault\", \"zephyr-ctslab\")."
+                            },
                             "path_includes": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Optional. Restrict to docs whose canonical path contains ANY of these substrings. e.g. [\"03_MY_PROJECTS/02_HEIMDALL\"]. Combine multiple substrings to broaden inclusion."
+                                "description": "Optional. Restrict to docs whose source path (relative to its source root) contains ANY of these substrings. e.g. [\"03_MY_PROJECTS/02_HEIMDALL\"]. Combine multiple substrings to broaden inclusion."
                             },
                             "path_excludes": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Optional. Drop docs whose canonical path contains ANY of these substrings. e.g. [\"06_ARCHIVE\", \".trash\"]."
+                                "description": "Optional. Drop docs whose source path contains ANY of these substrings. e.g. [\"06_ARCHIVE\", \".trash\"]."
                             },
                             "frontmatter": {
                                 "type": "object",
@@ -242,12 +195,12 @@ fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
                             "path_includes": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Optional. Restrict to books whose canonical path contains ANY of these substrings."
+                                "description": "Optional. Restrict to books whose source path contains ANY of these substrings."
                             },
                             "path_excludes": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Optional. Drop books whose canonical path contains ANY of these substrings."
+                                "description": "Optional. Drop books whose source path contains ANY of these substrings."
                             },
                             "frontmatter": {
                                 "type": "object",
@@ -270,7 +223,7 @@ fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
                 },
                 {
                     "name": "list_books",
-                    "description": "List all indexed books with metadata. Returns title, chunk count, and file path.",
+                    "description": "List all indexed books with metadata. Returns title, authors, source path, and chunk count.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {}
@@ -278,13 +231,13 @@ fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
                 },
                 {
                     "name": "browse_topics",
-                    "description": "List all topics (tags) with document counts. Optionally filter by classification.",
+                    "description": "List all topics (tags) with document counts. Optionally limited to one collection.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "classification": {
+                            "collection": {
                                 "type": "string",
-                                "description": "Optional classification to filter by (restricted/confidential/internal/public)."
+                                "description": "Optional collection to count tags in (e.g. \"vault\")."
                             }
                         }
                     }
@@ -300,6 +253,13 @@ fn parse_filter_extras(arguments: &Value) -> Result<crate::query::SearchFilter, 
     use std::collections::BTreeMap;
 
     let mut filter = crate::query::SearchFilter::default();
+
+    if let Some(v) = arguments.get("collection") {
+        let s = v
+            .as_str()
+            .ok_or_else(|| "collection must be a string".to_string())?;
+        filter.collection = Some(s.to_string());
+    }
 
     if let Some(arr) = arguments.get("path_includes") {
         let arr = arr
@@ -406,7 +366,6 @@ async fn handle_tools_call(
                 .unwrap_or(top_k);
 
             let filter = crate::query::SearchFilter {
-                classification: None,
                 doc_type: None,
                 ..filter_extras.clone()
             };
@@ -438,7 +397,6 @@ async fn handle_tools_call(
                 .unwrap_or(top_k);
 
             let filter = crate::query::SearchFilter {
-                classification: None,
                 doc_type: Some("book".to_string()),
                 ..filter_extras.clone()
             };
@@ -469,8 +427,8 @@ async fn handle_tools_call(
             Err(e) => Err(format!("{e}")),
         },
         "browse_topics" => {
-            let classification = arguments.get("classification").and_then(|f| f.as_str());
-            match engine.browse_topics(classification).await {
+            let collection = arguments.get("collection").and_then(|f| f.as_str());
+            match engine.browse_topics(collection).await {
                 Ok(topics) => {
                     let output = json!({
                         "total_topics": topics.len(),
@@ -530,107 +488,78 @@ fn write_response(stdout: &mut impl Write, response: &Value) -> Result<(), Colib
 
 #[cfg(test)]
 mod tests {
-    use super::startup_report;
-    use crate::config::{
-        AppConfig, EmbeddingLocality, EmbeddingProfile, DEFAULT_ACTIVE_GENERATION,
-    };
-    use crate::index_meta::write_index_meta;
-    use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
+    use super::{handle_tools_list, parse_filter_extras};
+    use serde_json::{json, Value};
 
-    fn temp_root() -> PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "colibri-mcp-test-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-        ));
-        path
-    }
-
-    fn test_config(root: &Path) -> AppConfig {
-        let active_generation = DEFAULT_ACTIVE_GENERATION.to_string();
-        let mut embedding_profiles = HashMap::new();
-        embedding_profiles.insert(
-            "local_default".to_string(),
-            EmbeddingProfile {
-                id: "local_default".into(),
-                provider: "ollama".into(),
-                endpoint: "http://localhost:11434".into(),
-                model: "bge-m3".into(),
-                locality: EmbeddingLocality::Local,
-            },
-        );
-        let mut routing_policy = HashMap::new();
-        for class in ["restricted", "confidential", "internal", "public"] {
-            routing_policy.insert(class.to_string(), "local_default".to_string());
-        }
-
-        let colibri_home = root.to_path_buf();
-        let indexes_dir = colibri_home.join("indexes");
-        let lancedb_dir = indexes_dir
-            .join(&active_generation)
-            .join("local_default")
-            .join("lancedb");
-        AppConfig {
-            connector_jobs: Vec::new(),
-            colibri_home: colibri_home.clone(),
-            canonical_dir: colibri_home.join("canonical"),
-            indexes_dir,
-            state_dir: colibri_home.join("state"),
-            backups_dir: colibri_home.join("backups"),
-            logs_dir: colibri_home.join("logs"),
-            metadata_db_path: colibri_home.join("metadata.db"),
-            active_generation,
-            index_dir_name: "lancedb".into(),
-            embedding_profiles,
-            routing_policy,
-            default_embedding_profile: "local_default".into(),
-            lancedb_dir,
-            ollama_base_url: "http://localhost:11434".into(),
-            embedding_model: "bge-m3".into(),
-            top_k: 25,
-            similarity_threshold: 0.3,
-            chunk_size: 3000,
-            chunk_overlap: 200,
-        }
-    }
-
-    #[test]
-    fn startup_report_flags_missing_index_metadata() {
-        let root = temp_root();
-        let cfg = test_config(&root);
-        cfg.ensure_storage_layout().expect("bootstrap layout");
-
-        let report = startup_report(&cfg).expect("startup report");
-        assert_eq!(report.queryable_profiles, 0);
-        assert_eq!(report.total_profiles, 1);
-        assert_eq!(report.profiles.len(), 1);
-        assert!(!report.profiles[0].queryable);
-        assert!(report.profiles[0]
-            .issues
+    fn tool<'a>(list: &'a Value, name: &str) -> &'a Value {
+        list["result"]["tools"]
+            .as_array()
+            .unwrap()
             .iter()
-            .any(|s| s.contains("index metadata missing")));
+            .find(|t| t["name"] == name)
+            .unwrap_or_else(|| panic!("tool {name} missing"))
+    }
 
-        let _ = std::fs::remove_dir_all(root);
+    fn param_names(tool: &Value) -> Vec<String> {
+        let mut names: Vec<String> = tool["inputSchema"]["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        names.sort();
+        names
+    }
+
+    // AC-008.1: tool names and parameters stay compatible.
+    #[test]
+    fn tool_names_and_parameters() {
+        let list = handle_tools_list(Some(json!(1)), 10);
+        let names: Vec<&str> = list["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "search_library",
+                "search_books",
+                "list_books",
+                "browse_topics"
+            ]
+        );
+
+        let search = [
+            "collection",
+            "frontmatter",
+            "group_by_doc",
+            "limit",
+            "mode",
+            "path_excludes",
+            "path_includes",
+            "query",
+            "since",
+        ];
+        assert_eq!(param_names(tool(&list, "search_library")), search);
+        let books: Vec<&str> = search
+            .iter()
+            .copied()
+            .filter(|p| *p != "collection")
+            .collect();
+        assert_eq!(param_names(tool(&list, "search_books")), books);
+        assert!(param_names(tool(&list, "list_books")).is_empty());
+        assert_eq!(param_names(tool(&list, "browse_topics")), ["collection"]);
     }
 
     #[test]
-    fn startup_report_marks_profile_queryable_when_ready() {
-        let root = temp_root();
-        let cfg = test_config(&root);
-        cfg.ensure_storage_layout().expect("bootstrap layout");
-
-        // Write index metadata for active generation/profile.
-        std::fs::create_dir_all(&cfg.lancedb_dir).expect("create lancedb dir");
-        write_index_meta(&cfg.lancedb_dir, "bge-m3", &serde_json::Map::new())
-            .expect("write index meta");
-
-        let report = startup_report(&cfg).expect("startup report");
-        assert_eq!(report.queryable_profiles, 1);
-        assert!(report.issues.is_empty());
-        assert!(report.profiles[0].queryable);
-
-        let _ = std::fs::remove_dir_all(root);
+    fn filter_extras_parse_collection_and_reject_bad_types() {
+        let f =
+            parse_filter_extras(&json!({"collection": "books", "path_includes": ["a"]})).unwrap();
+        assert_eq!(f.collection.as_deref(), Some("books"));
+        assert_eq!(f.path_includes, ["a"]);
+        assert!(parse_filter_extras(&json!({"collection": 3})).is_err());
+        assert!(parse_filter_extras(&json!({"since": "yesterday"})).is_err());
     }
 }

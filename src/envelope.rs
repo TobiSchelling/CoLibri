@@ -48,7 +48,6 @@ pub struct EnvelopeDocument {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct EnvelopeMetadata {
     pub doc_type: String,
-    pub classification: String,
     pub tags: Option<Vec<String>>,
     pub language: Option<String>,
     pub acl_tags: Option<Vec<String>>,
@@ -82,7 +81,7 @@ pub fn content_hash(markdown: &str) -> String {
 /// Validate a deserialized `DocumentEnvelope` for structural correctness.
 ///
 /// Checks schema version, plugin_id match, required fields, content_hash
-/// format, RFC 3339 timestamp, and classification values.
+/// format and RFC 3339 timestamp.
 #[cfg(test)]
 pub fn validate(envelope: &DocumentEnvelope, expected_plugin_id: &str) -> Result<(), ColibriError> {
     if envelope.schema_version != 1 {
@@ -127,15 +126,6 @@ pub fn validate(envelope: &DocumentEnvelope, expected_plugin_id: &str) -> Result
         ));
     }
 
-    match envelope.metadata.classification.as_str() {
-        "restricted" | "confidential" | "internal" | "public" => {}
-        other => {
-            return Err(ColibriError::Config(format!(
-                "Envelope classification must be one of restricted/confidential/internal/public, got '{other}'"
-            )))
-        }
-    }
-
     Ok(())
 }
 
@@ -162,7 +152,6 @@ mod tests {
             },
             metadata: EnvelopeMetadata {
                 doc_type: "note".into(),
-                classification: "internal".into(),
                 tags: None,
                 language: None,
                 acl_tags: None,
@@ -239,23 +228,6 @@ mod tests {
         env.metadata.doc_type = "".into();
         let err = validate(&env, "test-plugin").unwrap_err().to_string();
         assert!(err.contains("doc_type"));
-    }
-
-    #[test]
-    fn validate_rejects_invalid_classification() {
-        let mut env = sample_envelope();
-        env.metadata.classification = "secret".into();
-        let err = validate(&env, "test-plugin").unwrap_err().to_string();
-        assert!(err.contains("classification"));
-    }
-
-    #[test]
-    fn validate_accepts_all_valid_classifications() {
-        for cls in &["restricted", "confidential", "internal", "public"] {
-            let mut env = sample_envelope();
-            env.metadata.classification = cls.to_string();
-            validate(&env, "test-plugin").unwrap();
-        }
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 
-use crate::config::load_config_no_bootstrap;
+use crate::config::load_config;
 use crate::query::{SearchEngine, SearchFilter, SearchMode};
 
 #[allow(clippy::too_many_arguments)]
@@ -13,7 +13,7 @@ pub async fn run(
     limit: usize,
     json: bool,
     doc_type: Option<String>,
-    classification: Option<String>,
+    collection: Option<String>,
     mode: SearchMode,
     path_includes: Vec<String>,
     path_excludes: Vec<String>,
@@ -21,7 +21,7 @@ pub async fn run(
     since: Option<String>,
     group_by_doc: bool,
 ) -> anyhow::Result<()> {
-    let config = load_config_no_bootstrap()?;
+    let config = load_config()?;
     let engine = SearchEngine::new(&config).await?;
 
     let limit = limit.min(config.top_k);
@@ -49,7 +49,7 @@ pub async fn run(
     };
 
     let filter = SearchFilter {
-        classification,
+        collection,
         doc_type,
         path_includes,
         path_excludes,
@@ -78,9 +78,7 @@ pub async fn run(
         for (i, result) in results.iter().enumerate() {
             println!("{}. {} (score: {:.4})", i + 1, result.title, result.score);
             println!("   File: {}", result.file);
-            if !result.classification.is_empty() {
-                println!("   Classification: {}", result.classification);
-            }
+            println!("   Collection: {}", result.collection);
             let preview: String = result.text.chars().take(200).collect();
             let ellipsis = if result.text.len() > 200 { "..." } else { "" };
             println!("   {preview}{ellipsis}");

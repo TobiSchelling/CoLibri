@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use crate::config::AppConfig;
 use crate::envelope::DocumentEnvelope;
 use crate::error::ColibriError;
-use crate::metadata_store::{DocumentUpsert, MetadataStore};
+use crate::metadata_store::{DocStatus, DocumentRecord, MetadataStore};
 
 /// Summary of a canonical ingest run.
 #[derive(Debug, Clone, Serialize)]
@@ -70,7 +70,8 @@ fn safe_component(input: &str, max_len: usize) -> String {
         }
     }
 
-    let trimmed = out.trim_matches('-');
+    // Dots are trimmed too, so `.` or `..` can never become a path component.
+    let trimmed = out.trim_matches(|c| c == '-' || c == '.');
     if trimmed.is_empty() {
         "unnamed".into()
     } else {
@@ -78,85 +79,85 @@ fn safe_component(input: &str, max_len: usize) -> String {
     }
 }
 
-fn canonical_rel_path(envelope: &DocumentEnvelope) -> PathBuf {
-    let classification = safe_component(&envelope.metadata.classification, 24);
-    let plugin = safe_component(&envelope.source.plugin_id, 48);
-    let connector_slug = safe_component(&envelope.source.connector_instance, 32);
-    let connector_hash = short_hash(&envelope.source.connector_instance, 12);
-    let connector = if connector_slug == "unnamed" {
-        connector_hash
-    } else {
-        format!("{connector_slug}-{connector_hash}")
-    };
-    let file_hash = short_hash(&envelope.document.doc_id, 24);
+/// Rows written per SQLite transaction during ingest.
+const COMMIT_EVERY: usize = 200;
 
-    PathBuf::from(classification)
-        .join(plugin)
-        .join(connector)
-        .join(format!("{file_hash}.md"))
+/// True when `b` only differs from `a` in its update/seen timestamps.
+fn same_except_timestamps(a: &DocumentRecord, b: &DocumentRecord) -> bool {
+    let mut b = b.clone();
+    b.updated_at.clone_from(&a.updated_at);
+    b.last_seen_at.clone_from(&a.last_seen_at);
+    *a == b
 }
 
-fn build_document_upsert(
+/// Document id within CoLibri: `<collection>:<key>`.
+pub fn doc_id_for(collection: &str, key: &str) -> String {
+    format!("{collection}:{key}")
+}
+
+/// Canonical markdown location relative to the canonical dir:
+/// `<collection>/<sha256(doc_id)[..24]>.md`.
+pub fn canonical_rel_path(collection: &str, doc_id: &str) -> PathBuf {
+    PathBuf::from(safe_component(collection, 48)).join(format!("{}.md", short_hash(doc_id, 24)))
+}
+
+fn source_path_from_uri(uri: Option<&str>) -> Option<String> {
+    uri.map(|u| u.strip_prefix("file://").unwrap_or(u).to_string())
+}
+
+fn build_record(
     envelope: &DocumentEnvelope,
+    collection: &str,
+    doc_id: &str,
     markdown_rel_path: &str,
-    existing_created_at: Option<String>,
-) -> Result<DocumentUpsert, ColibriError> {
-    let tags_json = serde_json::to_string(&envelope.metadata.tags.clone().unwrap_or_default())?;
-    let acl_tags_json =
-        serde_json::to_string(&envelope.metadata.acl_tags.clone().unwrap_or_default())?;
-    let frontmatter_json = match &envelope.metadata.frontmatter {
+    existing: Option<&DocumentRecord>,
+) -> Result<DocumentRecord, ColibriError> {
+    let mut doc = match existing {
+        // Keep identity, creation time and index state of the existing row.
+        Some(prev) => prev.clone(),
+        None => DocumentRecord::new(doc_id, collection, &envelope.source.external_id),
+    };
+    doc.collection = collection.to_string();
+    doc.key = envelope.source.external_id.clone();
+    doc.source_path = source_path_from_uri(envelope.source.uri.as_deref());
+    doc.title = envelope.document.title.clone();
+    doc.tags_json = serde_json::to_string(&envelope.metadata.tags.clone().unwrap_or_default())?;
+    doc.language = envelope.metadata.language.clone();
+    doc.frontmatter_json = match &envelope.metadata.frontmatter {
         Some(map) => serde_json::to_string(map)?,
         None => "{}".to_string(),
     };
-
-    Ok(DocumentUpsert {
-        doc_id: envelope.document.doc_id.clone(),
-        plugin_id: envelope.source.plugin_id.clone(),
-        connector_instance: envelope.source.connector_instance.clone(),
-        external_id: envelope.source.external_id.clone(),
-        title: envelope.document.title.clone(),
-        content_hash: envelope.document.content_hash.clone(),
-        source_updated_at: envelope.document.source_updated_at.clone(),
-        deleted: envelope.document.deleted,
-        classification: envelope.metadata.classification.clone(),
-        doc_type: envelope.metadata.doc_type.clone(),
-        markdown_path: markdown_rel_path.to_string(),
-        uri: envelope.source.uri.clone(),
-        tags_json,
-        acl_tags_json,
-        language: envelope.metadata.language.clone(),
-        created_at: existing_created_at,
-        frontmatter_json,
-    })
+    doc.doc_type = envelope.metadata.doc_type.clone();
+    doc.source_updated_at = Some(envelope.document.source_updated_at.clone());
+    doc.content_hash = envelope.document.content_hash.clone();
+    doc.markdown_path = markdown_rel_path.to_string();
+    doc.updated_at = chrono::Utc::now().to_rfc3339();
+    doc.last_seen_at = Some(doc.updated_at.clone());
+    if envelope.document.deleted {
+        doc.status = DocStatus::Removed;
+        doc.removed_reason = Some("source_deleted".into());
+    } else {
+        doc.status = DocStatus::Active;
+        doc.removed_reason = None;
+    }
+    Ok(doc)
 }
 
-/// Persist validated connector envelopes into canonical storage and metadata DB.
+/// Persist connector envelopes into the canonical store and metadata DB as
+/// documents of `collection`. With `dry_run`, only report what would change;
+/// `store` may then be `None` when no data exists yet.
 pub fn ingest_envelopes(
     config: &AppConfig,
+    store: Option<&MetadataStore>,
+    collection: &str,
     envelopes: &[DocumentEnvelope],
     dry_run: bool,
 ) -> Result<CanonicalIngestReport, ColibriError> {
-    if !dry_run {
-        config.ensure_storage_layout()?;
-    }
-
-    let store = if config.metadata_db_path.exists() {
-        match MetadataStore::open(&config.metadata_db_path) {
-            Ok(s) => Some(s),
-            Err(_) if dry_run => None,
-            Err(e) => return Err(e),
-        }
-    } else {
-        None
-    };
     if !dry_run && store.is_none() {
-        return Err(ColibriError::Config(format!(
-            "Metadata DB missing after bootstrap: {}",
-            config.metadata_db_path.display()
-        )));
+        return Err(ColibriError::Config(
+            "ingest needs a writable metadata DB".into(),
+        ));
     }
-
-    let mut seen_doc_ids = HashSet::new();
 
     let mut report = CanonicalIngestReport {
         processed: envelopes.len(),
@@ -170,24 +171,24 @@ pub fn ingest_envelopes(
         metadata_db_path: config.metadata_db_path.display().to_string(),
     };
 
+    let writable = if dry_run { None } else { store };
+    let mut tx = writable.map(MetadataStore::begin).transpose()?;
+    let mut pending_writes = 0usize;
+    let mut seen_doc_ids = HashSet::new();
+
     for envelope in envelopes {
-        if !seen_doc_ids.insert(envelope.document.doc_id.clone()) {
+        let doc_id = doc_id_for(collection, &envelope.source.external_id);
+        if !seen_doc_ids.insert(doc_id.clone()) {
             report.duplicate_doc_ids += 1;
         }
 
-        let existing = store
-            .as_ref()
-            .map(|s| s.get_document_state(&envelope.document.doc_id))
-            .transpose()?
-            .flatten();
-        let existing_hash = existing.as_ref().map(|x| x.content_hash.clone());
-        let existing_created_at = existing.as_ref().and_then(|x| x.created_at.clone());
-
-        let rel_path = existing
-            .as_ref()
-            .map(|x| x.markdown_path.clone())
-            .unwrap_or_else(|| canonical_rel_path(envelope).to_string_lossy().to_string());
-
+        let existing = match store {
+            Some(s) => s.get_document(&doc_id)?,
+            None => None,
+        };
+        let rel_path = canonical_rel_path(collection, &doc_id)
+            .to_string_lossy()
+            .to_string();
         let abs_path = config.canonical_dir.join(&rel_path);
 
         if envelope.document.deleted {
@@ -198,85 +199,76 @@ pub fn ingest_envelopes(
                     std::fs::remove_file(&abs_path)?;
                 }
             }
-
-            if !dry_run {
-                if let Some(store) = &store {
-                    let row = build_document_upsert(envelope, &rel_path, existing_created_at)?;
-                    store.upsert_document(&row)?;
-                    store.delete_document_blob(&envelope.document.doc_id)?;
-                }
-            }
-            continue;
-        }
-
-        let unchanged = existing_hash
-            .as_deref()
-            .is_some_and(|hash| hash == envelope.document.content_hash)
-            && abs_path.exists();
-
-        if unchanged {
-            report.unchanged += 1;
         } else {
-            report.written += 1;
-            if !dry_run {
-                if let Some(parent) = abs_path.parent() {
-                    std::fs::create_dir_all(parent)?;
+            let unchanged = existing
+                .as_ref()
+                .is_some_and(|prev| prev.content_hash == envelope.document.content_hash)
+                && abs_path.exists();
+            if unchanged {
+                report.unchanged += 1;
+            } else {
+                report.written += 1;
+                if !dry_run {
+                    if let Some(parent) = abs_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&abs_path, &envelope.document.markdown)?;
                 }
-                std::fs::write(&abs_path, &envelope.document.markdown)?;
             }
         }
 
-        if !dry_run {
-            if let Some(store) = &store {
-                let row = build_document_upsert(envelope, &rel_path, existing_created_at)?;
-                store.upsert_document(&row)?;
-                store.upsert_document_blob(
-                    &envelope.document.doc_id,
-                    &rel_path,
-                    envelope.document.markdown.len() as u64,
-                    &envelope.document.content_hash,
-                )?;
+        if let Some(s) = writable {
+            let record = build_record(envelope, collection, &doc_id, &rel_path, existing.as_ref())?;
+            if existing
+                .as_ref()
+                .is_some_and(|prev| same_except_timestamps(prev, &record))
+            {
+                continue;
+            }
+            s.upsert_document(&record)?;
+            // Commit regularly so readers never wait long on the write lock.
+            pending_writes += 1;
+            if pending_writes == COMMIT_EVERY {
+                if let Some(t) = tx.take() {
+                    t.commit()?;
+                }
+                tx = Some(s.begin()?);
+                pending_writes = 0;
             }
         }
     }
 
-    if !dry_run {
-        if let Some(store) = &store {
-            let _ = store.document_count()?;
-            store.touch_updated_at()?;
-        }
+    if let Some(tx) = tx {
+        tx.commit()?;
     }
-
     Ok(report)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_rel_path, safe_component};
-    use crate::envelope::{DocumentEnvelope, EnvelopeDocument, EnvelopeMetadata, EnvelopeSource};
+    use super::*;
+    use crate::envelope::{EnvelopeDocument, EnvelopeMetadata, EnvelopeSource};
 
-    fn sample_envelope() -> DocumentEnvelope {
+    pub(crate) fn sample_envelope(external_id: &str, markdown: &str) -> DocumentEnvelope {
         DocumentEnvelope {
             schema_version: 1,
             source: EnvelopeSource {
                 plugin_id: "filesystem_documents".into(),
                 connector_instance: "/tmp/My Folder".into(),
-                external_id: "docs/readme.md".into(),
-                uri: None,
+                external_id: external_id.into(),
+                uri: Some(format!("/tmp/My Folder/{external_id}")),
             },
             document: EnvelopeDocument {
-                doc_id: "filesystem_documents:docs/readme.md".into(),
+                doc_id: format!("filesystem_documents:{external_id}"),
                 title: "Readme".into(),
-                markdown: "# Hi".into(),
-                content_hash:
-                    "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+                markdown: markdown.into(),
+                content_hash: crate::envelope::content_hash(markdown),
                 source_updated_at: "2026-02-18T08:00:00Z".into(),
                 deleted: false,
             },
             metadata: EnvelopeMetadata {
                 doc_type: "note".into(),
-                classification: "internal".into(),
-                tags: None,
+                tags: Some(vec!["a".into()]),
                 language: None,
                 acl_tags: None,
                 frontmatter: None,
@@ -288,13 +280,57 @@ mod tests {
     fn safe_component_normalizes_input() {
         assert_eq!(safe_component(" My Folder  / Docs ", 64), "my-folder-docs");
         assert_eq!(safe_component("___", 64), "___");
+        assert_eq!(safe_component("..", 64), "unnamed");
     }
 
     #[test]
-    fn canonical_path_is_stable_and_scoped() {
-        let path = canonical_rel_path(&sample_envelope());
+    fn canonical_path_is_scoped_by_collection() {
+        let path = canonical_rel_path("vault", "vault:docs/readme.md");
         let path_str = path.to_string_lossy();
-        assert!(path_str.starts_with("internal/filesystem_documents/"));
+        assert!(path_str.starts_with("vault/"));
         assert!(path_str.ends_with(".md"));
+        assert_eq!(path, canonical_rel_path("vault", "vault:docs/readme.md"));
+    }
+
+    #[test]
+    fn ingest_writes_documents_and_detects_unchanged() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = AppConfig::for_test(dir.path());
+        let (_lock, store) = config.open_for_write().unwrap();
+        let envs = vec![sample_envelope("docs/readme.md", "# Hi")];
+
+        let first = ingest_envelopes(&config, Some(&store), "vault", &envs, false).unwrap();
+        assert_eq!((first.written, first.unchanged), (1, 0));
+        let doc = store.get_document("vault:docs/readme.md").unwrap().unwrap();
+        assert_eq!(doc.key, "docs/readme.md");
+        assert_eq!(
+            doc.source_path.as_deref(),
+            Some("/tmp/My Folder/docs/readme.md")
+        );
+        assert_eq!(doc.tags_json, r#"["a"]"#);
+        assert!(config.canonical_dir.join(&doc.markdown_path).exists());
+
+        store
+            .mark_indexed(&doc.doc_id, &doc.content_hash, 3)
+            .unwrap();
+        let second = ingest_envelopes(&config, Some(&store), "vault", &envs, false).unwrap();
+        assert_eq!((second.written, second.unchanged), (0, 1));
+        let after = store.get_document("vault:docs/readme.md").unwrap().unwrap();
+        assert!(after.is_index_current(), "re-ingest keeps index state");
+        assert_eq!(
+            after.updated_at, doc.updated_at,
+            "unchanged rows are not rewritten"
+        );
+    }
+
+    #[test]
+    fn dry_run_writes_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = AppConfig::for_test(dir.path());
+        let envs = vec![sample_envelope("a.md", "# A")];
+        let report = ingest_envelopes(&config, None, "vault", &envs, true).unwrap();
+        assert_eq!(report.written, 1);
+        assert!(!config.canonical_dir.exists());
+        assert!(!config.metadata_db_path.exists());
     }
 }

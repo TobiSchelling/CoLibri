@@ -6,7 +6,7 @@
 > **Repo Type:** code
 > **Spec Directory:** specs/files-first-ingestion/
 > **Design Doc Location:** specs/files-first-ingestion/design.md (approved plan, phases P1-P5)
-> **Status:** Approved
+> **Status:** In Progress (P1+P2 verified 2026-10-06)
 
 ---
 
@@ -398,14 +398,14 @@ The following deliverables are committed for this feature:
 
 | REQ | Design Section | Plan Task | Test / Verification |
 |-----|---------------|-----------|---------------------|
-| REQ-001 | P1 | | |
-| REQ-002 | P0, P1 | | |
-| REQ-003 | P1 | | |
-| REQ-004 | P1 | | |
-| REQ-005 | P2 | | |
-| REQ-006 | P2 | | |
-| REQ-007 | P2 | | |
-| REQ-008 | P2 | | |
+| REQ-001 | P1 | plan-p1-p2 #2 | metadata_store::tests::{non_sqlite_file_is_rejected_and_untouched, old_schema_is_rejected_and_untouched}; cli_storage::pre_v7_metadata_db_is_reported_and_left_unchanged |
+| REQ-002 | P0, P1 | #9 | query::tests::read_paths_filter_by_collection_and_leave_data_dir_untouched; cli_storage round trip |
+| REQ-003 | P1 | #3 | lock::tests::second_writer_fails_fast_with_holder_pid; metadata_store::tests::read_succeeds_while_write_transaction_is_open |
+| REQ-004 | P1 | #8 | cli::reset::tests; cli_storage reset steps |
+| REQ-005 | P2 | #6 | indexer::tests::interrupted_run_resumes_with_remaining_documents |
+| REQ-006 | P2 | #6 | indexer::tests::orphan_chunks_are_purged (AC-006.2 in P3) |
+| REQ-007 | P2 | #4, #7, #10 | query::tests::filter_collection_and_doc_type; grep gate |
+| REQ-008 | P2 | #7 | mcp::tests::tool_names_and_parameters; query e2e list_books shape |
 | REQ-009 | P3 | | |
 | REQ-010 | P3 | | |
 | REQ-011 | P3 | | |

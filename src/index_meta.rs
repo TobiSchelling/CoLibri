@@ -33,7 +33,7 @@ pub fn write_index_meta(
     embedding_model: &str,
     extra: &serde_json::Map<String, Value>,
 ) -> Result<(), ColibriError> {
-    let existing = read_index_meta(data_dir)?;
+    let existing = read_index_meta(data_dir).unwrap_or_default();
 
     let created_at = existing
         .get("created_at")
@@ -58,8 +58,11 @@ pub fn write_index_meta(
         meta.insert(k.clone(), v.clone());
     }
 
+    // Write-then-rename so a crash never leaves a truncated file behind.
     let meta_path = data_dir.join("index_meta.json");
+    let tmp_path = data_dir.join("index_meta.json.tmp");
     let json = serde_json::to_string_pretty(&Value::Object(meta))?;
-    std::fs::write(meta_path, json)?;
+    std::fs::write(&tmp_path, json)?;
+    std::fs::rename(tmp_path, meta_path)?;
     Ok(())
 }

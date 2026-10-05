@@ -37,4 +37,7 @@ pub enum ColibriError {
 
     #[error("LanceDB error: {0}")]
     Lance(#[from] lancedb::Error),
+
+    #[error("Metadata DB error: {0}")]
+    Database(#[from] rusqlite::Error),
 }

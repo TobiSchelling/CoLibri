@@ -19,7 +19,6 @@ pub struct BootstrapOptions {
     pub config_path: Option<PathBuf>,
     pub data_dir: Option<PathBuf>,
     pub init_path: Option<PathBuf>,
-    pub classification: String,
     pub non_interactive: bool,
     pub json: bool,
 }
@@ -29,7 +28,6 @@ struct BootstrapReport {
     config_path: String,
     wrote_config: bool,
     data_dir: String,
-    sqlite3_ok: bool,
     ollama_installed: bool,
     ollama_reachable: bool,
     ollama_model: String,
@@ -43,9 +41,9 @@ struct YamlDataConfig {
 }
 
 #[derive(Debug, Serialize)]
-struct YamlOllamaConfig {
-    base_url: String,
-    embedding_model: String,
+struct YamlEmbeddingConfig {
+    endpoint: String,
+    model: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,13 +54,12 @@ struct YamlConnectorEntry {
     enabled: bool,
     root_path: String,
     include_extensions: Vec<String>,
-    classification: String,
 }
 
 #[derive(Debug, Serialize)]
 struct YamlConfig {
     data: YamlDataConfig,
-    ollama: YamlOllamaConfig,
+    embedding: YamlEmbeddingConfig,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     connectors: Vec<YamlConnectorEntry>,
 }
@@ -155,7 +152,6 @@ fn write_config(
     config_path: &Path,
     data_dir: &Path,
     init_path: Option<&Path>,
-    classification: &str,
 ) -> anyhow::Result<bool> {
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -168,7 +164,6 @@ fn write_config(
             enabled: true,
             root_path: path.display().to_string(),
             include_extensions: vec![".md".into(), ".markdown".into()],
-            classification: classification.to_string(),
         }]
     } else {
         Vec::new()
@@ -178,9 +173,9 @@ fn write_config(
         data: YamlDataConfig {
             directory: data_dir.display().to_string(),
         },
-        ollama: YamlOllamaConfig {
-            base_url: DEFAULT_OLLAMA_BASE_URL.to_string(),
-            embedding_model: DEFAULT_OLLAMA_MODEL.to_string(),
+        embedding: YamlEmbeddingConfig {
+            endpoint: DEFAULT_OLLAMA_BASE_URL.to_string(),
+            model: DEFAULT_OLLAMA_MODEL.to_string(),
         },
         connectors,
     };
@@ -236,28 +231,17 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
     let mut data_dir = opts.data_dir.unwrap_or_else(default_data_dir);
 
     let wrote_config = if opts.non_interactive {
-        write_config(
-            &config_path,
-            &data_dir,
-            opts.init_path.as_deref(),
-            &opts.classification,
-        )?
+        write_config(&config_path, &data_dir, opts.init_path.as_deref())?
     } else {
         let cfg_default = config_path.display().to_string();
         config_path = PathBuf::from(prompt_line("Config path", &cfg_default)?);
         let dir_default = data_dir.display().to_string();
         data_dir = PathBuf::from(prompt_line("Data directory (COLIBRI_HOME)", &dir_default)?);
 
-        write_config(
-            &config_path,
-            &data_dir,
-            opts.init_path.as_deref(),
-            &opts.classification,
-        )?
+        write_config(&config_path, &data_dir, opts.init_path.as_deref())?
     };
 
     // Dependency checks
-    let sqlite3_ok = crate::metadata_store::require_sqlite3().is_ok();
     let ollama_installed = tool_on_path("ollama");
     let ollama_reachable = check_ollama(DEFAULT_OLLAMA_BASE_URL).await.unwrap_or(false);
     let model = DEFAULT_OLLAMA_MODEL.to_string();
@@ -267,9 +251,6 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
         .flatten();
 
     let mut suggested: BTreeSet<String> = BTreeSet::new();
-    if !sqlite3_ok {
-        suggested.insert("Install sqlite3 (on macOS: brew install sqlite)".into());
-    }
     if !ollama_installed {
         suggested.insert("brew install ollama".into());
     }
@@ -285,11 +266,6 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
         let _prev = std::env::var("COLIBRI_CONFIG_PATH").ok();
         std::env::set_var("COLIBRI_CONFIG_PATH", &config_path);
         let cfg = load_config().map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-        // Initialize storage metadata when sqlite3 is available.
-        if sqlite3_ok {
-            let _ = cfg.apply_migrations();
-        }
 
         // Check external tools required by connector extensions.
         for tool_msg in check_connector_tools(&cfg.connector_jobs) {
@@ -307,7 +283,6 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
         config_path: config_path.display().to_string(),
         wrote_config,
         data_dir: data_dir.display().to_string(),
-        sqlite3_ok,
         ollama_installed,
         ollama_reachable,
         ollama_model: model,
@@ -327,10 +302,6 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
     eprintln!("Wrote config: {}", report.wrote_config);
 
     eprintln!("\nCore dependencies:");
-    eprintln!(
-        "  sqlite3: {}",
-        if report.sqlite3_ok { "OK" } else { "MISSING" }
-    );
     eprintln!(
         "  ollama: {}",
         if report.ollama_installed {
@@ -412,7 +383,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.yaml");
         let data_dir = dir.path().join("data");
-        write_config(&config_path, &data_dir, None, "internal").unwrap();
+        write_config(&config_path, &data_dir, None).unwrap();
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(!content.contains("connectors"));
     }
@@ -423,11 +394,11 @@ mod tests {
         let config_path = dir.path().join("config.yaml");
         let data_dir = dir.path().join("data");
         let init_path = dir.path().join("docs");
-        write_config(&config_path, &data_dir, Some(&init_path), "internal").unwrap();
+        write_config(&config_path, &data_dir, Some(&init_path)).unwrap();
         let content = std::fs::read_to_string(&config_path).unwrap();
         assert!(content.contains("connectors"));
         assert!(content.contains("filesystem"));
         assert!(content.contains(".md"));
-        assert!(content.contains("internal"));
+        assert!(content.contains("embedding"));
     }
 }

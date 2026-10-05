@@ -6,8 +6,7 @@ pub mod doctor;
 pub mod import;
 pub mod index;
 pub mod instructions;
-pub mod migrate;
-pub mod profiles;
+pub mod reset;
 pub mod search;
 pub mod serve;
 pub mod sync;
@@ -54,10 +53,6 @@ pub enum Commands {
         #[arg(long = "init-path", alias = "init-filesystem-markdown")]
         init_path: Option<PathBuf>,
 
-        /// Classification for the initialized job (default: internal)
-        #[arg(long, default_value = "internal")]
-        classification: String,
-
         /// Do not prompt; require flags for paths/init and only print actions
         #[arg(long)]
         non_interactive: bool,
@@ -78,22 +73,11 @@ pub enum Commands {
         json: bool,
     },
 
-    /// Inspect or apply storage migrations
-    Migrate {
-        /// Show pending/applied migrations without changing files
+    /// Delete all CoLibri data (metadata DB, canonical store, index) to rebuild from sources
+    Reset {
+        /// Skip the confirmation prompt
         #[arg(long)]
-        dry_run: bool,
-
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Show embedding profiles, routing policy, and index readiness
-    Profiles {
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
+        yes: bool,
     },
 
     /// Manage native connectors
@@ -135,7 +119,7 @@ pub enum Commands {
 
     /// Index markdown corpus into LanceDB
     Index {
-        /// Force full re-index regardless of mode
+        /// Drop the index and re-embed everything
         #[arg(long)]
         force: bool,
     },
@@ -170,9 +154,9 @@ pub enum Commands {
         #[arg(long)]
         doc_type: Option<String>,
 
-        /// Filter by classification
+        /// Restrict to one collection (connector id, e.g. `vault`, or `books`)
         #[arg(long)]
-        classification: Option<String>,
+        collection: Option<String>,
 
         /// Search mode: hybrid (default), semantic, or keyword
         #[arg(long, value_enum, default_value_t = SearchMode::Hybrid)]
