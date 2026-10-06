@@ -162,6 +162,16 @@ Unknown keys inside `mirrors`, `prune` and `library` are errors, so typos do not
 
 The older `ollama: {base_url, embedding_model}` section is still read when `embedding:` is absent. `OLLAMA_BASE_URL` and `COLIBRI_EMBEDDING_MODEL` override both. Changing the model triggers a full re-embed on the next index run.
 
+## Upgrading from 0.14
+
+0.15 changes how content gets in and how data is stored, so the data directory is rebuilt once:
+
+1. Config: move `type: filesystem` connectors to `mirrors:` (`root_path` → `path`, `include_extensions` → `include` globs such as `"**/*.md"`, `exclude_globs` → `exclude`); move book folders to `library: {roots: [{path: ...}]}`; `classification:` keys and `embeddings:`/`routing:` sections are gone (`ollama:` still works, `embedding:` is the new name). Zephyr connectors stay under `connectors:` and run with `colibri sync`.
+2. `colibri doctor` reports the old metadata DB as unusable and leaves it untouched.
+3. Stop running `colibri serve` processes, then `colibri reset` (or move `~/.local/share/colibri` aside), `colibri update`, and `colibri sync` for Zephyr.
+
+The first `update` converts every PDF/EPUB once (docling needs roughly 0.4 s per PDF page) and embeds everything; later runs only touch what changed.
+
 ## Data Directory
 
 Runtime data is stored under `COLIBRI_HOME` (default: `~/.local/share/colibri/`):
