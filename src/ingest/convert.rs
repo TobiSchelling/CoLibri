@@ -1,8 +1,72 @@
 //! Conversion of non-markdown sources (PDF, EPUB, DOCX, PPTX) to markdown
 //! via external tools.
 
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+/// docling needs about 0.4 s per page; 20 minutes covers ~2,500 pages and
+/// stops a hung run (seen in practice: a deadlocked docling at 0% CPU).
+const DOCLING_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+/// pandoc and markitdown finish in seconds.
+const TEXT_TOOL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// Run a command, killing it after `timeout`. Output pipes are drained on
+/// threads so a chatty tool cannot block on a full pipe.
+fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
+    let name = cmd.get_program().to_string_lossy().to_string();
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to run {name}: {e}"))?;
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                // Reader threads are left to finish on their own: a helper
+                // process of the tool may still hold the pipes open.
+                return Err(format!(
+                    "{name} did not finish within {} minutes and was stopped",
+                    timeout.as_secs() / 60
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(200)),
+            Err(e) => return Err(format!("{name}: {e}")),
+        }
+    };
+    Ok(Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
 
 /// Describes how to convert a file extension to Markdown.
 enum ConversionPipeline {
@@ -46,8 +110,8 @@ pub fn convert_to_markdown(ext: &str, file_path: &Path) -> Result<String, String
 /// Convert a PDF to Markdown using `docling`.
 fn convert_pdf(file_path: &Path) -> Result<String, String> {
     let tmp = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
-    let output = Command::new("docling")
-        .arg(file_path)
+    let mut cmd = Command::new("docling");
+    cmd.arg(file_path)
         .args([
             "--to",
             "md",
@@ -55,10 +119,8 @@ fn convert_pdf(file_path: &Path) -> Result<String, String> {
             "placeholder",
             "--output",
         ])
-        .arg(tmp.path())
-        .stdout(std::process::Stdio::null())
-        .output()
-        .map_err(|e| format!("Failed to run docling: {e}"))?;
+        .arg(tmp.path());
+    let output = run_with_timeout(cmd, DOCLING_TIMEOUT)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -85,11 +147,10 @@ fn convert_pdf(file_path: &Path) -> Result<String, String> {
 
 /// Convert a file to Markdown using `pandoc`.
 fn convert_with_pandoc(file_path: &Path, from_format: &str) -> Result<String, String> {
-    let output = Command::new("pandoc")
-        .args(["-f", from_format, "-t", "gfm", "--wrap=none"])
-        .arg(file_path)
-        .output()
-        .map_err(|e| format!("Failed to run pandoc: {e}"))?;
+    let mut cmd = Command::new("pandoc");
+    cmd.args(["-f", from_format, "-t", "gfm", "--wrap=none"])
+        .arg(file_path);
+    let output = run_with_timeout(cmd, TEXT_TOOL_TIMEOUT)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -101,10 +162,9 @@ fn convert_with_pandoc(file_path: &Path, from_format: &str) -> Result<String, St
 /// Convert a PPTX to Markdown, trying `markitdown` first, then pandoc.
 fn convert_pptx(file_path: &Path) -> Result<String, String> {
     if which_exists("markitdown") {
-        let output = Command::new("markitdown")
-            .arg(file_path)
-            .output()
-            .map_err(|e| format!("Failed to run markitdown: {e}"))?;
+        let mut cmd = Command::new("markitdown");
+        cmd.arg(file_path);
+        let output = run_with_timeout(cmd, TEXT_TOOL_TIMEOUT)?;
 
         if output.status.success() {
             let text = String::from_utf8(output.stdout)
@@ -314,6 +374,23 @@ pub(crate) mod fakes {
 mod tests {
     use super::fakes::CountingConverter;
     use super::*;
+
+    #[test]
+    fn hung_tools_are_stopped_at_the_timeout() {
+        let started = Instant::now();
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let err = run_with_timeout(cmd, Duration::from_millis(500)).unwrap_err();
+        assert!(err.contains("did not finish"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "yes colibri | head -c 200000; echo done >&2"]);
+        let out = run_with_timeout(cmd, Duration::from_secs(10)).unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout.len(), 200_000, "large output is drained");
+        assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), "done");
+    }
 
     #[test]
     fn identical_bytes_are_converted_once() {
