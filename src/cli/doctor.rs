@@ -2,7 +2,6 @@
 
 use serde::Serialize;
 
-use super::tool_on_path;
 use crate::config::{self, load_config};
 use crate::connectors::ConnectorJob;
 use crate::embedding::check_ollama;
@@ -34,44 +33,14 @@ struct DoctorReport {
     index_issues: Vec<String>,
     connectors_configured: Option<usize>,
     connector_details: Vec<DoctorConnectorStatus>,
+    mirror_details: Vec<DoctorConnectorStatus>,
 }
 
 /// Diagnose a single connector, returning per-connector status and issues.
 fn diagnose_connector(job: &ConnectorJob) -> DoctorConnectorStatus {
     let mut issues = Vec::new();
 
-    if job.connector_type == "filesystem" {
-        // Check root_path exists.
-        if let Some(raw_path) = super::config_string(&job.config, "root_path") {
-            let expanded = super::connectors::expand_tilde(&raw_path);
-            if !std::path::Path::new(&expanded).exists() {
-                issues.push(format!("root_path {raw_path} does not exist"));
-            }
-        } else {
-            issues.push("root_path is not configured".into());
-        }
-
-        // Check required tools based on extensions.
-        let exts: Vec<String> =
-            super::connectors::parse_string_array(&job.config, "include_extensions")
-                .unwrap_or_default()
-                .into_iter()
-                .map(|s| s.to_lowercase())
-                .collect();
-
-        if exts.iter().any(|e| e == ".pdf") && !tool_on_path("docling") {
-            issues.push("docling not found (needed for .pdf)".into());
-        }
-        if exts.iter().any(|e| e == ".docx" || e == ".epub") && !tool_on_path("pandoc") {
-            issues.push("pandoc not found (needed for .docx/.epub)".into());
-        }
-        if exts.iter().any(|e| e == ".pptx")
-            && !tool_on_path("markitdown")
-            && !tool_on_path("pandoc")
-        {
-            issues.push("markitdown or pandoc not found (needed for .pptx)".into());
-        }
-    } else if job.connector_type == "zephyr_scale" {
+    if job.connector_type == "zephyr_scale" {
         // Check project_key is configured.
         if super::config_string(&job.config, "project_key").is_none() {
             issues.push("project_key is not configured".into());
@@ -90,6 +59,10 @@ fn diagnose_connector(job: &ConnectorJob) -> DoctorConnectorStatus {
                 "no API token — set `token` in config or env var {token_env}"
             ));
         }
+    }
+
+    if job.connector_type == "filesystem" {
+        issues.push("filesystem connectors were replaced by `mirrors:`; move this entry".into());
     }
 
     let status = if issues.is_empty() {
@@ -170,6 +143,38 @@ pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
         }
     }
     report.connector_details = details;
+
+    // 2b. Mirrors
+    let mirrors: Vec<DoctorConnectorStatus> = config
+        .mirrors
+        .iter()
+        .map(|m| {
+            let mut issues = super::missing_tools(&m.include);
+            if !m.path.is_dir() {
+                issues.insert(0, format!("folder {} does not exist", m.path.display()));
+            }
+            DoctorConnectorStatus {
+                id: m.name.clone(),
+                connector_type: "mirror".into(),
+                enabled: true,
+                status: if issues.is_empty() { "ok" } else { "warn" }.into(),
+                issues,
+            }
+        })
+        .collect();
+    let warn = mirrors.iter().any(|d| d.status == "warn");
+    say(format!(
+        "\nMirrors ... {} ({} configured)",
+        if warn { "WARN" } else { "OK" },
+        mirrors.len()
+    ));
+    for m in &mirrors {
+        say(format!("  - {} {}", m.id, m.status.to_uppercase()));
+        for issue in &m.issues {
+            say(format!("    - {issue}"));
+        }
+    }
+    report.mirror_details = mirrors;
 
     // 3. Metadata DB (read-only)
     match config.open_read().and_then(|store| store.document_count()) {

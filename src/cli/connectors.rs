@@ -1,12 +1,10 @@
 //! `colibri connectors` — native connector management and sync.
 
 use serde::Serialize;
-use serde_json::Value;
 
 use crate::canonical_store::{ingest_envelopes, CanonicalIngestReport};
 use crate::cli::config_string;
 use crate::config::{load_config, AppConfig};
-use crate::connectors::filesystem::FilesystemConnector;
 use crate::connectors::zephyr_scale::ZephyrScaleConnector;
 use crate::connectors::{Connector, ConnectorJob};
 use crate::embedding::OllamaEmbedder;
@@ -16,34 +14,11 @@ use crate::metadata_store::MetadataStore;
 /// Build a concrete `Connector` from a resolved `ConnectorJob`.
 fn build_connector(job: &ConnectorJob) -> anyhow::Result<Box<dyn Connector>> {
     match job.connector_type.as_str() {
-        "filesystem" => {
-            let root_path = config_string(&job.config, "root_path")
-                .ok_or_else(|| anyhow::anyhow!("connector '{}': missing root_path", job.id))?;
-            let root_path = expand_tilde(&root_path);
-
-            let include_extensions = parse_string_array(&job.config, "include_extensions")
-                .unwrap_or_else(|| vec![".md".into(), ".markdown".into()]);
-
-            let exclude_globs =
-                parse_string_array(&job.config, "exclude_globs").unwrap_or_default();
-
-            let doc_type = config_string(&job.config, "doc_type").unwrap_or_else(|| "note".into());
-
-            let plantuml_summaries = job
-                .config
-                .get("plantuml_summaries")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-
-            Ok(Box::new(FilesystemConnector {
-                id: job.id.clone(),
-                root_path: root_path.into(),
-                include_extensions,
-                exclude_globs,
-                doc_type,
-                plantuml_summaries,
-            }))
-        }
+        "filesystem" => anyhow::bail!(
+            "connector '{}': filesystem connectors were replaced by `mirrors:` in config.yaml \
+             (name, path, include, exclude, doc_type); then run `colibri update`",
+            job.id
+        ),
         "zephyr_scale" => {
             let project_key = config_string(&job.config, "project_key")
                 .ok_or_else(|| anyhow::anyhow!("connector '{}': missing project_key", job.id))?;
@@ -94,29 +69,6 @@ fn build_connector(job: &ConnectorJob) -> anyhow::Result<Box<dyn Connector>> {
         }
         other => anyhow::bail!("connector '{}': unknown connector type '{}'", job.id, other),
     }
-}
-
-/// Expand leading `~/` to the user's home directory.
-pub(crate) fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return format!("{}/{rest}", home.display());
-        }
-    } else if path == "~" {
-        if let Some(home) = dirs::home_dir() {
-            return home.display().to_string();
-        }
-    }
-    path.to_string()
-}
-
-/// Parse an optional JSON array of strings from a config value.
-pub(crate) fn parse_string_array(config: &Value, key: &str) -> Option<Vec<String>> {
-    config.get(key).and_then(|v| v.as_array()).map(|arr| {
-        arr.iter()
-            .filter_map(|item| item.as_str().map(|s| s.to_string()))
-            .collect()
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -471,32 +423,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn expand_tilde_home_prefix() {
-        let expanded = expand_tilde("~/Documents");
-        assert!(!expanded.starts_with('~'));
-        assert!(expanded.ends_with("/Documents"));
-    }
-
-    #[test]
-    fn expand_tilde_bare() {
-        let expanded = expand_tilde("~");
-        assert!(!expanded.starts_with('~'));
-        assert!(!expanded.is_empty());
-    }
-
-    #[test]
-    fn expand_tilde_no_tilde() {
-        assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
-        assert_eq!(expand_tilde("relative/path"), "relative/path");
-    }
-
-    #[test]
-    fn expand_tilde_does_not_expand_other_users() {
-        let result = expand_tilde("~otheruser/foo");
-        assert_eq!(result, "~otheruser/foo");
-    }
-
-    #[test]
     fn build_connector_unknown_type_errors() {
         let job = ConnectorJob {
             id: "test".into(),
@@ -509,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn build_connector_missing_root_path_errors() {
+    fn filesystem_connector_points_to_mirrors() {
         let job = ConnectorJob {
             id: "test".into(),
             connector_type: "filesystem".into(),
@@ -517,7 +443,7 @@ mod tests {
             config: serde_json::json!({}),
         };
         let err = build_connector(&job).err().expect("should fail");
-        assert!(err.to_string().contains("root_path"));
+        assert!(err.to_string().contains("mirrors:"));
     }
 
     #[test]
@@ -525,13 +451,13 @@ mod tests {
         let jobs = vec![
             ConnectorJob {
                 id: "a".into(),
-                connector_type: "filesystem".into(),
+                connector_type: "zephyr_scale".into(),
                 enabled: true,
                 config: serde_json::json!({}),
             },
             ConnectorJob {
                 id: "b".into(),
-                connector_type: "filesystem".into(),
+                connector_type: "zephyr_scale".into(),
                 enabled: false,
                 config: serde_json::json!({}),
             },
@@ -545,13 +471,13 @@ mod tests {
         let jobs = vec![
             ConnectorJob {
                 id: "a".into(),
-                connector_type: "filesystem".into(),
+                connector_type: "zephyr_scale".into(),
                 enabled: true,
                 config: serde_json::json!({}),
             },
             ConnectorJob {
                 id: "b".into(),
-                connector_type: "filesystem".into(),
+                connector_type: "zephyr_scale".into(),
                 enabled: true,
                 config: serde_json::json!({}),
             },
@@ -565,27 +491,12 @@ mod tests {
     fn select_connectors_unknown_id_errors() {
         let jobs = vec![ConnectorJob {
             id: "a".into(),
-            connector_type: "filesystem".into(),
+            connector_type: "zephyr_scale".into(),
             enabled: true,
             config: serde_json::json!({}),
         }];
         let result = select_connectors(&jobs, &["nonexistent".into()]);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_string_array_extracts_strings() {
-        let config = serde_json::json!({
-            "exts": [".md", ".pdf"]
-        });
-        let result = parse_string_array(&config, "exts");
-        assert_eq!(result, Some(vec![".md".to_string(), ".pdf".to_string()]));
-    }
-
-    #[test]
-    fn parse_string_array_missing_key_returns_none() {
-        let config = serde_json::json!({});
-        assert!(parse_string_array(&config, "missing").is_none());
     }
 
     #[test]

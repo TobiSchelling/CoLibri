@@ -296,6 +296,45 @@ async fn indexed_doc_ids(table: &lancedb::Table) -> Result<HashSet<String>, Coli
     Ok(ids)
 }
 
+/// Chunk count per doc id in the index, read-only. `None` if there is no
+/// index table yet.
+pub async fn chunk_counts(
+    config: &AppConfig,
+) -> Result<Option<std::collections::HashMap<String, usize>>, ColibriError> {
+    if !config
+        .index_dir
+        .join(format!("{TABLE_NAME}.lance"))
+        .exists()
+    {
+        return Ok(None);
+    }
+    let db = lancedb::connect(config.index_dir.to_string_lossy().as_ref())
+        .execute()
+        .await?;
+    let table = db.open_table(TABLE_NAME).execute().await?;
+    let batches: Vec<RecordBatch> = table
+        .query()
+        .select(Select::Columns(vec!["doc_id".into()]))
+        .execute()
+        .await?
+        .try_collect()
+        .await?;
+    let mut counts = std::collections::HashMap::new();
+    for batch in &batches {
+        if let Some(col) = batch
+            .column_by_name("doc_id")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+        {
+            for i in 0..col.len() {
+                if col.is_valid(i) {
+                    *counts.entry(col.value(i).to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    Ok(Some(counts))
+}
+
 /// Documents whose chunks are waiting to be embedded and committed.
 #[derive(Default)]
 struct PendingBatch {

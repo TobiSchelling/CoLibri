@@ -15,6 +15,7 @@ mod envelope;
 mod error;
 mod index_meta;
 mod indexer;
+mod ingest;
 mod lock;
 mod mcp;
 mod metadata_store;
@@ -66,6 +67,27 @@ async fn main() -> anyhow::Result<()> {
         }
         cli::Commands::Doctor { strict, json } => cli::doctor::run(strict, json).await,
         cli::Commands::Reset { yes } => cli::reset::run(yes).await,
+        cli::Commands::Update {
+            names,
+            dry_run,
+            allow_mass_prune,
+            no_index,
+            force,
+            json,
+        } => {
+            cli::update::run(
+                crate::ingest::update::UpdateOptions {
+                    names,
+                    dry_run,
+                    allow_mass_prune,
+                    no_index,
+                    force_index: force,
+                },
+                json,
+            )
+            .await
+        }
+        cli::Commands::Status { json } => cli::status::run(json).await,
         cli::Commands::Connectors { command } => match command {
             cli::ConnectorCommands::List { json } => cli::connectors::list(json).await,
         },

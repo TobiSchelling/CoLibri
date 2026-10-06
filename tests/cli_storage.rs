@@ -1,6 +1,6 @@
 //! End-to-end CLI tests against a temp data dir and a fake Ollama server.
 //!
-//! Covers sync -> index -> search -> doctor -> reset with the real binary.
+//! Covers update -> index -> search -> doctor -> reset with the real binary.
 
 mod common;
 
@@ -25,7 +25,7 @@ fn sync_search_doctor_reset_round_trip() {
         "read path must not create the data dir"
     );
 
-    home.colibri(&["sync"]).assert_ok();
+    home.colibri(&["update"]).assert_ok();
 
     // Keyword, semantic and hybrid search all return documents of the collection.
     for mode in ["keyword", "semantic", "hybrid"] {
@@ -62,9 +62,9 @@ fn sync_search_doctor_reset_round_trip() {
         .unwrap()
         .ends_with("projects/alpha.md"));
 
-    // An unchanged second sync embeds nothing.
+    // An unchanged second update embeds nothing.
     let embeds_before = ollama.embed_requests();
-    home.colibri(&["sync"]).assert_ok();
+    home.colibri(&["update"]).assert_ok();
     assert_eq!(ollama.embed_requests(), embeds_before);
 
     let out = home.colibri(&["doctor", "--json"]);
@@ -108,7 +108,7 @@ fn pre_v7_metadata_db_is_reported_and_left_unchanged() {
     }
     let original = std::fs::read(&db).unwrap();
 
-    let out = home.colibri(&["sync"]);
+    let out = home.colibri(&["update"]);
     assert!(!out.success);
     assert!(out.stderr.contains("colibri reset"), "{}", out.stderr);
     assert_eq!(std::fs::read(&db).unwrap(), original);

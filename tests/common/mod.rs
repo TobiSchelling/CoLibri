@@ -118,13 +118,18 @@ impl Output {
 }
 
 impl TestHome {
-    /// Config with one filesystem connector `notes` over the source dir.
+    /// Config with one mirror `notes` over the source dir (markdown + yaml).
     pub fn new(ollama: &FakeOllama) -> Self {
+        Self::with_mirrors(ollama, "")
+    }
+
+    /// Like `new`, plus extra YAML mirror entries (each starting with `  - `).
+    pub fn with_mirrors(ollama: &FakeOllama, extra_mirrors: &str) -> Self {
         let root = tempfile::TempDir::new().unwrap();
         let home = Self { root };
         std::fs::create_dir_all(home.source_dir()).unwrap();
         let config = format!(
-            "embedding:\n  endpoint: {}\n  model: fake\nchunking:\n  chunk_size: 400\n  chunk_overlap: 40\nretrieval:\n  similarity_threshold: 0.0\nconnectors:\n  - type: filesystem\n    id: notes\n    root_path: {}\n    doc_type: note\n",
+            "embedding:\n  endpoint: {}\n  model: fake\nchunking:\n  chunk_size: 400\n  chunk_overlap: 40\nretrieval:\n  similarity_threshold: 0.0\nprune:\n  min_count: 25\nmirrors:\n  - name: notes\n    path: {}\n    include: ['**/*.md', '**/*.yaml']\n{extra_mirrors}",
             ollama.url,
             home.source_dir().display()
         );
@@ -186,4 +191,26 @@ impl TestHome {
     pub fn path(&self) -> &Path {
         self.root.path()
     }
+}
+
+/// (relative path -> (size, mtime)) for every entry under `root`.
+pub fn snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, (u64, std::time::SystemTime)> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if meta.is_dir() {
+                stack.push(path.clone());
+            }
+            out.insert(path, (meta.len(), meta.modified().unwrap()));
+        }
+    }
+    out
 }

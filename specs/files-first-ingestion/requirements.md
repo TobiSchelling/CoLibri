@@ -6,7 +6,7 @@
 > **Repo Type:** code
 > **Spec Directory:** specs/files-first-ingestion/
 > **Design Doc Location:** specs/files-first-ingestion/design.md (approved plan, phases P1-P5)
-> **Status:** In Progress (P1+P2 verified 2026-10-06)
+> **Status:** In Progress (P1+P2 and P3 verified 2026-10-06)
 
 ---
 
@@ -403,17 +403,17 @@ The following deliverables are committed for this feature:
 | REQ-003 | P1 | #3 | lock::tests::second_writer_fails_fast_with_holder_pid; metadata_store::tests::read_succeeds_while_write_transaction_is_open |
 | REQ-004 | P1 | #8 | cli::reset::tests; cli_storage reset steps |
 | REQ-005 | P2 | #6 | indexer::tests::interrupted_run_resumes_with_remaining_documents |
-| REQ-006 | P2 | #6 | indexer::tests::orphan_chunks_are_purged (AC-006.2 in P3) |
+| REQ-006 | P2, P3 | #6 | indexer::tests::orphan_chunks_are_purged; cli_mirrors status orphan_chunks |
 | REQ-007 | P2 | #4, #7, #10 | query::tests::filter_collection_and_doc_type; grep gate |
 | REQ-008 | P2 | #7 | mcp::tests::tool_names_and_parameters; query e2e list_books shape |
-| REQ-009 | P3 | | |
-| REQ-010 | P3 | | |
-| REQ-011 | P3 | | |
-| REQ-012 | P3 | | |
-| REQ-013 | P3 | | |
-| REQ-014 | P3 | | |
-| REQ-015 | P3 | | |
-| REQ-016 | P3 | | |
+| REQ-009 | P3 | plan-p3 #6, #7 | mirror::tests::adds_changes_and_leaves_unchanged_files_alone; update::tests |
+| REQ-010 | P3 | #6, #7 | mirror::tests::deleted_file_is_pruned_and_reappearing_file_is_reactivated; cli_mirrors |
+| REQ-011 | P3 | #6 | mirror::tests::{missing_root_*, unreadable_subdirectory_*, mass_deletion_*} |
+| REQ-012 | P3 | #6 | mirror::tests::moving_the_mirror_folder_keeps_document_ids |
+| REQ-013 | P3 | #6, #10 | cli_mirrors (dry run with existing data) |
+| REQ-014 | P3 | #8 | cli_mirrors status --json (library row in P4) |
+| REQ-015 | P3 | #6, #10 | cli_mirrors frontmatter + yaml search |
+| REQ-016 | P3 | #2, #6 | walk::tests::dataless_flag_detection; mirror::tests::online_only_* |
 | REQ-017 | P4 | | |
 | REQ-018 | P4 | | |
 | REQ-019 | P4 | | |

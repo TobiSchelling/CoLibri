@@ -412,7 +412,6 @@ impl MetadataStore {
         Ok(n as usize)
     }
 
-    #[allow(dead_code)] // Used by mirror prune (P3) and `remove` (P4).
     pub fn set_status(
         &self,
         doc_id: &str,
@@ -457,6 +456,140 @@ impl MetadataStore {
         self.conn.execute(
             "UPDATE documents SET indexed_hash = NULL, chunk_count = NULL, indexed_at = NULL",
             [],
+        )?;
+        Ok(())
+    }
+}
+
+/// A problem found during the latest run of a collection.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ProblemRow {
+    pub collection: String,
+    pub source_path: String,
+    pub kind: String,
+    pub message: String,
+    pub seen_at: String,
+}
+
+/// Outcome of the latest run of a collection.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CollectionRun {
+    pub name: String,
+    pub kind: String,
+    pub root: Option<String>,
+    pub last_run_at: Option<String>,
+    pub last_run_status: Option<String>,
+}
+
+impl MetadataStore {
+    /// All documents of one collection (any status).
+    pub fn list_documents_in(&self, collection: &str) -> Result<Vec<DocumentRecord>, ColibriError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {DOCUMENT_COLUMNS} FROM documents WHERE collection = ?1 ORDER BY doc_id"
+        ))?;
+        let rows = stmt.query_map([collection], DocumentRecord::from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn record_collection_run(
+        &self,
+        name: &str,
+        kind: &str,
+        root: Option<&str>,
+        status: &str,
+        report_json: &str,
+    ) -> Result<(), ColibriError> {
+        self.conn.execute(
+            "INSERT INTO collections (name, kind, root, last_run_at, last_run_status, last_run_report_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(name) DO UPDATE SET kind = excluded.kind, root = excluded.root,
+                last_run_at = excluded.last_run_at, last_run_status = excluded.last_run_status,
+                last_run_report_json = excluded.last_run_report_json",
+            params![name, kind, root, now(), status, report_json],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_collection_runs(&self) -> Result<Vec<CollectionRun>, ColibriError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name, kind, root, last_run_at, last_run_status FROM collections ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(CollectionRun {
+                name: r.get(0)?,
+                kind: r.get(1)?,
+                root: r.get(2)?,
+                last_run_at: r.get(3)?,
+                last_run_status: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Replace the problems of a collection with those of the latest run.
+    pub fn replace_problems(
+        &self,
+        collection: &str,
+        problems: &[(String, String, String)],
+    ) -> Result<(), ColibriError> {
+        self.conn
+            .execute("DELETE FROM problems WHERE collection = ?1", [collection])?;
+        let seen_at = now();
+        for (source_path, kind, message) in problems {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO problems (collection, source_path, kind, message, seen_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![collection, source_path, kind, message, seen_at],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn list_problems(&self) -> Result<Vec<ProblemRow>, ColibriError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT collection, source_path, kind, message, seen_at FROM problems
+             ORDER BY collection, source_path",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ProblemRow {
+                collection: r.get(0)?,
+                source_path: r.get(1)?,
+                kind: r.get(2)?,
+                message: r.get(3)?,
+                seen_at: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Cached conversion for these source bytes: (converter, markdown path
+    /// relative to the conversions dir).
+    pub fn get_conversion(
+        &self,
+        source_sha256: &str,
+    ) -> Result<Option<(String, String)>, ColibriError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT converter, markdown_path FROM conversions WHERE source_sha256 = ?1",
+                [source_sha256],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    pub fn put_conversion(
+        &self,
+        source_sha256: &str,
+        converter: &str,
+        markdown_path: &str,
+    ) -> Result<(), ColibriError> {
+        self.conn.execute(
+            "INSERT INTO conversions (source_sha256, converter, markdown_path, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(source_sha256) DO UPDATE SET converter = excluded.converter,
+                markdown_path = excluded.markdown_path, created_at = excluded.created_at",
+            params![source_sha256, converter, markdown_path, now()],
         )?;
         Ok(())
     }
@@ -622,6 +755,47 @@ mod tests {
             classify_open_error(err(rusqlite::ffi::SQLITE_NOTADB)),
             Ok(SchemaState::Foreign(_))
         ));
+    }
+
+    #[test]
+    fn collections_problems_and_conversions_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let store = MetadataStore::open_rw(&dir.path().join("m.db")).unwrap();
+        store
+            .record_collection_run("vault", "mirror", Some("/pkm"), "ok", "{}")
+            .unwrap();
+        store
+            .record_collection_run("vault", "mirror", Some("/pkm"), "partial", "{}")
+            .unwrap();
+        let runs = store.list_collection_runs().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].last_run_status.as_deref(), Some("partial"));
+
+        let p = |path: &str| {
+            (
+                path.to_string(),
+                "unreadable".to_string(),
+                "denied".to_string(),
+            )
+        };
+        store.replace_problems("vault", &[p("a"), p("b")]).unwrap();
+        store.replace_problems("vault", &[p("c")]).unwrap();
+        let problems = store.list_problems().unwrap();
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].source_path, "c");
+
+        assert_eq!(store.get_conversion("abc").unwrap(), None);
+        store.put_conversion("abc", "pandoc", "ab/abc.md").unwrap();
+        assert_eq!(
+            store.get_conversion("abc").unwrap(),
+            Some(("pandoc".into(), "ab/abc.md".into()))
+        );
+
+        let mut other = sample("other:x");
+        other.collection = "other".into();
+        store.upsert_document(&sample("notes:y")).unwrap();
+        store.upsert_document(&other).unwrap();
+        assert_eq!(store.list_documents_in("other").unwrap().len(), 1);
     }
 
     // AC-003.2: readers are not blocked by an open write transaction.

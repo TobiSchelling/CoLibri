@@ -9,8 +9,10 @@ pub mod instructions;
 pub mod reset;
 pub mod search;
 pub mod serve;
+pub mod status;
 pub mod sync;
 pub mod tour;
+pub mod update;
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -26,6 +28,22 @@ pub(crate) fn tool_on_path(tool: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// External tools missing for the file types a mirror includes.
+pub(crate) fn missing_tools(include: &[String]) -> Vec<String> {
+    let wants = |ext: &str| include.iter().any(|p| p.to_lowercase().contains(ext));
+    let mut missing = Vec::new();
+    if wants(".pdf") && !tool_on_path("docling") {
+        missing.push("docling (pipx install docling), needed for PDF".to_string());
+    }
+    if (wants(".epub") || wants(".docx")) && !tool_on_path("pandoc") {
+        missing.push("pandoc (brew install pandoc), needed for EPUB/DOCX".to_string());
+    }
+    if wants(".pptx") && !tool_on_path("markitdown") && !tool_on_path("pandoc") {
+        missing.push("markitdown or pandoc, needed for PPTX".to_string());
+    }
+    missing
 }
 
 /// Extract a non-empty trimmed string value from a JSON object by key.
@@ -112,6 +130,39 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
 
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Reconcile mirrors (new, changed and deleted files) and update the index
+    Update {
+        /// Only these mirrors (default: all)
+        names: Vec<String>,
+
+        /// Show what would change without writing anything
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Apply deletions even above the configured mass-deletion limit
+        #[arg(long)]
+        allow_mass_prune: bool,
+
+        /// Skip the indexing step
+        #[arg(long)]
+        no_index: bool,
+
+        /// Re-embed everything
+        #[arg(long)]
+        force: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show collections, pending work, problems and index health
+    Status {
         /// Output as JSON
         #[arg(long)]
         json: bool,

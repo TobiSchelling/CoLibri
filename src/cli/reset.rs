@@ -24,6 +24,7 @@ fn owned_paths(config: &AppConfig) -> Vec<PathBuf> {
         home.join("metadata.db-shm"),
         home.join("metadata.legacy-json.bak"),
         config.canonical_dir.clone(),
+        config.conversions_dir.clone(),
     ];
     if home.join("index").join("lancedb").exists() {
         paths.push(home.join("index"));

@@ -7,7 +7,6 @@ use serde::Serialize;
 
 use super::tool_on_path;
 use crate::config::{load_config, AppConfig};
-use crate::connectors::ConnectorJob;
 use crate::embedding::check_ollama;
 use crate::error::ColibriError;
 
@@ -47,13 +46,10 @@ struct YamlEmbeddingConfig {
 }
 
 #[derive(Debug, Serialize)]
-struct YamlConnectorEntry {
-    #[serde(rename = "type")]
-    connector_type: String,
-    id: String,
-    enabled: bool,
-    root_path: String,
-    include_extensions: Vec<String>,
+struct YamlMirrorEntry {
+    name: String,
+    path: String,
+    include: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,7 +57,7 @@ struct YamlConfig {
     data: YamlDataConfig,
     embedding: YamlEmbeddingConfig,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    connectors: Vec<YamlConnectorEntry>,
+    mirrors: Vec<YamlMirrorEntry>,
 }
 
 fn default_config_path() -> PathBuf {
@@ -157,13 +153,11 @@ fn write_config(
         std::fs::create_dir_all(parent)?;
     }
 
-    let connectors = if let Some(path) = init_path {
-        vec![YamlConnectorEntry {
-            connector_type: "filesystem".into(),
-            id: "docs".into(),
-            enabled: true,
-            root_path: path.display().to_string(),
-            include_extensions: vec![".md".into(), ".markdown".into()],
+    let mirrors = if let Some(path) = init_path {
+        vec![YamlMirrorEntry {
+            name: "docs".into(),
+            path: path.display().to_string(),
+            include: vec!["**/*.md".into()],
         }]
     } else {
         Vec::new()
@@ -177,7 +171,7 @@ fn write_config(
             endpoint: DEFAULT_OLLAMA_BASE_URL.to_string(),
             model: DEFAULT_OLLAMA_MODEL.to_string(),
         },
-        connectors,
+        mirrors,
     };
 
     let yaml = serde_yaml::to_string(&cfg)?;
@@ -194,36 +188,6 @@ fn write_config(
         true
     };
     Ok(wrote)
-}
-
-/// Check that external tools required by connector extensions are available.
-pub(crate) fn check_connector_tools(connectors: &[ConnectorJob]) -> Vec<String> {
-    let mut missing = Vec::new();
-    for job in connectors {
-        if job.connector_type != "filesystem" {
-            continue;
-        }
-        let exts: Vec<String> =
-            super::connectors::parse_string_array(&job.config, "include_extensions")
-                .unwrap_or_default()
-                .into_iter()
-                .map(|s| s.to_lowercase())
-                .collect();
-
-        if exts.iter().any(|e| e == ".pdf") && !tool_on_path("docling") {
-            missing.push("docling (pipx install docling) — for PDF conversion".into());
-        }
-        if exts.iter().any(|e| e == ".docx" || e == ".epub") && !tool_on_path("pandoc") {
-            missing.push("pandoc (brew install pandoc) — for DOCX/EPUB conversion".into());
-        }
-        if exts.iter().any(|e| e == ".pptx")
-            && !tool_on_path("markitdown")
-            && !tool_on_path("pandoc")
-        {
-            missing.push("markitdown or pandoc — for PPTX conversion".into());
-        }
-    }
-    missing
 }
 
 pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
@@ -267,9 +231,9 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
         std::env::set_var("COLIBRI_CONFIG_PATH", &config_path);
         let cfg = load_config().map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-        // Check external tools required by connector extensions.
-        for tool_msg in check_connector_tools(&cfg.connector_jobs) {
-            suggested.insert(tool_msg);
+        // Check external tools required by the mirrors' file types.
+        for mirror in &cfg.mirrors {
+            suggested.extend(super::missing_tools(&mirror.include));
         }
 
         if let Some(prev) = _prev {
@@ -340,7 +304,7 @@ pub async fn run(opts: BootstrapOptions) -> anyhow::Result<()> {
 
     eprintln!("\nNext:");
     eprintln!("  colibri doctor");
-    eprintln!("  colibri sync");
+    eprintln!("  colibri update");
 
     Ok(())
 }
@@ -350,55 +314,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn check_connector_tools_no_missing_for_markdown_only() {
-        let jobs = vec![ConnectorJob {
-            id: "docs".into(),
-            connector_type: "filesystem".into(),
-            enabled: true,
-            config: serde_json::json!({
-                "root_path": "/tmp/docs",
-                "include_extensions": [".md", ".markdown"]
-            }),
-        }];
-        let missing = check_connector_tools(&jobs);
-        assert!(missing.is_empty());
-    }
-
-    #[test]
-    fn check_connector_tools_skips_non_filesystem() {
-        let jobs = vec![ConnectorJob {
-            id: "custom".into(),
-            connector_type: "other_type".into(),
-            enabled: true,
-            config: serde_json::json!({
-                "include_extensions": [".pdf", ".docx"]
-            }),
-        }];
-        let missing = check_connector_tools(&jobs);
-        assert!(missing.is_empty());
-    }
-
-    #[test]
-    fn write_config_without_init_path_omits_connectors() {
+    fn write_config_without_init_path_omits_mirrors() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.yaml");
         let data_dir = dir.path().join("data");
         write_config(&config_path, &data_dir, None).unwrap();
         let content = std::fs::read_to_string(&config_path).unwrap();
-        assert!(!content.contains("connectors"));
+        assert!(!content.contains("mirrors"));
+        assert!(content.contains("embedding"));
     }
 
     #[test]
-    fn write_config_with_init_path_includes_connector() {
+    fn write_config_with_init_path_adds_a_mirror() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.yaml");
         let data_dir = dir.path().join("data");
         let init_path = dir.path().join("docs");
         write_config(&config_path, &data_dir, Some(&init_path)).unwrap();
         let content = std::fs::read_to_string(&config_path).unwrap();
-        assert!(content.contains("connectors"));
-        assert!(content.contains("filesystem"));
-        assert!(content.contains(".md"));
-        assert!(content.contains("embedding"));
+        assert!(content.contains("mirrors"));
+        assert!(content.contains("**/*.md"));
     }
 }

@@ -37,6 +37,160 @@ struct RawConfig {
 
     #[serde(default)]
     connectors: Vec<crate::connectors::ConnectorRawConfig>,
+
+    #[serde(default)]
+    mirrors: Vec<MirrorRaw>,
+
+    #[serde(default)]
+    prune: PruneRaw,
+}
+
+/// A folder CoLibri keeps in sync: new and changed files are ingested,
+/// deleted files are pruned (guarded).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MirrorRaw {
+    name: String,
+    path: String,
+    #[serde(default = "default_mirror_doc_type")]
+    doc_type: String,
+    #[serde(default = "default_mirror_include")]
+    include: Vec<String>,
+    #[serde(default)]
+    exclude: Vec<String>,
+    #[serde(default = "default_true")]
+    plantuml_summaries: bool,
+}
+
+fn default_mirror_doc_type() -> String {
+    "note".into()
+}
+
+fn default_mirror_include() -> Vec<String> {
+    vec!["**/*.md".into()]
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PruneRaw {
+    #[serde(default = "default_prune_max_fraction")]
+    max_fraction: f64,
+    #[serde(default = "default_prune_min_count")]
+    min_count: usize,
+}
+
+impl Default for PruneRaw {
+    fn default() -> Self {
+        Self {
+            max_fraction: default_prune_max_fraction(),
+            min_count: default_prune_min_count(),
+        }
+    }
+}
+
+fn default_prune_max_fraction() -> f64 {
+    0.2
+}
+
+fn default_prune_min_count() -> usize {
+    25
+}
+
+/// A resolved mirror definition.
+#[derive(Debug, Clone)]
+pub struct MirrorConfig {
+    /// Collection name; also the prefix of every document id.
+    pub name: String,
+    pub path: PathBuf,
+    pub doc_type: String,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+    pub plantuml_summaries: bool,
+}
+
+/// Limits for deletions in one update: a mirror prunes at most
+/// `max(min_count, max_fraction × active documents)` unless overridden.
+#[derive(Debug, Clone, Copy)]
+pub struct PruneConfig {
+    pub max_fraction: f64,
+    pub min_count: usize,
+}
+
+impl PruneConfig {
+    pub fn limit(&self, active: usize) -> usize {
+        self.min_count
+            .max((self.max_fraction * active as f64).floor() as usize)
+    }
+}
+
+/// Expand a leading `~` to the home directory.
+pub fn expand_tilde(path: &str) -> PathBuf {
+    if path == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home;
+        }
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
+
+fn valid_collection_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+fn resolve_mirrors(
+    raw: Vec<MirrorRaw>,
+    connector_ids: &[String],
+) -> Result<Vec<MirrorConfig>, ColibriError> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for m in raw {
+        let name = m.name.trim().to_string();
+        if !valid_collection_name(&name) {
+            return Err(ColibriError::Config(format!(
+                "mirrors: invalid name '{name}' (use letters, digits, '-', '_', '.')"
+            )));
+        }
+        if !seen.insert(name.clone()) || connector_ids.contains(&name) {
+            return Err(ColibriError::Config(format!(
+                "mirrors: name '{name}' is used twice (mirror and connector names must be unique)"
+            )));
+        }
+        for pattern in m.include.iter().chain(m.exclude.iter()) {
+            glob::Pattern::new(pattern).map_err(|e| {
+                ColibriError::Config(format!(
+                    "mirrors.{name}: invalid glob pattern '{pattern}': {e}"
+                ))
+            })?;
+        }
+        let path = expand_tilde(m.path.trim());
+        if !path.is_absolute() {
+            return Err(ColibriError::Config(format!(
+                "mirrors.{name}: path must be absolute or start with ~ (got '{}')",
+                m.path
+            )));
+        }
+        out.push(MirrorConfig {
+            path,
+            doc_type: m.doc_type,
+            include: m.include,
+            exclude: m.exclude,
+            plantuml_summaries: m.plantuml_summaries,
+            name,
+        });
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -146,10 +300,14 @@ fn resolve_colibri_home(raw_data_dir: Option<&str>) -> PathBuf {
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub connector_jobs: Vec<crate::connectors::ConnectorJob>,
+    pub mirrors: Vec<MirrorConfig>,
+    pub prune: PruneConfig,
     pub colibri_home: PathBuf,
     pub canonical_dir: PathBuf,
     /// LanceDB directory holding the single `chunks` table.
     pub index_dir: PathBuf,
+    /// Cached markdown of converted sources, keyed by source SHA-256.
+    pub conversions_dir: PathBuf,
     pub metadata_db_path: PathBuf,
     pub lock_path: PathBuf,
     pub embedding_endpoint: String,
@@ -201,9 +359,15 @@ impl AppConfig {
     pub(crate) fn for_test(home: &std::path::Path) -> Self {
         Self {
             connector_jobs: Vec::new(),
+            mirrors: Vec::new(),
+            prune: PruneConfig {
+                max_fraction: default_prune_max_fraction(),
+                min_count: default_prune_min_count(),
+            },
             colibri_home: home.to_path_buf(),
             canonical_dir: home.join("canonical"),
             index_dir: home.join("index").join("lancedb"),
+            conversions_dir: home.join("conversions"),
             metadata_db_path: home.join("metadata.db"),
             lock_path: home.join("write.lock"),
             embedding_endpoint: "http://127.0.0.1:9".into(),
@@ -251,6 +415,13 @@ pub fn load_config() -> Result<AppConfig, ColibriError> {
         })
         .collect();
 
+    let connector_ids: Vec<String> = connector_jobs.iter().map(|j| j.id.clone()).collect();
+    let mirrors = resolve_mirrors(raw.mirrors, &connector_ids)?;
+    let prune = PruneConfig {
+        max_fraction: raw.prune.max_fraction,
+        min_count: raw.prune.min_count,
+    };
+
     // Resolve app root: COLIBRI_HOME > COLIBRI_DATA_DIR > config data.directory > XDG default
     let colibri_home = resolve_colibri_home(raw.data.directory.as_deref());
 
@@ -268,8 +439,11 @@ pub fn load_config() -> Result<AppConfig, ColibriError> {
 
     Ok(AppConfig {
         connector_jobs,
+        mirrors,
+        prune,
         canonical_dir: colibri_home.join("canonical"),
         index_dir: colibri_home.join("index").join("lancedb"),
+        conversions_dir: colibri_home.join("conversions"),
         metadata_db_path: colibri_home.join("metadata.db"),
         lock_path: colibri_home.join("write.lock"),
         colibri_home,
@@ -393,6 +567,43 @@ pub(crate) mod tests {
         assert_eq!(cfg.index_dir, home.join("index").join("lancedb"));
         assert_eq!(cfg.canonical_dir, home.join("canonical"));
         assert_eq!(cfg.lock_path, home.join("write.lock"));
+        snap.restore();
+    }
+
+    #[test]
+    fn mirrors_are_resolved_and_validated() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let snap = EnvSnapshot::capture();
+
+        let (_r, _h) = isolated_home(
+            "mirrors:\n  - {name: vault, path: ~/PKM, exclude: ['.obsidian/**']}\nprune: {min_count: 5}\n",
+        );
+        let cfg = load_config().unwrap();
+        assert_eq!(cfg.mirrors.len(), 1);
+        let m = &cfg.mirrors[0];
+        assert_eq!(m.include, ["**/*.md"]);
+        assert_eq!(m.doc_type, "note");
+        assert!(!m.path.to_string_lossy().starts_with('~'));
+        assert_eq!(cfg.prune.min_count, 5);
+        assert_eq!(cfg.prune.limit(100), 20);
+
+        for (yaml, needle) in [
+            ("mirrors:\n  - {name: v, path: /x, exlude: []}\n", "exlude"),
+            (
+                "mirrors:\n  - {name: v, path: /x}\n  - {name: v, path: /y}\n",
+                "used twice",
+            ),
+            ("mirrors:\n  - {name: '../x', path: /x}\n", "invalid name"),
+            (
+                "mirrors:\n  - {name: v, path: /x, include: ['[']}\n",
+                "invalid glob",
+            ),
+            ("mirrors:\n  - {name: v, path: docs}\n", "must be absolute"),
+        ] {
+            let (_r, _h) = isolated_home(yaml);
+            let err = load_config().unwrap_err().to_string();
+            assert!(err.contains(needle), "{yaml}: {err}");
+        }
         snap.restore();
     }
 

@@ -1,10 +1,10 @@
 # Files-First Ingestion Verification Report
 
 > **Feature:** files-first-ingestion
-> **Date:** 2026-10-06
+> **Date:** 2026-10-06 (P1+P2), 2026-10-06 (P3)
 > **Spec:** specs/files-first-ingestion/requirements.md
 > **Verified by:** Claude (claude-opus-5-5)
-> **Status:** PASSED for phase P1+P2 (REQ-001..REQ-008); REQ-009..REQ-031 not yet implemented
+> **Status:** PASSED for P1+P2 (REQ-001..008) and P3 (REQ-009..016, AC-006.2); REQ-017..031 not yet implemented
 
 ---
 
@@ -41,7 +41,7 @@ All evidence below was produced in this session on branch `feat/ffi-p1-storage` 
 
 ### Not in this phase
 
-REQ-009..REQ-016 (P3 mirrors, `update`, `status`), REQ-017..REQ-024 (P4 library), REQ-025..REQ-030 (P5 fetchers), REQ-031 (rebuild on the real setup) are not implemented yet and were not verified.
+REQ-017..REQ-024 (P4 library), REQ-025..REQ-030 (P5 fetchers), REQ-031 (rebuild on the real setup) are not implemented yet and were not verified.
 
 ## Deliverables Check
 
@@ -81,4 +81,49 @@ REQ-009..REQ-016 (P3 mirrors, `update`, `status`), REQ-017..REQ-024 (P4 library)
 
 ---
 
-**Result: PASSED (phase P1+P2).** The feature as a whole stays open until P3-P5 and the rebuild (REQ-031) are verified.
+**Result: PASSED (phase P1+P2).** AC-006.2 was re-verified in P3 (below).
+
+---
+
+## Phase P3: Acceptance Criteria Results
+
+Evidence produced in this session on `feat/ffi-p1-storage` (uncommitted tree before the P3 commit): unit tests run individually with `cargo test --bin colibri <name>`, integration via `cargo test --test cli_mirrors` / `--test cli_storage`; full suite 158 unit + 3 integration tests pass, `cargo fmt --check` OK, `cargo clippy -- -D warnings` exit 0 (bin and `--tests`).
+
+| REQ | Priority | Criterion | Method | Result | Evidence |
+|-----|----------|-----------|--------|--------|----------|
+| REQ-006 | MUST | AC-006.2: `colibri status` shows `orphan chunks: 0` | `cli_mirrors::update_prune_dry_run_and_status` | PASS | `status --json` `orphan_chunks == 0` after update; human output contains `orphan chunks: 0`; with a pending prune it reports exactly the pruned doc's 1 chunk and not the outdated chunk of an edited doc |
+| REQ-009 | MUST | AC-009.1: 3 files added; one edit → 1 changed, only that doc embedded | `mirror::tests::adds_changes_and_leaves_unchanged_files_alone`, `update::tests::update_embeds_only_changes_and_drops_deleted_documents` | PASS | counts (3,0,0,0) then (0,1,2,0); index `(indexed, unchanged) == (1, 2)` |
+| REQ-009 | MUST | AC-009.2: no changes → 0 writes, 0 embeddings, 0 converter calls | same two tests | PASS | rows identical and canonical mtimes unchanged after the third run; converter calls stay 1; fake embedder 0 calls |
+| REQ-010 | MUST | AC-010.1: deleted file not returned by search, no chunks | `mirror::tests::deleted_file_is_pruned_and_reappearing_file_is_reactivated`, update test, `cli_mirrors` | PASS | status removed/`source_deleted`, `indexed_hash == None`; CLI keyword search for the deleted note returns 0 |
+| REQ-011 | MUST | AC-011.1: missing root → 0 pruned, problem in status | `mirror::tests::missing_root_prunes_nothing_and_reports_a_problem`, `cli_mirrors` (`gone` mirror) | PASS | status `error`, `root_missing` problem in `status --json` |
+| REQ-011 | MUST | AC-011.2: unreadable subdirectory → 0 pruned | `mirror::tests::unreadable_subdirectory_blocks_prune`, `walk::tests::unreadable_directory_marks_walk_incomplete` | PASS | `prune_candidates == 1`, `pruned == 0`, `prune_blocked` set |
+| REQ-011 | MUST | AC-011.3: 30 of 40 deleted (min 25, 0.2) → 0 pruned + problem; `--allow-mass-prune` → 30 | `mirror::tests::mass_deletion_is_blocked_unless_allowed` | PASS | message "exceed the limit of 25"; override prunes 30; problems cleared |
+| REQ-012 | MUST | AC-012.1: moved folder + new `path` → 0 added, 0 pruned | `mirror::tests::moving_the_mirror_folder_keeps_document_ids` | PASS | counts (0,0,2,0); `source_path` points at the new location |
+| REQ-013 | MUST | AC-013.1: dry run with pending changes writes nothing, lists counts | `cli_mirrors` (dry run after first update), `mirror::tests::dry_run_reports_without_writing` | PASS | reported added/changed/pruned = 1/1/1; recursive size+mtime snapshot of the data dir (incl. `metadata.db`) unchanged; no converter calls |
+| REQ-014 | MUST | AC-014.1: `status --json` per-collection fields | `cli_mirrors` | PASS (mirrors) | two mirrors and one problem checked: kind, active, removed, pending_index, last_run_status, problems. The library row is verified with P4 (REQ-017+) |
+| REQ-015 | SHOULD | AC-015.1: frontmatter filter | `cli_mirrors` | PASS | `status=active` → 1 result, `status=archived` → 0 |
+| REQ-015 | SHOULD | AC-015.2: `.yaml` file found by keyword | `cli_mirrors`, `mirror::tests::yaml_is_fenced_and_unsupported_types_are_problems` | PASS | `payments-team` returns `arch/billing-service.yaml` |
+| REQ-016 | SHOULD | AC-016.1: dataless flag check; reconcile treats such files as seen | `walk::tests::dataless_flag_detection`, `mirror::tests::online_only_files_are_reported_and_never_pruned` | PASS | flag true/false cases; online-only existing doc not pruned, `online_only` problem recorded |
+
+### Summary (phase P3)
+
+| Priority | Pass | Fail | Skip | Total |
+|----------|------|------|------|-------|
+| MUST | 10 | 0 | 0 | 10 |
+| SHOULD | 3 | 0 | 0 | 3 |
+| **Total** | **13** | **0** | **0** | **13** |
+
+### Deliverables (phase P3)
+
+| # | Deliverable | Location | Status | Notes |
+|---|-------------|----------|--------|-------|
+| 5 | Implementation plan | specs/files-first-ingestion/plan-p3.md | PRODUCED | Written alongside implementation; records review-driven decisions |
+| 6 | Unit tests | `src/ingest/*`, `src/cli/status.rs` paths | PRODUCED | 158/158 pass |
+| 7 | Integration tests | tests/cli_mirrors.rs, tests/cli_storage.rs (switched to mirrors) | PRODUCED | 3/3 pass |
+| 10 | Linter clean | — | PRODUCED | fmt + clippy (bin, tests) clean |
+| 12 | Code review | — | PRODUCED | 6 important findings fixed (metadata-only updates for doc_type/source_path, orphan definition in status, cache robustness + post-commit file deletion, absolute mirror paths, case-insensitive matching) plus prune hardening (empty-folder guard, `excluded` reason, symlink handling, subtree-exclude probe) |
+| 13 | Documentation update | README.md, CLAUDE.md | PRODUCED | mirrors, `update`, `status`, prune guard, config |
+
+Known limitation (accepted, tracked for P4): a file whose conversion fails is retried on every update.
+
+**Gate (phase P3):** all MUST criteria pass, no MUST failed, deliverables produced. **Result: PASSED (phase P3).**
