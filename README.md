@@ -113,7 +113,7 @@ Books are never deleted automatically. A book whose file disappears stays search
 
 ### Mirrors
 
-A mirror is a folder CoLibri keeps in sync. `colibri update` ingests new files, re-ingests changed ones and removes documents whose files are gone. Unchanged files cost a hash (markdown, YAML) or a size/mtime check (PDF, EPUB, DOCX, PPTX); a converted file is never converted twice for the same bytes.
+A mirror is a folder CoLibri keeps in sync. `colibri update` ingests new files, re-ingests changed ones and removes documents whose files are gone. Unchanged files cost a hash (Markdown, YAML, Gherkin `.feature`, text) or a size/mtime check (PDF, EPUB, DOCX, PPTX); a converted file is never converted twice for the same bytes.
 
 Deletions are guarded. Nothing is pruned when the mirror folder is missing or any part of it could not be read, and a run that would delete more than `max(prune.min_count, prune.max_fraction × documents)` stops and reports instead (override with `--allow-mass-prune`). Narrowing `include`/`exclude` counts as deleting, so review `colibri update --dry-run` first. Files that exist only in the cloud (OneDrive/iCloud placeholders) are skipped and reported, never pruned.
 

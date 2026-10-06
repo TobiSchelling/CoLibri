@@ -163,8 +163,12 @@ fn prepare_text(mirror: &MirrorConfig, file: &FoundFile, ext: &str, text: &str) 
     }
 }
 
+/// Formats read as text. `.feature` (Gherkin) and `.txt` are indexed as is.
 fn is_text(ext: &str) -> bool {
-    matches!(ext, ".md" | ".markdown" | ".txt" | ".yaml" | ".yml")
+    matches!(
+        ext,
+        ".md" | ".markdown" | ".txt" | ".feature" | ".yaml" | ".yml"
+    )
 }
 
 /// Stored location, stat and doc_type match the file and mirror.
@@ -973,6 +977,27 @@ mod tests {
         assert_eq!(doc.title, "service map");
         let md = std::fs::read_to_string(f.config.canonical_dir.join(&doc.markdown_path)).unwrap();
         assert!(md.contains("```yaml\nservice: billing"));
+    }
+
+    #[test]
+    fn gherkin_feature_files_are_indexed_as_text() {
+        let mut f = fixture();
+        f.mirror.include = vec!["**/*.feature".into()];
+        let (_lock, store) = f.config.open_for_write().unwrap();
+        let conv = CountingConverter::default();
+        f.write(
+            "features/asset_transfer.feature",
+            "Feature: Asset transfer\n  Scenario: Transfer between jobsites\n",
+        );
+        let r = f.run(&store, &conv, ReconcileOptions::default());
+        assert_eq!(r.added, 1);
+        assert!(r.problems.is_empty());
+        let doc = store
+            .get_document("vault:features/asset_transfer.feature")
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.title, "asset transfer");
+        assert_eq!(conv.calls(), 0);
     }
 
     #[test]
