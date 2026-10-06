@@ -47,6 +47,11 @@ pub async fn collect(config: &AppConfig) -> anyhow::Result<StatusReport> {
         entry(&mut by_name, &m.name);
         by_name.get_mut(&m.name).unwrap().kind = Some("mirror".into());
     }
+    if config.library.is_some() {
+        let name = crate::config::LIBRARY_COLLECTION;
+        entry(&mut by_name, name);
+        by_name.get_mut(name).unwrap().kind = Some("library".into());
+    }
 
     let docs = store.list_documents()?;
     let mut live: HashSet<&str> = HashSet::new();

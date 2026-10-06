@@ -16,8 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install protoc
-        run: brew install protobuf
+      - name: Install protoc and pandoc
+        run: brew install protobuf pandoc
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.93.0

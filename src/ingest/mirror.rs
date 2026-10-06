@@ -34,7 +34,11 @@ pub struct Problem {
 }
 
 impl Problem {
-    fn new(source_path: impl Into<String>, kind: &str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        source_path: impl Into<String>,
+        kind: &str,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             source_path: source_path.into(),
             kind: kind.into(),
@@ -64,6 +68,8 @@ pub struct MirrorReport {
 pub struct ReconcileOptions {
     pub dry_run: bool,
     pub allow_mass_prune: bool,
+    /// Retry conversions that failed in an earlier run.
+    pub retry_failed: bool,
 }
 
 /// Markdown plus metadata ready to be stored.
@@ -92,7 +98,7 @@ struct Planned {
     content: Content,
 }
 
-fn rfc3339(t: std::time::SystemTime) -> String {
+pub(crate) fn rfc3339(t: std::time::SystemTime) -> String {
     DateTime::<Utc>::from(t).to_rfc3339()
 }
 
@@ -405,6 +411,7 @@ fn reconcile_walked(
                     &p.ext,
                     &p.file.abs,
                     &sha256,
+                    opts.retry_failed,
                 ) {
                     Ok((markdown, tool)) => (
                         Prepared {

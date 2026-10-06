@@ -83,7 +83,7 @@ fn safe_component(input: &str, max_len: usize) -> String {
 const COMMIT_EVERY: usize = 200;
 
 /// True when `b` only differs from `a` in its update/seen timestamps.
-fn same_except_timestamps(a: &DocumentRecord, b: &DocumentRecord) -> bool {
+pub(crate) fn same_except_timestamps(a: &DocumentRecord, b: &DocumentRecord) -> bool {
     let mut b = b.clone();
     b.updated_at.clone_from(&a.updated_at);
     b.last_seen_at.clone_from(&a.last_seen_at);

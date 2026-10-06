@@ -93,7 +93,7 @@ fn sync_search_doctor_reset_round_trip() {
 }
 
 #[test]
-fn pre_v7_metadata_db_is_reported_and_left_unchanged() {
+fn old_metadata_db_is_reported_and_left_unchanged() {
     let ollama = FakeOllama::start();
     let home = TestHome::new(&ollama);
     home.write_source("a.md", "# A\n");

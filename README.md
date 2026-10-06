@@ -55,6 +55,7 @@ colibri doctor --json --strict
 colibri update
 colibri update vault --dry-run          # show what would change, write nothing
 colibri update --allow-mass-prune       # accept deletions above the safety limit
+colibri update --retry-failed           # retry files whose conversion failed before
 
 # What is in CoLibri, what is pending, what needs attention
 colibri status
@@ -67,8 +68,12 @@ colibri sync --connector zephyr-ctslab
 colibri index
 colibri index --force
 
-# Import a single PDF or EPUB as a book
-colibri import ~/Downloads/book.epub --reindex
+# Books: sweep the configured library folders (only new or changed books)
+colibri add
+colibri add ~/Downloads/book.epub          # one book, from anywhere
+colibri add book.pdf --reconvert           # redo a poor conversion
+colibri list
+colibri remove "Pro Git"                   # later sweeps will not add it again
 
 # Hybrid (default) / semantic / keyword search
 colibri search "microservices patterns"
@@ -96,7 +101,15 @@ colibri reset
 colibri update
 ```
 
-Every ingested document belongs to a collection: the mirror `name`, the connector `id` for `sync`, and `books` for `colibri import`. Search results carry the collection, and `--collection` (CLI) or `collection` (MCP) restricts a search to one.
+Every ingested document belongs to a collection: the mirror `name`, the connector `id` for `sync`, and `books` for the library. Search results carry the collection, and `--collection` (CLI) or `collection` (MCP) restricts a search to one.
+
+### Library
+
+The library holds books. A folder with a calibre `metadata.opf` is one book: it is identified by calibre's book UUID (renaming or moving it in calibre does not create a duplicate), its title, authors, language and tags come from the OPF, and one format is used (`prefer_formats`, EPUB before PDF by default). Any other EPUB, PDF or DOCX is a book identified by its content. `.acsm` files are Adobe DRM links, not books; they are reported in `colibri status`.
+
+Books are never deleted automatically. A book whose file disappears stays searchable and shows as "source missing"; `colibri remove` takes a book out, and sweeps respect that until you add the file again explicitly. A changed EPUB is converted again (and re-embedded only if its text changed); a changed PDF is only reported, because re-running docling is slow, so update it with `colibri add <file> --reconvert`. A file whose conversion failed is not retried on every run; use `--retry-failed` (installing a missing converter needs no flag).
+
+`colibri update` sweeps the library too, so one command keeps everything current.
 
 ### Mirrors
 
@@ -104,7 +117,7 @@ A mirror is a folder CoLibri keeps in sync. `colibri update` ingests new files, 
 
 Deletions are guarded. Nothing is pruned when the mirror folder is missing or any part of it could not be read, and a run that would delete more than `max(prune.min_count, prune.max_fraction × documents)` stops and reports instead (override with `--allow-mass-prune`). Narrowing `include`/`exclude` counts as deleting, so review `colibri update --dry-run` first. Files that exist only in the cloud (OneDrive/iCloud placeholders) are skipped and reported, never pruned.
 
-Commands that change data (`sync`, `index`, `import`, `reset`) take a write lock, so only one runs at a time; a second one fails immediately and names the process holding the lock. `search` and `serve` only read and never block writers.
+Commands that change data (`update`, `add`, `remove`, `sync`, `index`, `reset`) take a write lock, so only one runs at a time; a second one fails immediately and names the process holding the lock. `search` and `serve` only read and never block writers.
 
 `colibri serve --check` and `colibri doctor` report whether the index matches the configured embedding model; `colibri serve` refuses to start when it does not.
 
@@ -138,9 +151,14 @@ mirrors:
 prune:
   max_fraction: 0.2                  # defaults
   min_count: 25
+library:
+  doc_type: book                     # default
+  prefer_formats: [epub, pdf, docx]  # default
+  roots:
+    - path: "~/Library/CloudStorage/OneDrive-Hilti/00 My Workflow/101 Bibliothek/eBooks - calibre"
 ```
 
-Unknown keys inside `mirrors` and `prune` are errors, so typos do not go unnoticed. `type: filesystem` connectors are no longer supported; move them to `mirrors:`.
+Unknown keys inside `mirrors`, `prune` and `library` are errors, so typos do not go unnoticed. `type: filesystem` connectors are no longer supported; move them to `mirrors:`.
 
 The older `ollama: {base_url, embedding_model}` section is still read when `embedding:` is absent. `OLLAMA_BASE_URL` and `COLIBRI_EMBEDDING_MODEL` override both. Changing the model triggers a full re-embed on the next index run.
 
@@ -148,7 +166,7 @@ The older `ollama: {base_url, embedding_model}` section is still read when `embe
 
 Runtime data is stored under `COLIBRI_HOME` (default: `~/.local/share/colibri/`):
 
-- `metadata.db`: SQLite metadata (schema v7): documents, collections, problems, conversions
+- `metadata.db`: SQLite metadata (schema v8): documents, collections, problems, conversions
 - `canonical/<collection>/`: canonical markdown of every document
 - `conversions/`: cached markdown of converted files, keyed by the source file's SHA-256
 - `index/lancedb/`: the vector and keyword index (one `chunks` table) plus `index_meta.json`

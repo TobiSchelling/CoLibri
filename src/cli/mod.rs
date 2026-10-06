@@ -1,11 +1,13 @@
 //! CLI command definitions and handlers.
 
+pub mod add;
 pub mod bootstrap;
 pub mod connectors;
 pub mod doctor;
-pub mod import;
 pub mod index;
 pub mod instructions;
+pub mod list;
+pub mod remove;
 pub mod reset;
 pub mod search;
 pub mod serve;
@@ -148,6 +150,10 @@ pub enum Commands {
         #[arg(long)]
         allow_mass_prune: bool,
 
+        /// Retry conversions that failed in an earlier run
+        #[arg(long)]
+        retry_failed: bool,
+
         /// Skip the indexing step
         #[arg(long)]
         no_index: bool,
@@ -249,30 +255,48 @@ pub enum Commands {
         json: bool,
     },
 
-    /// Import PDF or EPUB files into the library as markdown
-    Import {
-        /// Input file path (PDF or EPUB)
-        input: PathBuf,
+    /// Add books: sweep the configured library folders, or add the given files/folders
+    #[command(alias = "import")]
+    Add {
+        /// Book files or folders (default: sweep `library.roots`)
+        paths: Vec<PathBuf>,
 
-        /// Working directory for conversion tools (defaults to a temp dir)
-        #[arg(short, long)]
-        output_dir: Option<PathBuf>,
-
-        /// PDF converter: docling (quality) or marker (speed)
-        #[arg(long, default_value = "docling", value_parser = clap::value_parser!(import::PdfConverter))]
-        converter: import::PdfConverter,
-
-        /// Image handling: placeholder (default, no images), referenced (separate files), embedded (base64)
-        #[arg(long, default_value = "placeholder", value_parser = clap::value_parser!(import::ImageMode))]
-        image_mode: import::ImageMode,
-
-        /// Directory for extracted images (not supported by `colibri import`)
+        /// Convert again even if a cached conversion exists
         #[arg(long)]
-        attachments_dir: Option<PathBuf>,
+        reconvert: bool,
 
-        /// Index the canonical corpus after import
+        /// Retry conversions that failed in an earlier run
         #[arg(long)]
-        reindex: bool,
+        retry_failed: bool,
+
+        /// Show what would be added without writing anything
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Skip the indexing step
+        #[arg(long)]
+        no_index: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List the books in the library
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Include books you removed
+        #[arg(long)]
+        removed: bool,
+    },
+
+    /// Remove a book (by id or title); later sweeps will not add it again
+    Remove {
+        /// Book id (see `colibri list --json`) or part of its title
+        query: String,
     },
 }
 

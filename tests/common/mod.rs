@@ -123,6 +123,15 @@ impl TestHome {
         Self::with_mirrors(ollama, "")
     }
 
+    /// Like `new`, plus extra top-level YAML (e.g. a `library:` section).
+    pub fn with_extra(ollama: &FakeOllama, extra_yaml: &str) -> Self {
+        let home = Self::with_mirrors(ollama, "");
+        let mut config = std::fs::read_to_string(home.config_path()).unwrap();
+        config.push_str(extra_yaml);
+        std::fs::write(home.config_path(), config).unwrap();
+        home
+    }
+
     /// Like `new`, plus extra YAML mirror entries (each starting with `  - `).
     pub fn with_mirrors(ollama: &FakeOllama, extra_mirrors: &str) -> Self {
         let root = tempfile::TempDir::new().unwrap();

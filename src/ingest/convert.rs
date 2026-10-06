@@ -134,6 +134,11 @@ fn which_exists(tool: &str) -> bool {
 pub trait Converter {
     /// Tool name recorded with a cached conversion.
     fn tool_for(&self, ext: &str) -> &'static str;
+    /// `Err` when the tool for `ext` is not installed. Such failures are not
+    /// remembered, so installing the tool is enough to make the next run work.
+    fn check_available(&self, _ext: &str) -> Result<(), String> {
+        Ok(())
+    }
     fn convert(&self, ext: &str, path: &Path) -> Result<String, String>;
 }
 
@@ -146,6 +151,23 @@ impl Converter for ExternalConverter {
             Some(ConversionPipeline::Pdf) => "docling",
             Some(ConversionPipeline::Pptx) => "markitdown",
             _ => "pandoc",
+        }
+    }
+
+    fn check_available(&self, ext: &str) -> Result<(), String> {
+        let ok = match conversion_command(ext) {
+            Some(ConversionPipeline::Pdf) => which_exists("docling"),
+            Some(ConversionPipeline::Pptx) => which_exists("markitdown") || which_exists("pandoc"),
+            Some(ConversionPipeline::Pandoc { .. }) => which_exists("pandoc"),
+            None => false,
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(format!(
+                "{} is not installed (needed for {ext})",
+                self.tool_for(ext)
+            ))
         }
     }
 
@@ -176,12 +198,30 @@ pub fn file_sha256(path: &Path) -> std::io::Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+fn cache_paths(conversions_dir: &Path, sha256: &str) -> (String, std::path::PathBuf) {
+    let rel = format!("{}/{sha256}.md", &sha256[..2.min(sha256.len())]);
+    let abs = conversions_dir.join(&rel);
+    (rel, abs)
+}
+
+/// Forget the cached result (or failure) for these bytes, e.g. before `--reconvert`.
+pub fn clear_cached(
+    store: &crate::metadata_store::MetadataStore,
+    conversions_dir: &Path,
+    sha256: &str,
+) -> Result<(), String> {
+    let (_, abs) = cache_paths(conversions_dir, sha256);
+    let _ = std::fs::remove_file(abs);
+    store.delete_conversion(sha256).map_err(|e| e.to_string())
+}
+
 /// Markdown for a convertible file, converting each distinct content (by
 /// SHA-256) only once. Returns (markdown, tool).
 ///
 /// The cache is content-addressed (`<conversions_dir>/<sha[..2]>/<sha>.md`)
 /// and written atomically, so a cached file is reused even if the row that
-/// recorded it was rolled back with an interrupted run.
+/// recorded it was rolled back with an interrupted run. A failed conversion
+/// is remembered and not retried unless `retry_failed` is set.
 pub fn convert_cached(
     store: &crate::metadata_store::MetadataStore,
     conversions_dir: &Path,
@@ -189,27 +229,39 @@ pub fn convert_cached(
     ext: &str,
     path: &Path,
     sha256: &str,
+    retry_failed: bool,
 ) -> Result<(String, String), String> {
-    let rel = format!("{}/{sha256}.md", &sha256[..2.min(sha256.len())]);
-    let abs = conversions_dir.join(&rel);
+    let (rel, abs) = cache_paths(conversions_dir, sha256);
+    let row = store.get_conversion(sha256).map_err(|e| e.to_string())?;
     if let Ok(markdown) = std::fs::read_to_string(&abs) {
-        let tool = store
-            .get_conversion(sha256)
-            .ok()
-            .flatten()
-            .map(|(tool, _)| tool)
+        let tool = row
+            .map(|r| r.converter)
             .unwrap_or_else(|| converter.tool_for(ext).to_string());
         return Ok((markdown, tool));
     }
-    let markdown = converter.convert(ext, path)?;
+    if let Some(error) = row.and_then(|r| r.error).filter(|_| !retry_failed) {
+        return Err(format!(
+            "conversion failed before: {error} (retry with --retry-failed)"
+        ));
+    }
+    converter.check_available(ext)?;
     let tool = converter.tool_for(ext);
+    let markdown = match converter.convert(ext, path) {
+        Ok(markdown) => markdown,
+        Err(error) => {
+            store
+                .put_conversion(sha256, tool, "", Some(&error))
+                .map_err(|e| e.to_string())?;
+            return Err(error);
+        }
+    };
     let dir = abs.parent().unwrap_or(conversions_dir);
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let tmp = dir.join(format!("{sha256}.md.tmp"));
     std::fs::write(&tmp, &markdown).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &abs).map_err(|e| e.to_string())?;
     store
-        .put_conversion(sha256, tool, &rel)
+        .put_conversion(sha256, tool, &rel, None)
         .map_err(|e| e.to_string())?;
     Ok((markdown, tool.to_string()))
 }
@@ -223,6 +275,10 @@ pub(crate) mod fakes {
     #[derive(Default)]
     pub(crate) struct CountingConverter {
         pub calls: AtomicUsize,
+        /// Fail for files whose name contains this text.
+        pub fail_on: Option<&'static str>,
+        /// Return this markdown regardless of the input.
+        pub fixed_output: Option<&'static str>,
     }
 
     impl CountingConverter {
@@ -238,6 +294,13 @@ pub(crate) mod fakes {
 
         fn convert(&self, _ext: &str, path: &Path) -> Result<String, String> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if self.fail_on.is_some_and(|f| name.contains(f)) {
+                return Err(format!("cannot convert {name}"));
+            }
+            if let Some(fixed) = self.fixed_output {
+                return Ok(fixed.to_string());
+            }
             let text = std::fs::read_to_string(path).unwrap_or_default();
             Ok(format!(
                 "# converted {}\n\n{text}",
@@ -267,11 +330,38 @@ mod tests {
         let sha_a = file_sha256(&a).unwrap();
         let sha_b = file_sha256(&b).unwrap();
         assert_eq!(sha_a, sha_b);
-        let (md, tool) = convert_cached(&store, &conv_dir, &fake, ".epub", &a, &sha_a).unwrap();
+        let (md, tool) =
+            convert_cached(&store, &conv_dir, &fake, ".epub", &a, &sha_a, false).unwrap();
         assert!(md.contains("same bytes"));
         assert_eq!(tool, "fake");
-        convert_cached(&store, &conv_dir, &fake, ".epub", &b, &sha_b).unwrap();
+        convert_cached(&store, &conv_dir, &fake, ".epub", &b, &sha_b, false).unwrap();
         assert_eq!(fake.calls(), 1);
+    }
+
+    #[test]
+    fn failures_are_remembered_until_retry() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store =
+            crate::metadata_store::MetadataStore::open_rw(&dir.path().join("m.db")).unwrap();
+        let conv_dir = dir.path().join("conversions");
+        let src = dir.path().join("broken.pdf");
+        std::fs::write(&src, "garbage").unwrap();
+        let sha = file_sha256(&src).unwrap();
+        let fake = CountingConverter {
+            fail_on: Some("broken"),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            assert!(convert_cached(&store, &conv_dir, &fake, ".pdf", &src, &sha, false).is_err());
+        }
+        assert_eq!(fake.calls(), 1, "a failure is not retried");
+        let err = convert_cached(&store, &conv_dir, &fake, ".pdf", &src, &sha, true).unwrap_err();
+        assert!(err.contains("cannot convert"));
+        assert_eq!(fake.calls(), 2);
+
+        clear_cached(&store, &conv_dir, &sha).unwrap();
+        assert!(convert_cached(&store, &conv_dir, &fake, ".pdf", &src, &sha, false).is_err());
+        assert_eq!(fake.calls(), 3);
     }
 
     #[test]
@@ -286,10 +376,10 @@ mod tests {
         {
             let store = crate::metadata_store::MetadataStore::open_rw(&path).unwrap();
             let tx = store.begin().unwrap();
-            convert_cached(&store, &conv_dir, &fake, ".pdf", &src, &sha).unwrap();
+            convert_cached(&store, &conv_dir, &fake, ".pdf", &src, &sha, false).unwrap();
             drop(tx); // rolled back: the conversions row is gone
             assert_eq!(store.get_conversion(&sha).unwrap(), None);
-            convert_cached(&store, &conv_dir, &fake, ".pdf", &src, &sha).unwrap();
+            convert_cached(&store, &conv_dir, &fake, ".pdf", &src, &sha, false).unwrap();
         }
         assert_eq!(fake.calls(), 1);
     }

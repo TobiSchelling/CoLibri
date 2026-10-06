@@ -42,6 +42,9 @@ struct RawConfig {
     mirrors: Vec<MirrorRaw>,
 
     #[serde(default)]
+    library: Option<LibraryRaw>,
+
+    #[serde(default)]
     prune: PruneRaw,
 }
 
@@ -98,6 +101,102 @@ fn default_prune_max_fraction() -> f64 {
 
 fn default_prune_min_count() -> usize {
     25
+}
+
+/// Books: added once, never auto-deleted, identified by calibre UUID.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LibraryRaw {
+    #[serde(default = "default_library_doc_type")]
+    doc_type: String,
+    #[serde(default = "default_prefer_formats")]
+    prefer_formats: Vec<String>,
+    #[serde(default)]
+    roots: Vec<LibraryRootRaw>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LibraryRootRaw {
+    path: String,
+}
+
+fn default_library_doc_type() -> String {
+    "book".into()
+}
+
+fn default_prefer_formats() -> Vec<String> {
+    vec!["epub".into(), "pdf".into(), "docx".into()]
+}
+
+/// Collection name of the library.
+pub const LIBRARY_COLLECTION: &str = "books";
+
+/// Formats a library book can be ingested from.
+pub const BOOK_FORMATS: [&str; 3] = ["epub", "pdf", "docx"];
+
+/// A resolved library definition.
+#[derive(Debug, Clone)]
+pub struct LibraryConfig {
+    pub doc_type: String,
+    /// Lowercase extensions without dot, most preferred first.
+    pub prefer_formats: Vec<String>,
+    /// Folders swept by `colibri add` (no arguments) and `colibri update`.
+    pub roots: Vec<PathBuf>,
+}
+
+impl Default for LibraryConfig {
+    /// Used by `colibri add <file>` when no `library:` section exists.
+    fn default() -> Self {
+        Self {
+            doc_type: default_library_doc_type(),
+            prefer_formats: default_prefer_formats(),
+            roots: Vec::new(),
+        }
+    }
+}
+
+fn resolve_library(raw: Option<LibraryRaw>) -> Result<Option<LibraryConfig>, ColibriError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let mut prefer_formats = Vec::new();
+    for f in raw.prefer_formats {
+        let f = f.trim().trim_start_matches('.').to_ascii_lowercase();
+        if !BOOK_FORMATS.contains(&f.as_str()) {
+            return Err(ColibriError::Config(format!(
+                "library.prefer_formats: unsupported format '{f}' (use {})",
+                BOOK_FORMATS.join(", ")
+            )));
+        }
+        prefer_formats.push(f);
+    }
+    let mut roots = Vec::new();
+    for root in raw.roots {
+        let path = expand_tilde(root.path.trim());
+        if !path.is_absolute() {
+            return Err(ColibriError::Config(format!(
+                "library.roots: path must be absolute or start with ~ (got '{}')",
+                root.path
+            )));
+        }
+        if let Some(other) = roots
+            .iter()
+            .find(|r: &&PathBuf| path.starts_with(r) || r.starts_with(&path))
+        {
+            return Err(ColibriError::Config(format!(
+                "library.roots: '{}' and '{}' overlap; list each folder once",
+                other.display(),
+                path.display()
+            )));
+        }
+        roots.push(path);
+    }
+    Ok(Some(LibraryConfig {
+        doc_type: raw.doc_type,
+        prefer_formats,
+        roots,
+    }))
 }
 
 /// A resolved mirror definition.
@@ -162,7 +261,8 @@ fn resolve_mirrors(
                 "mirrors: invalid name '{name}' (use letters, digits, '-', '_', '.')"
             )));
         }
-        if !seen.insert(name.clone()) || connector_ids.contains(&name) {
+        if !seen.insert(name.clone()) || connector_ids.contains(&name) || name == LIBRARY_COLLECTION
+        {
             return Err(ColibriError::Config(format!(
                 "mirrors: name '{name}' is used twice (mirror and connector names must be unique)"
             )));
@@ -301,6 +401,7 @@ fn resolve_colibri_home(raw_data_dir: Option<&str>) -> PathBuf {
 pub struct AppConfig {
     pub connector_jobs: Vec<crate::connectors::ConnectorJob>,
     pub mirrors: Vec<MirrorConfig>,
+    pub library: Option<LibraryConfig>,
     pub prune: PruneConfig,
     pub colibri_home: PathBuf,
     pub canonical_dir: PathBuf,
@@ -360,6 +461,7 @@ impl AppConfig {
         Self {
             connector_jobs: Vec::new(),
             mirrors: Vec::new(),
+            library: None,
             prune: PruneConfig {
                 max_fraction: default_prune_max_fraction(),
                 min_count: default_prune_min_count(),
@@ -417,6 +519,7 @@ pub fn load_config() -> Result<AppConfig, ColibriError> {
 
     let connector_ids: Vec<String> = connector_jobs.iter().map(|j| j.id.clone()).collect();
     let mirrors = resolve_mirrors(raw.mirrors, &connector_ids)?;
+    let library = resolve_library(raw.library)?;
     let prune = PruneConfig {
         max_fraction: raw.prune.max_fraction,
         min_count: raw.prune.min_count,
@@ -440,6 +543,7 @@ pub fn load_config() -> Result<AppConfig, ColibriError> {
     Ok(AppConfig {
         connector_jobs,
         mirrors,
+        library,
         prune,
         canonical_dir: colibri_home.join("canonical"),
         index_dir: colibri_home.join("index").join("lancedb"),
@@ -599,6 +703,17 @@ pub(crate) mod tests {
                 "invalid glob",
             ),
             ("mirrors:\n  - {name: v, path: docs}\n", "must be absolute"),
+            ("mirrors:\n  - {name: books, path: /x}\n", "used twice"),
+            ("library: {prefer_formats: [mobi]}\n", "unsupported format"),
+            ("library: {roots: [{path: rel}]}\n", "must be absolute"),
+            (
+                "library: {roots: [{path: /x, layout: calibre}]}\n",
+                "layout",
+            ),
+            (
+                "library: {roots: [{path: /x}, {path: /x/sub}]}\n",
+                "overlap",
+            ),
         ] {
             let (_r, _h) = isolated_home(yaml);
             let err = load_config().unwrap_err().to_string();

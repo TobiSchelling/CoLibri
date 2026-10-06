@@ -1,10 +1,10 @@
 # Files-First Ingestion Verification Report
 
 > **Feature:** files-first-ingestion
-> **Date:** 2026-10-06 (P1+P2), 2026-10-06 (P3)
+> **Date:** 2026-10-06 (P1+P2, P3, P4)
 > **Spec:** specs/files-first-ingestion/requirements.md
 > **Verified by:** Claude (claude-opus-5-5)
-> **Status:** PASSED for P1+P2 (REQ-001..008) and P3 (REQ-009..016, AC-006.2); REQ-017..031 not yet implemented
+> **Status:** PASSED for P1+P2 (REQ-001..008), P3 (REQ-009..016, AC-006.2) and P4 (REQ-017..024, AC-014.1 library row); REQ-025..031 not yet implemented
 
 ---
 
@@ -41,7 +41,7 @@ All evidence below was produced in this session on branch `feat/ffi-p1-storage` 
 
 ### Not in this phase
 
-REQ-017..REQ-024 (P4 library), REQ-025..REQ-030 (P5 fetchers), REQ-031 (rebuild on the real setup) are not implemented yet and were not verified.
+REQ-025..REQ-030 (P5 fetchers), REQ-031 (rebuild on the real setup) are not implemented yet and were not verified.
 
 ## Deliverables Check
 
@@ -127,3 +127,48 @@ Evidence produced in this session on `feat/ffi-p1-storage` (uncommitted tree bef
 Known limitation (accepted, tracked for P4): a file whose conversion fails is retried on every update.
 
 **Gate (phase P3):** all MUST criteria pass, no MUST failed, deliverables produced. **Result: PASSED (phase P3).**
+
+---
+
+## Phase P4: Acceptance Criteria Results
+
+Evidence from this session on `feat/ffi-p1-storage` (uncommitted tree before the P4 commit): unit tests run individually with `cargo test --bin colibri <name>`; `cargo test --test cli_library` runs the real binary with EPUBs built by pandoc 3.12 (`/opt/homebrew/bin/pandoc`). Full suite: 179 unit + 5 integration tests pass; `cargo fmt --check` OK; `cargo clippy -- -D warnings` exit 0 (bin and `--tests`). Note: the metadata schema moved to v8 in this phase (new `conversions.error` column); AC-001.2 tests were updated and pass.
+
+| REQ | Priority | Criterion | Method | Result | Evidence |
+|-----|----------|-----------|--------|--------|----------|
+| REQ-014 | MUST | AC-014.1 (library row): `status --json` shows the library collection | `cli_library::add_list_remove_restore_and_status` | PASS | `books`: kind `library`, active 2, source_missing 1, last_run_status `ok`; orphan_chunks 0 |
+| REQ-017 | MUST | AC-017.1: second sweep, 0 converter calls, 0 new books | `library::tests::sweep_adds_new_books_once_with_calibre_metadata`; `cli_library` | PASS | counts (added, updated, unchanged) = (0,0,1), converter calls stay 1; CLI second `add` reports added 0 / unchanged 1 |
+| REQ-017 | MUST | AC-017.2: moved calibre folder updates the path without conversion or re-embedding | `library::tests::moved_calibre_book_keeps_identity_without_conversion` | PASS | `source_path` under the new folder, `is_index_current()`, converter calls 1 |
+| REQ-017 | MUST | AC-017.3: loose EPUB gets a content identity; a copy elsewhere is already known | `library::tests::loose_files_are_identified_by_content`, `edited_loose_books_keep_their_identity`, `identical_loose_copies_are_one_book_and_stay_stable` | PASS | 1 document, outcome `already_known`; edits keep the identity; same-folder copies reported as `duplicate`, no flip-flop |
+| REQ-018 | MUST | AC-018.1: `add book.epub` searchable at once; repeat says "already in library" | `cli_library` | PASS | keyword search for the book's term returns 1 right after `add`; second `add` stderr contains `already in library` |
+| REQ-019 | MUST | AC-019.1: EPUB+PDF → one document, format epub | `library::tests::one_format_per_book_and_drm_only_books_are_problems`; `cli_library` (`.original_epub` ignored) | PASS | one doc, `format == epub` |
+| REQ-019 | MUST | AC-019.2: ACSM-only → no document, `drm_placeholder` problem | same unit test | PASS | no doc for the ACSM book; problem stored and listed |
+| REQ-020 | MUST | AC-020.1: Pro Git OPF → title and authors; `&amp;` decoded | `calibre::tests::parses_calibre_opf`; `cli_library` (`list --json`) | PASS | title `Pro Git`, authors `[Scott Chacon, Ben Straub]`, publisher `… GmbH & Co. KG` |
+| REQ-021 | MUST | AC-021.1: remove hides the book; sweep skips it; explicit add restores | `library::tests::removed_books_stay_removed_until_added_explicitly`; `cli_library` | PASS | search returns 0 after `remove`; sweep `skipped_removed == 1`; `add <file>` → `restored`, searchable again, no new conversion |
+| REQ-022 | MUST | AC-022.1: deleted source stays searchable; status counts source-missing | `library::tests::books_whose_file_disappears_stay_searchable`; `cli_library` | PASS | `source_missing` true, still searchable; `update books` reports source_missing 1; offline roots do not flag books (`unavailable_root_does_not_flag_books_missing`) |
+| REQ-023 | MUST | AC-023.1: same bytes under another path/identity → 0 extra conversions; `--reconvert` → exactly 1 | `library::tests::same_bytes_convert_once_and_reconvert_converts_exactly_once`, `reconvert_converts_identical_bytes_once_per_run`, `loose_files_are_identified_by_content` | PASS | two identities with identical bytes: 1 call; loose copy: 0 extra; explicit `--reconvert`: exactly +1 |
+| REQ-024 | SHOULD | AC-024.1: changed EPUB bytes, same markdown → 1 conversion, 0 embeddings | `library::tests::changed_epub_is_reconverted_but_changed_pdf_is_flagged` | PASS | EPUB converted once more; `is_index_current()` still true |
+| REQ-024 | SHOULD | AC-024.2: changed PDF → 0 conversions, `source_changed` problem | same test; `edited_loose_books_keep_their_identity` | PASS | PDF not converted; `source_changed` problem for the PDF (calibre and loose) |
+
+### Summary (phase P4)
+
+| Priority | Pass | Fail | Skip | Total |
+|----------|------|------|------|-------|
+| MUST | 11 | 0 | 0 | 11 |
+| SHOULD | 2 | 0 | 0 | 2 |
+| **Total** | **13** | **0** | **0** | **13** |
+
+### Deliverables (phase P4)
+
+| # | Deliverable | Location | Status | Notes |
+|---|-------------|----------|--------|-------|
+| 5 | Implementation plan | specs/files-first-ingestion/plan-p4.md | PRODUCED | incl. review-driven decisions |
+| 6 | Unit tests | `src/ingest/{library,calibre,convert}.rs`, `src/config.rs` | PRODUCED | 179/179 pass |
+| 7 | Integration tests | tests/cli_library.rs (real EPUBs via pandoc; CI installs pandoc) | PRODUCED | 5/5 integration tests pass |
+| 10 | Linter clean | — | PRODUCED | fmt + clippy (bin, tests) clean |
+| 12 | Code review | — | PRODUCED | 6 important findings fixed (edited loose books duplicated, broken OPF splitting books, folder add unpinning, same-folder copy flip-flop, online-only hashing, offline root flagging) plus restore of missing canonical files, schema v8, once-per-run reconvert, dry-run accuracy |
+| 13 | Documentation update | README.md, CLAUDE.md | PRODUCED | library, `add`/`list`/`remove`, `--retry-failed`, config |
+
+The P3 known limitation (failed conversions retried on every run) is resolved by the negative conversion cache (`convert::tests::failures_are_remembered_until_retry`).
+
+**Gate (phase P4):** all MUST criteria pass, no MUST failed, deliverables produced. **Result: PASSED (phase P4).**

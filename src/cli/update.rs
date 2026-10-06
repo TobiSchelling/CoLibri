@@ -85,6 +85,23 @@ fn print_report(report: &UpdateReport) {
             );
         }
     }
+    if let Some(l) = &report.library {
+        eprintln!(
+            "{} [{}] added={} updated={} unchanged={} restored={} source-missing={}",
+            l.name, l.status, l.added, l.updated, l.unchanged, l.restored, l.source_missing
+        );
+        for b in l
+            .books
+            .iter()
+            .filter(|b| b.outcome != "already_known")
+            .take(20)
+        {
+            eprintln!("  {}: {}", b.outcome, b.title);
+        }
+        for p in l.problems.iter().take(10) {
+            eprintln!("  {} {}: {}", p.kind, p.source_path, p.message);
+        }
+    }
     if let Some(i) = &report.index {
         eprintln!(
             "Index: {} embedded ({} chunks), {} unchanged, {} removed, {} orphaned purged, {} errors",

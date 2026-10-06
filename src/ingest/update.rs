@@ -1,21 +1,25 @@
-//! `colibri update`: reconcile mirrors, then bring the index up to date.
+//! `colibri update`: reconcile mirrors, sweep the library, then bring the
+//! index up to date.
 
 use serde::Serialize;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, LIBRARY_COLLECTION};
 use crate::embedding::Embedder;
 use crate::error::ColibriError;
 use crate::indexer::{index_library, IndexEvent, IndexOptions};
 use crate::ingest::convert::Converter;
+use crate::ingest::library::{sweep, LibraryOptions, LibraryReport};
 use crate::ingest::mirror::{reconcile_mirror, MirrorReport, ReconcileOptions};
 use crate::metadata_store::MetadataStore;
 
 #[derive(Debug, Clone, Default)]
 pub struct UpdateOptions {
-    /// Mirror names to update; empty means all.
+    /// Mirror names (or `books` for the library) to update; empty means all.
     pub names: Vec<String>,
     pub dry_run: bool,
     pub allow_mass_prune: bool,
+    /// Retry conversions that failed in an earlier run.
+    pub retry_failed: bool,
     pub no_index: bool,
     /// Re-embed everything.
     pub force_index: bool,
@@ -35,6 +39,7 @@ pub struct IndexSummary {
 pub struct UpdateReport {
     pub dry_run: bool,
     pub mirrors: Vec<MirrorReport>,
+    pub library: Option<LibraryReport>,
     pub index: Option<IndexSummary>,
 }
 
@@ -42,6 +47,7 @@ impl UpdateReport {
     /// A mirror could not be processed at all, or indexing had errors.
     pub fn has_errors(&self) -> bool {
         self.mirrors.iter().any(|m| m.status == "error")
+            || self.library.as_ref().is_some_and(|l| l.status == "error")
             || self.index.as_ref().is_some_and(|i| i.errors > 0)
     }
 }
@@ -56,13 +62,14 @@ pub async fn run_update<E: Embedder>(
     opts: &UpdateOptions,
     on_progress: impl Fn(IndexEvent),
 ) -> Result<UpdateReport, ColibriError> {
-    if config.mirrors.is_empty() {
+    if config.mirrors.is_empty() && config.library.is_none() {
         return Err(ColibriError::Config(
-            "No mirrors configured. Add a `mirrors:` section to config.yaml.".into(),
+            "Nothing to update. Add `mirrors:` or `library:` to config.yaml.".into(),
         ));
     }
     for name in &opts.names {
-        if !config.mirrors.iter().any(|m| &m.name == name) {
+        let is_library = name == LIBRARY_COLLECTION && config.library.is_some();
+        if !is_library && !config.mirrors.iter().any(|m| &m.name == name) {
             return Err(ColibriError::Config(format!("Unknown mirror '{name}'")));
         }
     }
@@ -74,6 +81,7 @@ pub async fn run_update<E: Embedder>(
     let reconcile_opts = ReconcileOptions {
         dry_run: opts.dry_run,
         allow_mass_prune: opts.allow_mass_prune,
+        retry_failed: opts.retry_failed,
     };
     let mut mirrors = Vec::new();
     for mirror in selected {
@@ -85,6 +93,22 @@ pub async fn run_update<E: Embedder>(
             reconcile_opts,
         )?);
     }
+
+    let wants_library = opts.names.is_empty() || opts.names.iter().any(|n| n == LIBRARY_COLLECTION);
+    let library = match &config.library {
+        Some(library) if wants_library => Some(sweep(
+            config,
+            library,
+            store,
+            converter,
+            LibraryOptions {
+                dry_run: opts.dry_run,
+                retry_failed: opts.retry_failed,
+                ..Default::default()
+            },
+        )?),
+        _ => None,
+    };
 
     let index = match store {
         Some(store) if !opts.dry_run && !opts.no_index => {
@@ -108,6 +132,7 @@ pub async fn run_update<E: Embedder>(
     Ok(UpdateReport {
         dry_run: opts.dry_run,
         mirrors,
+        library,
         index,
     })
 }

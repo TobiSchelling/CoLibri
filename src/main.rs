@@ -71,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
             names,
             dry_run,
             allow_mass_prune,
+            retry_failed,
             no_index,
             force,
             json,
@@ -80,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
                     names,
                     dry_run,
                     allow_mass_prune,
+                    retry_failed,
                     no_index,
                     force_index: force,
                 },
@@ -143,23 +145,25 @@ async fn main() -> anyhow::Result<()> {
             .await
         }
         cli::Commands::Serve { check, json } => cli::serve::run(check, json).await,
-        cli::Commands::Import {
-            input,
-            output_dir,
-            converter,
-            image_mode,
-            attachments_dir,
-            reindex,
+        cli::Commands::Add {
+            paths,
+            reconvert,
+            retry_failed,
+            dry_run,
+            no_index,
+            json,
         } => {
-            cli::import::run(
-                input,
-                output_dir,
-                converter,
-                image_mode,
-                attachments_dir,
-                reindex,
-            )
+            cli::add::run(cli::add::AddOptions {
+                paths,
+                reconvert,
+                retry_failed,
+                dry_run,
+                no_index,
+                json,
+            })
             .await
         }
+        cli::Commands::List { json, removed } => cli::list::run(json, removed).await,
+        cli::Commands::Remove { query } => cli::remove::run(query).await,
     }
 }

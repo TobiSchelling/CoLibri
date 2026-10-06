@@ -38,10 +38,11 @@ Ollama embed    FTS index (BM25)
 ### Key Types & Boundaries
 
 - **`AppConfig`** (`config.rs`): Resolved config (YAML + env overrides). `load_config()` has no side effects; write commands call `config.open_for_write()` (creates layout, takes the write lock, opens the metadata DB read-write), read paths call `config.open_read()`.
-- **`MetadataStore`** (`metadata_store.rs`): rusqlite (bundled), schema v7 via `PRAGMA user_version`, rollback journal + 5 s busy timeout. `open_ro` never creates files. A DB with another schema is never modified; the error points to `colibri reset`.
+- **`MetadataStore`** (`metadata_store.rs`): rusqlite (bundled), schema v8 via `PRAGMA user_version`, rollback journal + 5 s busy timeout. `open_ro` never creates files. A DB with another schema is never modified; the error points to `colibri reset`.
 - **`DocumentRecord`** (`metadata_store.rs`): one row of `documents`. `doc_id = "<collection>:<key>"`; `status` is `active`/`removed` (only `active` is searchable); `indexed_hash` is the content hash the index chunks were built from.
 - **`WriteLock`** (`lock.rs`): OS file lock on `<home>/write.lock` holding the PID; second writer fails fast.
 - **Mirrors** (`ingest/mirror.rs`): `reconcile_mirror` plans (walk + hash/stat, read-only) then applies (convert via cache, write canonical + rows, guarded prune, record run + problems). `ingest/walk.rs` (include/exclude globs, completeness, online-only detection), `ingest/convert.rs` (`Converter` trait, `ExternalConverter`, SHA-256 keyed `convert_cached`), `ingest/update.rs` (`run_update`: mirrors then index), `cli/status.rs` (read-only report).
+- **Library** (`ingest/library.rs`, collection `books`): `sweep` (configured roots) and `add_paths` (explicit, pins format, restores removed books) build candidates per folder: `metadata.opf` with uuid → key `calibre:<uuid>`, otherwise `sha:<sha256[..16]>`; `process` decides add / metadata update / convert / flag (`source_changed` for PDFs) / skip (removed by user, reason `user`). Never deletes; unseen books get `source_missing`. `ingest/calibre.rs` parses OPF (roxmltree). Conversions use the content-addressed cache with negative caching (`--retry-failed`, missing tools are not cached).
 - **`Connector` trait** (`connectors/mod.rs`): only `ZephyrScaleConnector` remains (via `colibri sync`) until it becomes a fetcher in P5. The connector `id` is the collection name.
 - **`ingest_envelopes`** (`canonical_store.rs`): writes `canonical/<collection>/<sha256(doc_id)[..24]>.md` and upserts `DocumentRecord`s in one transaction.
 - **`index_library`** (`indexer.rs`): drops chunks of non-searchable docs, embeds docs whose `indexed_hash != content_hash` in committed batches (resumable), purges orphan chunks, rebuilds FTS once, compacts. Takes an `Embedder` (`embedding.rs`; `OllamaEmbedder` in production, a fake in tests).
@@ -58,7 +59,7 @@ JSON-RPC over stdio (`mcp.rs`). Checks index readiness (`serve_ready.rs`) and op
 
 ### Key Patterns
 
-- **Collections**: every document belongs to one (connector id for `sync`, `books` for `import`). Ids are stable across root moves.
+- **Collections**: every document belongs to one (mirror name, connector id for `sync`, `books` for the library). Ids are stable across root moves.
 - **Content-hash deduplication**: unchanged content is neither rewritten nor re-embedded.
 - **Document conversion**: FilesystemConnector converts non-markdown formats via external tools (docling for PDF, pandoc for DOCX/EPUB, markitdown for PPTX).
 - **PlantUML enrichment**: PlantUML blocks are parsed and entity/relation summaries inserted as HTML comments for searchability.
@@ -81,6 +82,9 @@ mirrors:
     doc_type: note             # default
     plantuml_summaries: true   # default
 prune: {max_fraction: 0.2, min_count: 25}
+library:                       # collection `books`
+  prefer_formats: [epub, pdf, docx]
+  roots: [{path: "~/…/eBooks - calibre"}]
 connectors:                    # Zephyr only, until P5
   - type: zephyr_scale
     id: zephyr-ctslab
@@ -93,7 +97,7 @@ Env var overrides: `COLIBRI_HOME` / `COLIBRI_DATA_DIR`, `COLIBRI_CONFIG_PATH`, `
 
 - `~/.config/colibri/config.yaml`: configuration
 - `~/.local/share/colibri/` (COLIBRI_HOME): data directory, fully rebuildable via `colibri reset` + `colibri update`
-- `metadata.db`: SQLite metadata (schema v7)
+- `metadata.db`: SQLite metadata (schema v8)
 - `canonical/<collection>/`: canonical markdown
 - `conversions/`: converted-file cache keyed by source SHA-256
 - `index/lancedb/`: vector + FTS index and `index_meta.json`

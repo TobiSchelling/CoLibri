@@ -1,4 +1,4 @@
-//! SQLite metadata store (schema v7): documents, conversions, collections, problems.
+//! SQLite metadata store (schema v8): documents, conversions, collections, problems.
 //!
 //! Uses the rollback journal (not WAL) so read-only connections never create
 //! or touch files next to the database. Writers wait up to [`BUSY_TIMEOUT`]
@@ -14,7 +14,7 @@ use rusqlite::{params, params_from_iter, Connection, OpenFlags, OptionalExtensio
 use crate::error::ColibriError;
 
 /// Schema version stored in `PRAGMA user_version`.
-pub const METADATA_SCHEMA_VERSION: i64 = 7;
+pub const METADATA_SCHEMA_VERSION: i64 = 8;
 
 /// How long a connection waits for a lock held by another colibri process.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -58,6 +58,7 @@ CREATE TABLE conversions (
     source_sha256 TEXT PRIMARY KEY,
     converter TEXT NOT NULL,
     markdown_path TEXT NOT NULL,
+    error TEXT,
     created_at TEXT NOT NULL
 );
 CREATE TABLE collections (
@@ -232,7 +233,7 @@ fn reset_hint(path: &Path, detail: &str) -> ColibriError {
 impl MetadataStore {
     /// Open for reading and writing, creating the schema in a new or empty file.
     ///
-    /// A file that is not a v7 CoLibri database is never modified: the call
+    /// A file that is not a v8 CoLibri database is never modified: the call
     /// fails with a hint to run `colibri reset`.
     pub fn open_rw(path: &Path) -> Result<Self, ColibriError> {
         let conn = Connection::open(path)?;
@@ -562,18 +563,23 @@ impl MetadataStore {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// Cached conversion for these source bytes: (converter, markdown path
-    /// relative to the conversions dir).
+    /// Recorded conversion for these source bytes (success or failure).
     pub fn get_conversion(
         &self,
         source_sha256: &str,
-    ) -> Result<Option<(String, String)>, ColibriError> {
+    ) -> Result<Option<ConversionRow>, ColibriError> {
         Ok(self
             .conn
             .query_row(
-                "SELECT converter, markdown_path FROM conversions WHERE source_sha256 = ?1",
+                "SELECT converter, markdown_path, error FROM conversions WHERE source_sha256 = ?1",
                 [source_sha256],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| {
+                    Ok(ConversionRow {
+                        converter: r.get(0)?,
+                        markdown_path: r.get(1)?,
+                        error: r.get(2)?,
+                    })
+                },
             )
             .optional()?)
     }
@@ -583,16 +589,34 @@ impl MetadataStore {
         source_sha256: &str,
         converter: &str,
         markdown_path: &str,
+        error: Option<&str>,
     ) -> Result<(), ColibriError> {
         self.conn.execute(
-            "INSERT INTO conversions (source_sha256, converter, markdown_path, created_at)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO conversions (source_sha256, converter, markdown_path, error, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(source_sha256) DO UPDATE SET converter = excluded.converter,
-                markdown_path = excluded.markdown_path, created_at = excluded.created_at",
-            params![source_sha256, converter, markdown_path, now()],
+                markdown_path = excluded.markdown_path, error = excluded.error,
+                created_at = excluded.created_at",
+            params![source_sha256, converter, markdown_path, error, now()],
         )?;
         Ok(())
     }
+
+    pub fn delete_conversion(&self, source_sha256: &str) -> Result<(), ColibriError> {
+        self.conn.execute(
+            "DELETE FROM conversions WHERE source_sha256 = ?1",
+            [source_sha256],
+        )?;
+        Ok(())
+    }
+}
+
+/// A recorded conversion. `error` is set when the conversion failed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversionRow {
+    pub converter: String,
+    pub markdown_path: String,
+    pub error: Option<String>,
 }
 
 enum SchemaState {
@@ -714,7 +738,7 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
 
-    // AC-001.2: a pre-v7 database is reported and left byte-identical.
+    // AC-001.2: a pre-v8 database is reported and left byte-identical.
     #[test]
     fn old_schema_is_rejected_and_untouched() {
         let dir = TempDir::new().unwrap();
@@ -728,7 +752,7 @@ mod tests {
 
         let err = MetadataStore::open_rw(&path).err().unwrap().to_string();
         assert!(err.contains("colibri reset"), "{err}");
-        assert!(err.contains("pre-v7"), "{err}");
+        assert!(err.contains("pre-v8"), "{err}");
         assert_eq!(std::fs::read(&path).unwrap(), before);
 
         {
@@ -785,11 +809,25 @@ mod tests {
         assert_eq!(problems[0].source_path, "c");
 
         assert_eq!(store.get_conversion("abc").unwrap(), None);
-        store.put_conversion("abc", "pandoc", "ab/abc.md").unwrap();
+        store
+            .put_conversion("abc", "pandoc", "ab/abc.md", None)
+            .unwrap();
+        let row = store.get_conversion("abc").unwrap().unwrap();
+        assert_eq!((row.converter.as_str(), row.error), ("pandoc", None));
+        store
+            .put_conversion("abc", "pandoc", "", Some("boom"))
+            .unwrap();
         assert_eq!(
-            store.get_conversion("abc").unwrap(),
-            Some(("pandoc".into(), "ab/abc.md".into()))
+            store
+                .get_conversion("abc")
+                .unwrap()
+                .unwrap()
+                .error
+                .as_deref(),
+            Some("boom")
         );
+        store.delete_conversion("abc").unwrap();
+        assert_eq!(store.get_conversion("abc").unwrap(), None);
 
         let mut other = sample("other:x");
         other.collection = "other".into();

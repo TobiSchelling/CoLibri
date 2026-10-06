@@ -6,7 +6,7 @@
 > **Repo Type:** code
 > **Spec Directory:** specs/files-first-ingestion/
 > **Design Doc Location:** specs/files-first-ingestion/design.md (approved plan, phases P1-P5)
-> **Status:** In Progress (P1+P2 and P3 verified 2026-10-06)
+> **Status:** In Progress (P1+P2, P3, P4 verified 2026-10-06)
 
 ---
 
@@ -411,17 +411,17 @@ The following deliverables are committed for this feature:
 | REQ-011 | P3 | #6 | mirror::tests::{missing_root_*, unreadable_subdirectory_*, mass_deletion_*} |
 | REQ-012 | P3 | #6 | mirror::tests::moving_the_mirror_folder_keeps_document_ids |
 | REQ-013 | P3 | #6, #10 | cli_mirrors (dry run with existing data) |
-| REQ-014 | P3 | #8 | cli_mirrors status --json (library row in P4) |
+| REQ-014 | P3, P4 | #8 | cli_mirrors, cli_library status --json |
 | REQ-015 | P3 | #6, #10 | cli_mirrors frontmatter + yaml search |
 | REQ-016 | P3 | #2, #6 | walk::tests::dataless_flag_detection; mirror::tests::online_only_* |
-| REQ-017 | P4 | | |
-| REQ-018 | P4 | | |
-| REQ-019 | P4 | | |
-| REQ-020 | P4 | | |
-| REQ-021 | P4 | | |
-| REQ-022 | P4 | | |
-| REQ-023 | P4 | | |
-| REQ-024 | P4 | | |
+| REQ-017 | P4 | plan-p4 #4 | library::tests::{sweep_adds_*, moved_calibre_book_*, loose_files_*}; cli_library |
+| REQ-018 | P4 | #6 | cli_library |
+| REQ-019 | P4 | #4 | library::tests::one_format_per_book_and_drm_only_books_are_problems |
+| REQ-020 | P4 | #1 | calibre::tests::parses_calibre_opf |
+| REQ-021 | P4 | #4, #6 | library::tests::removed_books_stay_removed_until_added_explicitly; cli_library |
+| REQ-022 | P4 | #4 | library::tests::books_whose_file_disappears_stay_searchable; cli_library |
+| REQ-023 | P4 | #2, #4 | library::tests::same_bytes_*; convert::tests |
+| REQ-024 | P4 | #4 | library::tests::changed_epub_is_reconverted_but_changed_pdf_is_flagged |
 | REQ-025 | P5 | | |
 | REQ-026 | P5 | | |
 | REQ-027 | P5 | | |
