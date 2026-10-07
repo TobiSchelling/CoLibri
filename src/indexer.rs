@@ -427,10 +427,19 @@ async fn prepare_table(
         });
         serde_json::Map::new()
     });
+    // Chunking changes what is embedded, so it is part of the index identity.
+    // Indexes written before this was recorded count as matching.
+    let same_chunking = |key: &str, value: usize| {
+        meta.get(key)
+            .and_then(|v| v.as_u64())
+            .is_none_or(|v| v == value as u64)
+    };
     let built_compatibly = meta.get("schema_version").and_then(|v| v.as_u64())
         == Some(SCHEMA_VERSION as u64)
         && meta.get("embedding_model").and_then(|v| v.as_str())
-            == Some(config.embedding_model.as_str());
+            == Some(config.embedding_model.as_str())
+        && same_chunking("chunk_size", config.chunk_size)
+        && same_chunking("chunk_overlap", config.chunk_overlap);
     let table = match db.open_table(TABLE_NAME).execute().await {
         Ok(t) => Some(t),
         Err(lancedb::Error::TableNotFound { .. }) => None,
@@ -447,9 +456,16 @@ async fn prepare_table(
     write_index_meta(
         &config.index_dir,
         &config.embedding_model,
-        &serde_json::Map::new(),
+        &chunking_meta(config),
     )?;
     Ok((None, true))
+}
+
+fn chunking_meta(config: &AppConfig) -> serde_json::Map<String, serde_json::Value> {
+    let mut m = serde_json::Map::new();
+    m.insert("chunk_size".into(), config.chunk_size.into());
+    m.insert("chunk_overlap".into(), config.chunk_overlap.into());
+    m
 }
 
 async fn has_keyword_index(table: &lancedb::Table) -> bool {
@@ -575,7 +591,7 @@ pub async fn index_library<E: Embedder>(
             }
             compact(t, &on_progress).await;
         }
-        let mut extra = serde_json::Map::new();
+        let mut extra = chunking_meta(config);
         extra.insert(
             "chunk_count".into(),
             serde_json::Value::from(t.count_rows(None).await?),
@@ -930,6 +946,40 @@ pub(crate) mod tests {
         assert_eq!(r.files_indexed, 0);
         t.checkout_latest().await.unwrap();
         assert!(has_keyword_index(&t).await);
+    }
+
+    #[tokio::test]
+    async fn chunking_change_triggers_rebuild_but_missing_keys_do_not() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut config = AppConfig::for_test(dir.path());
+        let (_lock, store) = config.open_for_write().unwrap();
+        add_doc(&config, &store, "a", "alpha");
+        let fake = FakeEmbedder::new();
+        index_library(&config, &store, &fake, &opts_per_doc(), |_| {})
+            .await
+            .unwrap();
+        let meta = read_index_meta(&config.index_dir).unwrap();
+        assert_eq!(meta.get("chunk_size").and_then(|v| v.as_u64()), Some(200));
+
+        // An index without recorded chunking (older builds) is kept.
+        let mut legacy = meta.clone();
+        legacy.remove("chunk_size");
+        legacy.remove("chunk_overlap");
+        std::fs::write(
+            config.index_dir.join("index_meta.json"),
+            serde_json::to_string(&legacy).unwrap(),
+        )
+        .unwrap();
+        let r = index_library(&config, &store, &fake, &opts_per_doc(), |_| {})
+            .await
+            .unwrap();
+        assert_eq!(r.files_indexed, 0);
+
+        config.chunk_size = 400;
+        let r = index_library(&config, &store, &fake, &opts_per_doc(), |_| {})
+            .await
+            .unwrap();
+        assert_eq!(r.files_indexed, 1, "new chunk size re-embeds everything");
     }
 
     #[test]
