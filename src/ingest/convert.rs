@@ -12,6 +12,31 @@ const DOCLING_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 /// pandoc and markitdown finish in seconds.
 const TEXT_TOOL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
+/// The meaningful tail of a tool's stderr: progress bars, Python warnings
+/// and Haskell backtraces dropped, at most 300 characters.
+fn tool_error(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .split(['\n', '\r'])
+        .map(str::trim)
+        .filter(|l| {
+            !l.is_empty()
+                && !l.contains("it/s]")
+                && !l.contains("%|")
+                && !l.contains("Warning")
+                && !l.starts_with("warnings.warn")
+                && !l.contains(", called at ")
+                && !l.starts_with("HasCallStack")
+        })
+        .collect();
+    let tail = lines[lines.len().saturating_sub(3)..].join(" | ");
+    let msg = if tail.is_empty() {
+        "no error output (the process was stopped or crashed)".to_string()
+    } else {
+        tail
+    };
+    msg.chars().take(300).collect()
+}
+
 /// Run a command, killing it after `timeout`. Output pipes are drained on
 /// threads so a chatty tool cannot block on a full pipe.
 fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
@@ -124,7 +149,7 @@ fn convert_pdf(file_path: &Path) -> Result<String, String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("docling failed: {stderr}"));
+        return Err(format!("docling failed: {}", tool_error(&stderr)));
     }
 
     // docling writes <stem>.md in the output directory.
@@ -154,7 +179,7 @@ fn convert_with_pandoc(file_path: &Path, from_format: &str) -> Result<String, St
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("pandoc failed: {stderr}"));
+        return Err(format!("pandoc failed: {}", tool_error(&stderr)));
     }
     String::from_utf8(output.stdout).map_err(|e| format!("pandoc output not UTF-8: {e}"))
 }
@@ -374,6 +399,19 @@ pub(crate) mod fakes {
 mod tests {
     use super::fakes::CountingConverter;
     use super::*;
+
+    #[test]
+    fn tool_errors_drop_progress_and_noise() {
+        let docling = "\rLoading weights:   0%|          | 0/770 [00:00<?, ?it/s]\rLoading weights: 100%|##| 770/770 [00:00<00:00, 2663.66it/s]\n/x/resource_tracker.py:475: UserWarning: leaked semaphore\n  warnings.warn(\n";
+        assert_eq!(
+            tool_error(docling),
+            "no error output (the process was stopped or crashed)"
+        );
+        let pandoc = "pandoc: Uncaught exception Data.Text.Encoding.Error.UnicodeException:\n\nCannot decode byte '\\xa7': Invalid UTF-8 stream\n\nHasCallStack backtrace:\n  collectExceptionAnnotation, called at libraries/x.hs:170:37 in ghc\n";
+        let msg = tool_error(pandoc);
+        assert!(msg.contains("Invalid UTF-8 stream"), "{msg}");
+        assert!(!msg.contains("called at"), "{msg}");
+    }
 
     #[test]
     fn hung_tools_are_stopped_at_the_timeout() {

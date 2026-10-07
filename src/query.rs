@@ -259,9 +259,9 @@ impl SearchEngine {
             .collect();
 
         Ok(if group_by_doc {
-            collapse_to_doc_results(filtered, mode, limit)
+            collapse_to_doc_results(filtered, mode, limit, &self.config.canonical_dir)
         } else {
-            chunk_level_results(filtered, mode, limit)
+            chunk_level_results(filtered, mode, limit, &self.config.canonical_dir)
         })
     }
 
@@ -378,13 +378,20 @@ fn document_matches_filter(doc: &DocumentRecord, filter: &SearchFilter) -> bool 
     true
 }
 
-fn result_for(hit: SearchHit, doc: &DocumentRecord, mode: SearchMode) -> SearchResult {
+/// `file` is the source file, or the absolute canonical markdown for
+/// documents without one (e.g. fetched test cases), so it can be opened.
+fn result_for(
+    hit: SearchHit,
+    doc: &DocumentRecord,
+    mode: SearchMode,
+    canonical_dir: &std::path::Path,
+) -> SearchResult {
     SearchResult {
         text: hit.text,
         file: doc
             .source_path
             .clone()
-            .unwrap_or_else(|| doc.markdown_path.clone()),
+            .unwrap_or_else(|| canonical_dir.join(&doc.markdown_path).display().to_string()),
         title: doc.title.clone(),
         doc_type: doc.doc_type.clone(),
         collection: doc.collection.clone(),
@@ -400,11 +407,12 @@ fn chunk_level_results(
     filtered: Vec<(SearchHit, &DocumentRecord)>,
     mode: SearchMode,
     limit: usize,
+    canonical_dir: &std::path::Path,
 ) -> Vec<SearchResult> {
     let mut deduped = Vec::new();
     let mut seen = HashSet::new();
     for (hit, doc) in filtered {
-        let result = result_for(hit, doc, mode);
+        let result = result_for(hit, doc, mode, canonical_dir);
         if seen.insert(format!("{}:{}", result.file, result.text)) {
             deduped.push(result);
         }
@@ -421,6 +429,7 @@ fn collapse_to_doc_results(
     filtered: Vec<(SearchHit, &DocumentRecord)>,
     mode: SearchMode,
     limit: usize,
+    canonical_dir: &std::path::Path,
 ) -> Vec<SearchResult> {
     let mut best: HashMap<String, (SearchHit, &DocumentRecord, usize)> = HashMap::new();
     for (hit, doc) in filtered {
@@ -435,7 +444,7 @@ fn collapse_to_doc_results(
     let mut results: Vec<SearchResult> = best
         .into_values()
         .map(|(hit, doc, count)| {
-            let mut result = result_for(hit, doc, mode);
+            let mut result = result_for(hit, doc, mode, canonical_dir);
             result.chunk_count = Some(count);
             result.frontmatter = serde_json::from_str::<JsonValue>(&doc.frontmatter_json)
                 .ok()
@@ -619,7 +628,7 @@ mod tests {
             (hit("d1", "high", 0.9), &d1),
             (hit("d2", "mid", 0.7), &d2),
         ];
-        let results = collapse_to_doc_results(filtered, SearchMode::Hybrid, 10);
+        let results = collapse_to_doc_results(filtered, SearchMode::Hybrid, 10, Path::new("/c"));
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].file, "/src/p1.md");
         assert_eq!(results[0].text, "high");
@@ -633,8 +642,8 @@ mod tests {
                 .and_then(JsonValue::as_str),
             Some("SIT")
         );
-        // No source path: falls back to the canonical path.
-        assert_eq!(results[1].file, "vault/d2.md");
+        // No source path: the absolute canonical file.
+        assert_eq!(results[1].file, "/c/vault/d2.md");
         assert_eq!(results[1].chunk_count, Some(1));
     }
 
@@ -649,13 +658,16 @@ mod tests {
             .map(|(i, d)| (hit(&format!("d{i}"), "same", 0.9 - i as f64 * 0.01), d))
             .collect();
         assert_eq!(
-            collapse_to_doc_results(filtered, SearchMode::Hybrid, 3).len(),
+            collapse_to_doc_results(filtered, SearchMode::Hybrid, 3, Path::new("/c")).len(),
             3
         );
 
         let d = &docs[0];
         let dupes = vec![(hit("d0", "x", 0.9), d), (hit("d0", "x", 0.8), d)];
-        assert_eq!(chunk_level_results(dupes, SearchMode::Keyword, 10).len(), 1);
+        assert_eq!(
+            chunk_level_results(dupes, SearchMode::Keyword, 10, Path::new("/c")).len(),
+            1
+        );
     }
 
     // -- end-to-end over a real (temp) index --------------------------------
