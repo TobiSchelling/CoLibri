@@ -48,6 +48,7 @@ pub async fn run(o: AddOptions) -> anyhow::Result<()> {
         )?
     } else {
         let (_lock, store) = config.open_for_write()?;
+        let _awake = crate::power::keep_awake();
         let report = run_library(
             &config,
             &library,

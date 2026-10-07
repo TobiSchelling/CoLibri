@@ -183,6 +183,7 @@ pub async fn sync_all(mut opts: SyncAllOptions) -> anyhow::Result<()> {
         let (lock, store) = app_config.open_for_write()?;
         (Some(lock), Some(store))
     };
+    let _awake = (!opts.dry_run).then(crate::power::keep_awake);
 
     let mut selected = select_connectors(&app_config.connector_jobs, &opts.requested_connectors)?;
     selected.sort_by(|a, b| a.id.cmp(&b.id));

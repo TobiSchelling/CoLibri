@@ -19,6 +19,7 @@ mod ingest;
 mod lock;
 mod mcp;
 mod metadata_store;
+mod power;
 mod query;
 mod serve_ready;
 

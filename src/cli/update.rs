@@ -33,6 +33,7 @@ pub async fn run(opts: UpdateOptions, json: bool) -> anyhow::Result<()> {
         .await?
     } else {
         let (_lock, store) = config.open_for_write()?;
+        let _awake = crate::power::keep_awake();
         run_update(
             &config,
             Some(&store),

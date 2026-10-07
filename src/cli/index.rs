@@ -88,6 +88,7 @@ pub fn summarize(result: &IndexResult) -> String {
 pub async fn run(force: bool) -> anyhow::Result<()> {
     let config = load_config()?;
     let (_lock, store) = config.open_for_write()?;
+    let _awake = crate::power::keep_awake();
     if force {
         eprintln!("Mode: full rebuild");
     }
