@@ -67,17 +67,15 @@ fn generate_instructions(config: &AppConfig) -> anyhow::Result<String> {
         }
     }
 
-    if config.connector_jobs.is_empty() {
-        md.push_str("- Connectors: none configured\n");
-        md.push_str("  - Configure `connectors` in `config.yaml` and run `colibri sync`.\n");
+    if config.mirrors.is_empty() && config.library.is_none() {
+        md.push_str("- Sources: none configured (add `mirrors:` or `library:` to config.yaml, then run `colibri update`).\n");
     } else {
-        md.push_str("- Connectors:\n");
-        for job in &config.connector_jobs {
-            let enabled = if job.enabled { "enabled" } else { "disabled" };
-            md.push_str(&format!(
-                "  - {} ({}) [{enabled}]\n",
-                job.id, job.connector_type
-            ));
+        md.push_str("- Collections (use with `--collection`):\n");
+        for m in &config.mirrors {
+            md.push_str(&format!("  - {} ({})\n", m.name, m.doc_type));
+        }
+        if config.library.is_some() {
+            md.push_str("  - books (library)\n");
         }
     }
 

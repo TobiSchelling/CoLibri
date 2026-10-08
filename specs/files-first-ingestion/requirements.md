@@ -6,7 +6,7 @@
 > **Repo Type:** code
 > **Spec Directory:** specs/files-first-ingestion/
 > **Design Doc Location:** specs/files-first-ingestion/design.md (approved plan, phases P1-P5)
-> **Status:** In Progress (P1+P2, P3, P4 verified 2026-10-06)
+> **Status:** In Progress (P1+P2, P3, P4 verified 2026-10-06; P5 verified 2026-10-08; REQ-031 rebuild checks partly open)
 
 ---
 
@@ -422,10 +422,10 @@ The following deliverables are committed for this feature:
 | REQ-022 | P4 | #4 | library::tests::books_whose_file_disappears_stay_searchable; cli_library |
 | REQ-023 | P4 | #2, #4 | library::tests::same_bytes_*; convert::tests |
 | REQ-024 | P4 | #4 | library::tests::changed_epub_is_reconverted_but_changed_pdf_is_flagged |
-| REQ-025 | P5 | | |
-| REQ-026 | P5 | | |
-| REQ-027 | P5 | | |
-| REQ-028 | P5 | | |
-| REQ-029 | P5 | | |
-| REQ-030 | P5 | | |
+| REQ-025 | P5 | plan-p5 #3, #4, #9 | zephyr::tests::{writes_one_markdown_file_per_test_case, fetched_test_cases_reconcile_into_documents}; cli_fetch |
+| REQ-026 | P5 | #2, #4 | api::tests::pagination_*; zephyr::tests::{deletes_only_after_complete_listings, failed_steps_keep_the_previous_file, mass_deletion_is_blocked_without_override} |
+| REQ-027 | P5 | #1, #4 | fetch::tests::*; zephyr::tests::unchanged_cases_cost_no_requests_and_no_writes |
+| REQ-028 | P5 | #4, #9 | zephyr::tests::{unchanged_cases_*, full_refresh_*, failed_full_refresh_*}; cli_fetch |
+| REQ-029 | P5 | #5, #7, #9 | command::tests; cli_fetch::script_fetchers_fill_folders_and_failures_block_pruning |
+| REQ-030 | P5 | #6 | config::tests::mirrors_are_resolved_and_validated |
 | REQ-031 | Rebuild | | |

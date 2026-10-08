@@ -223,3 +223,102 @@ pub fn snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, (u64, std::t
     }
     out
 }
+
+/// Minimal Zephyr Scale API: one folder, statuses, priorities, `cases`
+/// test cases served in pages of 50 *without* `isLast` (the case that used
+/// to stop after page one), steps and links per case. Counts step requests.
+pub struct FakeZephyrApi {
+    pub url: String,
+    pub step_requests: Arc<AtomicUsize>,
+}
+
+impl FakeZephyrApi {
+    pub fn start(cases: usize) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake zephyr");
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let steps = Arc::new(AtomicUsize::new(0));
+        let counter = steps.clone();
+        let base = url.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let counter = counter.clone();
+                let base = base.clone();
+                std::thread::spawn(move || {
+                    let _ = handle_zephyr(stream, cases, &base, &counter);
+                });
+            }
+        });
+        Self {
+            url,
+            step_requests: steps,
+        }
+    }
+}
+
+fn handle_zephyr(
+    mut stream: std::net::TcpStream,
+    cases: usize,
+    base: &str,
+    steps: &AtomicUsize,
+) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line)?;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        if line == "\r\n" || line.is_empty() {
+            break;
+        }
+    }
+    let path = request_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("/")
+        .to_string();
+    let start: usize = path
+        .split(['?', '&'])
+        .find_map(|p| p.strip_prefix("startAt="))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let body = if path.starts_with("/folders") {
+        json!({"values": [{"id": 7, "name": "FOTA", "parentId": null}], "isLast": true})
+    } else if path.starts_with("/statuses") {
+        json!({"values": [{"id": 10, "name": "Approved"}], "isLast": true})
+    } else if path.starts_with("/priorities") {
+        json!({"values": [{"id": 20, "name": "High"}], "isLast": true})
+    } else if path.contains("/teststeps") {
+        steps.fetch_add(1, Ordering::SeqCst);
+        json!({"values": [{"inline": {"index": 1, "description": "Flash firmware", "expectedResult": "Device reboots"}}], "isLast": true})
+    } else if path.contains("/links") {
+        json!({"issueLinks": [{"target": {"issueKey": "BUTSAM-1"}}], "webLinks": []})
+    } else if path.starts_with("/testcases") {
+        let end = (start + 50).min(cases);
+        let values: Vec<Value> = (start..end)
+            .map(|i| {
+                json!({"id": i, "key": format!("CTSLAB-T{i}"), "name": format!("FOTA case {i}"),
+                       "folder": {"id": 7}, "status": {"id": 10}, "priority": {"id": 20},
+                       "labels": ["fota"], "updatedOn": "2026-10-01T00:00:00Z"})
+            })
+            .collect();
+        let mut page =
+            json!({"values": values, "startAt": start, "maxResults": 50, "total": cases});
+        if end < cases {
+            page["next"] = json!(format!(
+                "{base}/testcases?projectKey=CTSLAB&maxResults=50&startAt={end}"
+            ));
+        }
+        page
+    } else {
+        json!({})
+    };
+    let body = body.to_string();
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )?;
+    stream.flush()
+}

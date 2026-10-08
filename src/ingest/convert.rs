@@ -39,7 +39,7 @@ fn tool_error(stderr: &str) -> String {
 
 /// Run a command, killing it after `timeout`. Output pipes are drained on
 /// threads so a chatty tool cannot block on a full pipe.
-fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
+pub(crate) fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
     let name = cmd.get_program().to_string_lossy().to_string();
     let mut child = cmd
         .stdout(Stdio::piped())

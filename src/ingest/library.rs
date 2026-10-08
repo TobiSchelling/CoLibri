@@ -14,9 +14,9 @@ use chrono::Utc;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
+use crate::canonical_store::content_hash;
 use crate::canonical_store::{canonical_rel_path, doc_id_for, same_except_timestamps};
 use crate::config::{AppConfig, LibraryConfig, BOOK_FORMATS, LIBRARY_COLLECTION};
-use crate::envelope::content_hash;
 use crate::error::ColibriError;
 use crate::ingest::calibre::{parse_opf, BookMeta};
 use crate::ingest::convert::{clear_cached, convert_cached, file_sha256, Converter};

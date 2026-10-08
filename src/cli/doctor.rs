@@ -3,14 +3,12 @@
 use serde::Serialize;
 
 use crate::config::{self, load_config};
-use crate::connectors::ConnectorJob;
 use crate::embedding::check_ollama;
 
 #[derive(Debug, Serialize)]
-struct DoctorConnectorStatus {
-    id: String,
-    connector_type: String,
-    enabled: bool,
+struct DoctorMirrorStatus {
+    name: String,
+    kind: String,
     status: String,
     issues: Vec<String>,
 }
@@ -31,53 +29,7 @@ struct DoctorReport {
     index_chunk_count: Option<u64>,
     index_model: Option<String>,
     index_issues: Vec<String>,
-    connectors_configured: Option<usize>,
-    connector_details: Vec<DoctorConnectorStatus>,
-    mirror_details: Vec<DoctorConnectorStatus>,
-}
-
-/// Diagnose a single connector, returning per-connector status and issues.
-fn diagnose_connector(job: &ConnectorJob) -> DoctorConnectorStatus {
-    let mut issues = Vec::new();
-
-    if job.connector_type == "zephyr_scale" {
-        // Check project_key is configured.
-        if super::config_string(&job.config, "project_key").is_none() {
-            issues.push("project_key is not configured".into());
-        }
-
-        // Check API token is available (config field or env var).
-        let token_env = super::config_string(&job.config, "token_env")
-            .unwrap_or_else(|| "ZEPHYR_API_TOKEN".into());
-        let has_token = super::config_string(&job.config, "token").is_some()
-            || std::env::var(&token_env)
-                .ok()
-                .filter(|s| !s.is_empty())
-                .is_some();
-        if !has_token {
-            issues.push(format!(
-                "no API token — set `token` in config or env var {token_env}"
-            ));
-        }
-    }
-
-    if job.connector_type == "filesystem" {
-        issues.push("filesystem connectors were replaced by `mirrors:`; move this entry".into());
-    }
-
-    let status = if issues.is_empty() {
-        "ok".into()
-    } else {
-        "warn".into()
-    };
-
-    DoctorConnectorStatus {
-        id: job.id.clone(),
-        connector_type: job.connector_type.clone(),
-        enabled: job.enabled,
-        status,
-        issues,
-    }
+    mirror_details: Vec<DoctorMirrorStatus>,
 }
 
 pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
@@ -117,46 +69,36 @@ pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
     say(format!("  Data dir: {}", config.colibri_home.display()));
     say(format!("  Index: {}", config.index_dir.display()));
 
-    // 2. Connectors
-    let details: Vec<DoctorConnectorStatus> = config
-        .connector_jobs
-        .iter()
-        .map(diagnose_connector)
-        .collect();
-    report.connectors_configured = Some(details.len());
-    let warn = details.iter().any(|d| d.status == "warn");
-    say(format!(
-        "\nConnectors ... {} ({} configured)",
-        if warn { "WARN" } else { "OK" },
-        details.len()
-    ));
-    for d in &details {
-        let label = if d.enabled { "enabled" } else { "disabled" };
-        say(format!(
-            "  - {} ({}) [{label}] {}",
-            d.id,
-            d.connector_type,
-            d.status.to_uppercase()
-        ));
-        for issue in &d.issues {
-            say(format!("    - {issue}"));
-        }
-    }
-    report.connector_details = details;
-
     // 2b. Mirrors
-    let mirrors: Vec<DoctorConnectorStatus> = config
+    let mirrors: Vec<DoctorMirrorStatus> = config
         .mirrors
         .iter()
         .map(|m| {
             let mut issues = super::missing_tools(&m.include);
-            if !m.path.is_dir() {
-                issues.insert(0, format!("folder {} does not exist", m.path.display()));
+            match &m.fetch {
+                Some(crate::config::FetchConfig::ZephyrScale(z)) => {
+                    if std::env::var(&z.token_env).map_or(true, |t| t.trim().is_empty()) {
+                        issues.push(format!("no Zephyr API token in ${}", z.token_env));
+                    }
+                }
+                Some(crate::config::FetchConfig::Command { run }) => {
+                    if run.first().is_none_or(|p| !super::tool_on_path(p)) {
+                        issues.push(format!("fetch command not found: {:?}", run.first()));
+                    }
+                }
+                None if !m.path.is_dir() => {
+                    issues.insert(0, format!("folder {} does not exist", m.path.display()));
+                }
+                None => {}
             }
-            DoctorConnectorStatus {
-                id: m.name.clone(),
-                connector_type: "mirror".into(),
-                enabled: true,
+            DoctorMirrorStatus {
+                name: m.name.clone(),
+                kind: match &m.fetch {
+                    Some(crate::config::FetchConfig::ZephyrScale(_)) => "zephyr fetch",
+                    Some(crate::config::FetchConfig::Command { .. }) => "command fetch",
+                    None => "folder",
+                }
+                .into(),
                 status: if issues.is_empty() { "ok" } else { "warn" }.into(),
                 issues,
             }
@@ -169,7 +111,7 @@ pub async fn run(strict: bool, json: bool) -> anyhow::Result<()> {
         mirrors.len()
     ));
     for m in &mirrors {
-        say(format!("  - {} {}", m.id, m.status.to_uppercase()));
+        say(format!("  - {} {}", m.name, m.status.to_uppercase()));
         for issue in &m.issues {
             say(format!("    - {issue}"));
         }

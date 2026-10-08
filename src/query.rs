@@ -713,7 +713,7 @@ mod tests {
             doc.authors_json = authors.into();
             doc.tags_json = r#"["t1"]"#.into();
             doc.source_path = Some(format!("/src/{key}"));
-            doc.content_hash = crate::envelope::content_hash(text);
+            doc.content_hash = crate::canonical_store::content_hash(text);
             doc.markdown_path = format!("{collection}/{title}.md");
             let path = config.canonical_dir.join(&doc.markdown_path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();

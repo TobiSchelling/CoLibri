@@ -1,10 +1,10 @@
 # Files-First Ingestion Verification Report
 
 > **Feature:** files-first-ingestion
-> **Date:** 2026-10-06 (P1+P2, P3, P4)
+> **Date:** 2026-10-06 (P1+P2, P3, P4), 2026-10-08 (P5)
 > **Spec:** specs/files-first-ingestion/requirements.md
 > **Verified by:** Claude (claude-opus-5-5)
-> **Status:** PASSED for P1+P2 (REQ-001..008), P3 (REQ-009..016, AC-006.2) and P4 (REQ-017..024, AC-014.1 library row); REQ-025..031 not yet implemented
+> **Status:** PASSED for P1+P2 (REQ-001..008), P3 (REQ-009..016, AC-006.2) P4 (REQ-017..024, AC-014.1 library row) and P5 (REQ-025..030); REQ-031 (rebuild) partly verified 2026-10-08, AC-031.2/031.3 open
 
 ---
 
@@ -172,3 +172,54 @@ Evidence from this session on `feat/ffi-p1-storage` (uncommitted tree before the
 The P3 known limitation (failed conversions retried on every run) is resolved by the negative conversion cache (`convert::tests::failures_are_remembered_until_retry`).
 
 **Gate (phase P4):** all MUST criteria pass, no MUST failed, deliverables produced. **Result: PASSED (phase P4).**
+
+## Phase P5: Acceptance Criteria Results
+
+Evidence from this session (2026-10-08) on `feat/ffi-p5-fetchers` (staged tree before the P5 commit): unit tests run individually with `cargo test --bin colibri <name>`; `cargo test --test cli_fetch` runs the real binary against a fake Zephyr HTTP server and a shell-script fetcher. Full suite: 174 unit + 6 integration tests pass; `cargo fmt --check` OK; `cargo clippy --all-targets -- -D warnings` exit 0.
+
+| REQ | Priority | Criterion | Method | Result | Evidence |
+|-----|----------|-----------|--------|--------|----------|
+| REQ-025 | MUST | AC-025.1: 3 canned test cases → 3 files with parseable frontmatter and the listed keys | `fetch::zephyr::tests::writes_one_markdown_file_per_test_case`; `render::tests::frontmatter_survives_special_characters` | PASS | (listed, written, deleted) = (3,3,0), no problems; title, key, name, folder, status, priority, labels, updated_on present; status `Approved`, folder `/Regression/FOTA`; marker file created |
+| REQ-025 | MUST | AC-025.2: after update, `search --frontmatter status=<value>` filters Zephyr docs | `cli_fetch::zephyr_fetch_writes_files_and_updates_incrementally`; `fetch::zephyr::tests::fetched_test_cases_reconcile_into_documents` | PASS | CLI: keyword search with `--collection zephyr-ctslab --frontmatter status=Approved` returns hits; unit: doc `zephyr-ctslab:CTSLAB-T1.md` has doc_type `test_case` and `"status":"Approved"` in frontmatter_json |
+| REQ-026 | MUST | AC-026.1: page without `isLast` continues via `next`; listing shorter than `total` is incomplete and deletes nothing | `api::tests::pagination_follows_next_without_is_last_and_flags_incomplete_listings`; `fetch::zephyr::tests::deletes_only_after_complete_listings`; `cli_fetch` (60 cases over 2 pages without `isLast`) | PASS | `Next(next)` for a full page without `isLast`; last page with 70 of 120 items → `Done{complete:false}`; incomplete listing: deleted 0, `incomplete_listing` problem, file kept; CLI `fetch.listed == 60`, `complete == true` |
+| REQ-026 | MUST | AC-026.2: failed steps request leaves `<KEY>.md` byte-identical and records a problem | `fetch::zephyr::tests::failed_steps_keep_the_previous_file`, `failed_full_refresh_cases_are_retried_next_run` | PASS | bytes equal before/after; `fetch_failed` problem for `CTSLAB-T1`; retried next run (also after a failed full refresh: exactly 1 step call) |
+| REQ-027 | MUST | AC-027.1: non-empty folder without marker → error, nothing changed | `fetch::tests::foreign_non_empty_folders_are_refused_and_left_alone` | PASS | error contains `refusing`; no marker written; `mine.md` unchanged |
+| REQ-027 | MUST | AC-027.2: second fetch with identical data leaves mtimes unchanged | `fetch::tests::unchanged_content_is_not_rewritten`; `fetch::zephyr::tests::unchanged_cases_cost_no_requests_and_no_writes` | PASS | `write_if_changed` returns false and mtime is equal; second fetch (written, unchanged) = (0,3), mtime of `CTSLAB-T1.md` equal |
+| REQ-028 | SHOULD | AC-028.1: unchanged listing → 0 step/link requests; one changed `updatedOn` → requests for that item only | `unchanged_cases_cost_no_requests_and_no_writes`; `full_refresh_refetches_everything`; `cli_fetch` | PASS | step/link calls unchanged on the second run; after changing one `updatedOn`: written 1, steps +1, links +1; CLI second update: `fetch.written == 0`, fake server step-request count unchanged |
+| REQ-029 | SHOULD | AC-029.1: command writing 2 files, exit 0 → 2 docs; exit 1 after deleting a file → 0 pruned + problem | `cli_fetch::script_fetchers_fill_folders_and_failures_block_pruning`; `command::tests::*` | PASS | first update added 2; failing run: exit non-zero, pruned 0, `prune_blocked` "fetch was incomplete", `fetch_failed` problem; hung command stopped at the timeout |
+| REQ-030 | MUST | AC-030.1: `connectors:` fails mentioning `mirrors:`; typo `exlude` fails naming it | `config::tests::mirrors_are_resolved_and_validated` | PASS | error cases asserted: `connectors: [...]` → message contains `mirrors:`; `exlude: []` → contains `exlude`; also `projectkey`, unknown fetch type `ftp`, overlapping fetched mirror |
+
+### Summary (phase P5)
+
+| Priority | Pass | Fail | Skip | Total |
+|----------|------|------|------|-------|
+| MUST | 7 | 0 | 0 | 7 |
+| SHOULD | 2 | 0 | 0 | 2 |
+| **Total** | **9** | **0** | **0** | **9** |
+
+### Deliverables (phase P5)
+
+| # | Deliverable | Location | Status | Notes |
+|---|-------------|----------|--------|-------|
+| 5 | Implementation plan | specs/files-first-ingestion/plan-p5.md | PRODUCED | incl. review-driven decisions |
+| 6 | Unit tests | `src/fetch/**`, `src/config.rs` | PRODUCED | 174/174 pass |
+| 7 | Integration tests | tests/cli_fetch.rs (fake Zephyr HTTP API, script fetcher) | PRODUCED | 6/6 integration tests pass |
+| 10 | Linter clean | — | PRODUCED | fmt + clippy (all targets) clean |
+| 12 | Code review | — | PRODUCED | 7 findings fixed: state saved during fetch and kept on failures, retry marker for failed cases, command timeout, fetched-mirror overlap check, worse-status merge, page cap, fetcher delete limit |
+| 13 | Documentation update | README.md, CLAUDE.md | PRODUCED | fetched mirrors, `mirrors_dir`, `fetch:` config, upgrade notes from 0.15 (`connectors:` → mirror, one-time `--allow-mass-prune`) |
+
+### Traceability (phase P5)
+
+Tests reference acceptance criteria by `AC-0xx` comments rather than `REQ-0xx`; plan-p5.md references the REQ range. No commit references yet (the P5 commit will name REQ-025..030).
+
+**Gate (phase P5):** all MUST criteria pass, no MUST failed, deliverables produced. **Result: PASSED (phase P5).**
+
+## REQ-031: Rebuild on the real setup (checked 2026-10-08, read-only, installed v0.15.0)
+
+| REQ | Priority | Criterion | Method | Result | Evidence |
+|-----|----------|-----------|--------|--------|----------|
+| REQ-031 | MUST | AC-031.1: `list` shows the calibre books (about 96) with authors; ACSM-only books are problems | `colibri list --json`, `colibri status` | PASS | 95 books, all 95 with authors, formats epub/pdf, all 95 source paths exist; 3 `drm_placeholder` problems (Co-Intelligence, SCRUM Pocket Guide, Turn the Ship Around!). The 2 failed conversions (docling hang, pandoc crash) are the gap to 97 |
+| REQ-031 | MUST | AC-031.2: keyword/semantic/hybrid hits have existing source paths; MCP `search_books` works | `colibri search --json` in 3 modes × 3 queries | OPEN | books, zephyr-ctslab and repo mirrors: 10/10 hits with existing paths in every mode. Vault hits: 2-6 of 10 point to paths renamed in the vault after the rebuild (e.g. `0300_PROJECTS/P001_aegis/` → `P001 Aegis/`), so the index is stale until the next `colibri update`. MCP not checked: the colibri MCP server did not connect in this session |
+| REQ-031 | MUST | AC-031.3: deleting a vault scratch note + `update` prunes exactly it; `add` then reports 0 new books | — | OPEN | Needs writes to the live vault and data; planned together with the config migration (`connectors:` → fetched mirror) after the P5 release |
+
+**REQ-031 status:** AC-031.1 passes; AC-031.2 and AC-031.3 are re-checked after the next live `colibri update`.

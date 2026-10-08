@@ -5,7 +5,7 @@
 //! write lock and opens the metadata DB read-write.
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -35,8 +35,13 @@ struct RawConfig {
     #[serde(default)]
     chunking: ChunkingConfig,
 
+    /// Removed in 0.16: only kept to explain the migration.
     #[serde(default)]
-    connectors: Vec<crate::connectors::ConnectorRawConfig>,
+    connectors: Option<serde_yaml::Value>,
+
+    /// Default parent folder of fetched mirrors.
+    #[serde(default)]
+    mirrors_dir: Option<String>,
 
     #[serde(default)]
     mirrors: Vec<MirrorRaw>,
@@ -54,7 +59,10 @@ struct RawConfig {
 #[serde(deny_unknown_fields)]
 struct MirrorRaw {
     name: String,
-    path: String,
+    /// Required unless `fetch` is set (then defaults to `<mirrors_dir>/<name>`).
+    path: Option<String>,
+    #[serde(default)]
+    fetch: Option<FetchRaw>,
     #[serde(default = "default_mirror_doc_type")]
     doc_type: String,
     #[serde(default = "default_mirror_include")]
@@ -63,6 +71,49 @@ struct MirrorRaw {
     exclude: Vec<String>,
     #[serde(default = "default_true")]
     plantuml_summaries: bool,
+}
+
+/// How remote content gets into a mirror folder.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum FetchRaw {
+    ZephyrScale {
+        project_key: String,
+        #[serde(default = "default_zephyr_token_env")]
+        token_env: String,
+        #[serde(default = "default_zephyr_url")]
+        api_base_url: String,
+        #[serde(default)]
+        folder_path: Option<String>,
+        #[serde(default = "default_true")]
+        include_steps: bool,
+        #[serde(default = "default_true")]
+        include_links: bool,
+        #[serde(default = "default_full_refresh_days")]
+        full_refresh_days: i64,
+    },
+    Command {
+        run: Vec<String>,
+    },
+}
+
+fn default_zephyr_token_env() -> String {
+    "ZEPHYR_API_TOKEN".into()
+}
+
+fn default_zephyr_url() -> String {
+    "https://api.zephyrscale.smartbear.com/v2".into()
+}
+
+fn default_full_refresh_days() -> i64 {
+    7
+}
+
+/// A resolved fetcher.
+#[derive(Debug, Clone)]
+pub enum FetchConfig {
+    ZephyrScale(crate::fetch::zephyr::ZephyrFetchConfig),
+    Command { run: Vec<String> },
 }
 
 fn default_mirror_doc_type() -> String {
@@ -205,6 +256,8 @@ pub struct MirrorConfig {
     /// Collection name; also the prefix of every document id.
     pub name: String,
     pub path: PathBuf,
+    /// Fills `path` before each reconcile (Zephyr, scripts).
+    pub fetch: Option<FetchConfig>,
     pub doc_type: String,
     pub include: Vec<String>,
     pub exclude: Vec<String>,
@@ -224,6 +277,14 @@ impl PruneConfig {
         self.min_count
             .max((self.max_fraction * active as f64).floor() as usize)
     }
+}
+
+fn default_mirrors_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Documents")
+        .join("CoLibri")
+        .join("mirrors")
 }
 
 /// Expand a leading `~` to the home directory.
@@ -250,7 +311,7 @@ fn valid_collection_name(name: &str) -> bool {
 
 fn resolve_mirrors(
     raw: Vec<MirrorRaw>,
-    connector_ids: &[String],
+    mirrors_dir: &Path,
 ) -> Result<Vec<MirrorConfig>, ColibriError> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -261,10 +322,9 @@ fn resolve_mirrors(
                 "mirrors: invalid name '{name}' (use letters, digits, '-', '_', '.')"
             )));
         }
-        if !seen.insert(name.clone()) || connector_ids.contains(&name) || name == LIBRARY_COLLECTION
-        {
+        if !seen.insert(name.clone()) || name == LIBRARY_COLLECTION {
             return Err(ColibriError::Config(format!(
-                "mirrors: name '{name}' is used twice (mirror and connector names must be unique)"
+                "mirrors: name '{name}' is used twice (or is the reserved name '{LIBRARY_COLLECTION}')"
             )));
         }
         for pattern in m.include.iter().chain(m.exclude.iter()) {
@@ -274,21 +334,66 @@ fn resolve_mirrors(
                 ))
             })?;
         }
-        let path = expand_tilde(m.path.trim());
+        let path = match (&m.path, &m.fetch) {
+            (Some(p), _) => expand_tilde(p.trim()),
+            (None, Some(_)) => mirrors_dir.join(&name),
+            (None, None) => {
+                return Err(ColibriError::Config(format!(
+                    "mirrors.{name}: `path` is required (or a `fetch` that fills a folder)"
+                )))
+            }
+        };
         if !path.is_absolute() {
             return Err(ColibriError::Config(format!(
                 "mirrors.{name}: path must be absolute or start with ~ (got '{}')",
-                m.path
+                path.display()
             )));
         }
+        let fetch = m.fetch.map(|f| match f {
+            FetchRaw::ZephyrScale {
+                project_key,
+                token_env,
+                api_base_url,
+                folder_path,
+                include_steps,
+                include_links,
+                full_refresh_days,
+            } => FetchConfig::ZephyrScale(crate::fetch::zephyr::ZephyrFetchConfig {
+                project_key,
+                api_base_url,
+                token_env,
+                folder_path,
+                include_steps,
+                include_links,
+                full_refresh_days,
+            }),
+            FetchRaw::Command { run } => FetchConfig::Command { run },
+        });
         out.push(MirrorConfig {
             path,
+            fetch,
             doc_type: m.doc_type,
             include: m.include,
             exclude: m.exclude,
             plantuml_summaries: m.plantuml_summaries,
             name,
         });
+    }
+    // A fetcher owns its folder: no other mirror may share it or overlap it
+    // (that would ingest the files twice or let two fetchers fight).
+    for (i, a) in out.iter().enumerate() {
+        for b in &out[i + 1..] {
+            let overlap = a.path.starts_with(&b.path) || b.path.starts_with(&a.path);
+            if overlap && (a.fetch.is_some() || b.fetch.is_some()) {
+                return Err(ColibriError::Config(format!(
+                    "mirrors '{}' ({}) and '{}' ({}) overlap; a fetched mirror needs a folder of its own",
+                    a.name,
+                    a.path.display(),
+                    b.name,
+                    b.path.display()
+                )));
+            }
+        }
     }
     Ok(out)
 }
@@ -399,7 +504,6 @@ fn resolve_colibri_home(raw_data_dir: Option<&str>) -> PathBuf {
 /// Resolved application configuration.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    pub connector_jobs: Vec<crate::connectors::ConnectorJob>,
     pub mirrors: Vec<MirrorConfig>,
     pub library: Option<LibraryConfig>,
     pub prune: PruneConfig,
@@ -459,7 +563,6 @@ impl AppConfig {
     /// A config rooted at `home` with a fake embedding endpoint, for tests.
     pub(crate) fn for_test(home: &std::path::Path) -> Self {
         Self {
-            connector_jobs: Vec::new(),
             mirrors: Vec::new(),
             library: None,
             prune: PruneConfig {
@@ -498,27 +601,21 @@ pub fn load_config() -> Result<AppConfig, ColibriError> {
         RawConfig::default()
     };
 
-    let connector_jobs: Vec<crate::connectors::ConnectorJob> = raw
-        .connectors
-        .iter()
-        .enumerate()
-        .map(|(idx, c)| {
-            let id = if c.id.trim().is_empty() {
-                format!("connector_{}", idx + 1)
-            } else {
-                c.id.trim().to_string()
-            };
-            crate::connectors::ConnectorJob {
-                id,
-                connector_type: c.connector_type.clone(),
-                enabled: c.enabled,
-                config: c.config.clone(),
-            }
-        })
-        .collect();
-
-    let connector_ids: Vec<String> = connector_jobs.iter().map(|j| j.id.clone()).collect();
-    let mirrors = resolve_mirrors(raw.mirrors, &connector_ids)?;
+    if raw.connectors.is_some() {
+        return Err(ColibriError::Config(
+            "`connectors:` was removed. Zephyr now writes files into a mirror:\n\
+             mirrors:\n  - name: zephyr-ctslab\n    doc_type: test_case\n    \
+             fetch: {type: zephyr_scale, project_key: CTSLAB}\n\
+             Folders that `type: filesystem` connectors scanned are mirrors with a `path:`."
+                .into(),
+        ));
+    }
+    let mirrors_dir = raw
+        .mirrors_dir
+        .as_deref()
+        .map(|d| expand_tilde(d.trim()))
+        .unwrap_or_else(default_mirrors_dir);
+    let mirrors = resolve_mirrors(raw.mirrors, &mirrors_dir)?;
     let library = resolve_library(raw.library)?;
     let prune = PruneConfig {
         max_fraction: raw.prune.max_fraction,
@@ -541,7 +638,6 @@ pub fn load_config() -> Result<AppConfig, ColibriError> {
         .unwrap_or_else(default_embedding_model);
 
     Ok(AppConfig {
-        connector_jobs,
         mirrors,
         library,
         prune,
@@ -562,7 +658,7 @@ pub fn load_config() -> Result<AppConfig, ColibriError> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{load_config, AppConfig};
+    use super::{load_config, AppConfig, FetchConfig};
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -704,6 +800,14 @@ pub(crate) mod tests {
             ),
             ("mirrors:\n  - {name: v, path: docs}\n", "must be absolute"),
             ("mirrors:\n  - {name: books, path: /x}\n", "used twice"),
+            ("connectors: [{type: zephyr_scale, id: z}]\n", "mirrors:"),
+            (
+                "mirrors:\n  - {name: vault, path: /x}\n  - {name: z, path: /x/zephyr, fetch: {type: command, run: [sh]}}\n",
+                "overlap",
+            ),
+            ("mirrors:\n  - {name: z}\n", "`path` is required"),
+            ("mirrors:\n  - {name: z, fetch: {type: zephyr_scale, project_key: P, projectkey: Q}}\n", "projectkey"),
+            ("mirrors:\n  - {name: z, fetch: {type: ftp}}\n", "ftp"),
             ("library: {prefer_formats: [mobi]}\n", "unsupported format"),
             ("library: {roots: [{path: rel}]}\n", "must be absolute"),
             (
@@ -719,6 +823,42 @@ pub(crate) mod tests {
             let err = load_config().unwrap_err().to_string();
             assert!(err.contains(needle), "{yaml}: {err}");
         }
+        snap.restore();
+    }
+
+    #[test]
+    fn fetched_mirrors_default_to_mirrors_dir() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let snap = EnvSnapshot::capture();
+        let (_r, _h) = isolated_home(
+            "mirrors_dir: /m\nmirrors:\n  - name: zephyr-ctslab\n    doc_type: test_case\n    fetch: {type: zephyr_scale, project_key: CTSLAB}\n  - name: wiki\n    path: /w\n    fetch: {type: command, run: [sh, export.sh, '{path}']}\n",
+        );
+        let cfg = load_config().unwrap();
+        assert_eq!(cfg.mirrors[0].path, PathBuf::from("/m/zephyr-ctslab"));
+        match &cfg.mirrors[0].fetch {
+            Some(FetchConfig::ZephyrScale(z)) => {
+                assert_eq!(z.project_key, "CTSLAB");
+                assert_eq!(z.token_env, "ZEPHYR_API_TOKEN");
+                assert_eq!(z.full_refresh_days, 7);
+                assert!(z.include_steps && z.include_links);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(cfg.mirrors[1].path, PathBuf::from("/w"));
+        assert!(
+            matches!(&cfg.mirrors[1].fetch, Some(FetchConfig::Command { run }) if run.len() == 3)
+        );
+        snap.restore();
+    }
+
+    #[test]
+    fn plain_mirrors_may_nest() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let snap = EnvSnapshot::capture();
+        let (_r, _h) = isolated_home(
+            "mirrors:\n  - {name: services, path: /git/ONTrack}\n  - {name: architecture, path: /git/ONTrack/architecture}\n",
+        );
+        assert_eq!(load_config().unwrap().mirrors.len(), 2);
         snap.restore();
     }
 

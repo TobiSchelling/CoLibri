@@ -8,7 +8,7 @@
 #![allow(dead_code)]
 
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ColibriError;
 
@@ -29,7 +29,7 @@ pub struct PaginatedResponse<T> {
 }
 
 /// A reference to another entity (folder, status, priority, etc.).
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiRef {
     pub id: Option<i64>,
@@ -49,7 +49,7 @@ pub struct ApiFolder {
 }
 
 /// A test case from the Zephyr Scale API.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiTestCase {
     pub id: i64,
@@ -97,7 +97,7 @@ where
 }
 
 /// Inline test script within a test case.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiTestScript {
     #[serde(rename = "type")]
@@ -109,7 +109,7 @@ pub struct ApiTestScript {
 }
 
 /// A single test step (flat representation used internally).
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiTestStep {
     #[serde(default)]
@@ -142,7 +142,7 @@ pub struct ApiNamedEntity {
 }
 
 /// A linked issue or URL.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiLink {
     pub url: Option<String>,
@@ -186,6 +186,8 @@ pub struct ApiWebLink {
 // ───────────────────────────────────────────────────────────────
 
 const MAX_RESULTS: u64 = 50;
+/// Upper bound on pages per listing (500k items at 50 per page).
+const MAX_PAGES: usize = 10_000;
 
 /// Thin HTTP client for the Zephyr Scale REST API v2.
 pub struct ZephyrApiClient {
@@ -215,15 +217,16 @@ impl ZephyrApiClient {
             "{}/folders?folderType=TEST_CASE&projectKey={}&maxResults={}",
             self.base_url, project_key, MAX_RESULTS
         );
-        self.paginate::<ApiFolder>(&url).await
+        self.paginate_all::<ApiFolder>(&url).await
     }
 
     /// Fetch all test cases for a project, optionally filtered by folder.
+    /// Returns the test cases and whether the listing is complete.
     pub async fn get_test_cases(
         &self,
         project_key: &str,
         folder_id: Option<i64>,
-    ) -> Result<Vec<ApiTestCase>, ColibriError> {
+    ) -> Result<(Vec<ApiTestCase>, bool), ColibriError> {
         let mut url = format!(
             "{}/testcases?projectKey={}&maxResults={}",
             self.base_url, project_key, MAX_RESULTS
@@ -245,7 +248,7 @@ impl ZephyrApiClient {
             "{}/testcases/{}/teststeps?maxResults={}",
             self.base_url, test_case_key, MAX_RESULTS
         );
-        let wrappers = self.paginate::<ApiTestStepWrapper>(&url).await?;
+        let wrappers = self.paginate_all::<ApiTestStepWrapper>(&url).await?;
         Ok(wrappers.into_iter().filter_map(|w| w.inline).collect())
     }
 
@@ -258,7 +261,7 @@ impl ZephyrApiClient {
             "{}/statuses?projectKey={}&statusType=TEST_CASE&maxResults={}",
             self.base_url, project_key, MAX_RESULTS
         );
-        self.paginate::<ApiNamedEntity>(&url).await
+        self.paginate_all::<ApiNamedEntity>(&url).await
     }
 
     /// Fetch all priorities for a project (for name lookup).
@@ -270,7 +273,7 @@ impl ZephyrApiClient {
             "{}/priorities?projectKey={}&maxResults={}",
             self.base_url, project_key, MAX_RESULTS
         );
-        self.paginate::<ApiNamedEntity>(&url).await
+        self.paginate_all::<ApiNamedEntity>(&url).await
     }
 
     /// Fetch links for a specific test case.
@@ -316,15 +319,16 @@ impl ZephyrApiClient {
         Ok(links)
     }
 
-    /// Generic paginated fetch.
+    /// Fetch all pages. Returns the values and whether the listing is known
+    /// to be complete (only then may callers delete what is missing).
     async fn paginate<T: serde::de::DeserializeOwned>(
         &self,
         initial_url: &str,
-    ) -> Result<Vec<T>, ColibriError> {
+    ) -> Result<(Vec<T>, bool), ColibriError> {
         let mut all_values = Vec::new();
         let mut url = initial_url.to_string();
-
-        loop {
+        // A server that keeps pointing to new pages must not loop forever.
+        for _ in 0..MAX_PAGES {
             let resp = self
                 .client
                 .get(&url)
@@ -333,7 +337,6 @@ impl ZephyrApiClient {
                 .send()
                 .await
                 .map_err(|e| ColibriError::Api(format!("Zephyr API request failed: {e}")))?;
-
             if !resp.status().is_success() {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
@@ -341,37 +344,146 @@ impl ZephyrApiClient {
                     "Zephyr API error {status}: {body}"
                 )));
             }
-
             let page: PaginatedResponse<T> = resp.json().await.map_err(|e| {
                 ColibriError::Api(format!("Failed to parse Zephyr API response: {e}"))
             })?;
-
+            let step = next_page(&page, &url, &self.base_url, all_values.len());
             all_values.extend(page.values);
-
-            // Check if this is the last page
-            if page.is_last.unwrap_or(true) {
-                break;
-            }
-
-            // Use `next` URL if provided, otherwise calculate next offset
-            if let Some(next) = page.next {
-                url = if next.starts_with("http") {
-                    next
-                } else {
-                    format!("{}{}", self.base_url, next)
-                };
-            } else {
-                break;
+            match step {
+                PageStep::Next(next) => url = next,
+                PageStep::Done { complete } => return Ok((all_values, complete)),
             }
         }
-
-        Ok(all_values)
+        Ok((all_values, false))
     }
+
+    /// All pages, or an error if the listing ended early.
+    async fn paginate_all<T: serde::de::DeserializeOwned>(
+        &self,
+        initial_url: &str,
+    ) -> Result<Vec<T>, ColibriError> {
+        match self.paginate(initial_url).await? {
+            (values, true) => Ok(values),
+            (_, false) => Err(ColibriError::Api(format!(
+                "Zephyr API returned an incomplete listing for {initial_url}"
+            ))),
+        }
+    }
+}
+
+/// What to do after receiving a page.
+#[derive(Debug, PartialEq)]
+enum PageStep {
+    Next(String),
+    Done { complete: bool },
+}
+
+/// `isLast: true` ends a complete listing; a short page without `isLast`
+/// also ends it. A full page without a way to continue is incomplete.
+/// (Treating a missing `isLast` as "last" used to stop after page one.)
+fn next_page<T>(
+    page: &PaginatedResponse<T>,
+    url: &str,
+    base_url: &str,
+    received_before: usize,
+) -> PageStep {
+    // The last page is only complete if the items add up to `total`.
+    let received = (received_before + page.values.len()) as u64;
+    let finished = PageStep::Done {
+        complete: page.total.is_none_or(|t| received >= t),
+    };
+    if page.is_last == Some(true) {
+        return finished;
+    }
+    let page_size = page.max_results.unwrap_or(MAX_RESULTS);
+    if page.is_last.is_none() && (page.values.len() as u64) < page_size {
+        return finished;
+    }
+    if let Some(next) = &page.next {
+        let next = if next.starts_with("http") {
+            next.clone()
+        } else {
+            format!("{base_url}{next}")
+        };
+        if next != url {
+            return PageStep::Next(next);
+        }
+    }
+    if page.values.is_empty() {
+        return finished;
+    }
+    let start = page.start_at.unwrap_or(0) + page.values.len() as u64;
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let base = url
+        .split('&')
+        .filter(|p| !p.starts_with("startAt="))
+        .collect::<Vec<_>>()
+        .join("&");
+    if base.contains("startAt=") {
+        return PageStep::Done { complete: false };
+    }
+    PageStep::Next(format!("{base}{sep}startAt={start}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn page(
+        n: usize,
+        is_last: Option<bool>,
+        next: Option<&str>,
+        total: Option<u64>,
+    ) -> PaginatedResponse<u32> {
+        PaginatedResponse {
+            values: (0..n as u32).collect(),
+            next: next.map(String::from),
+            is_last,
+            start_at: Some(0),
+            max_results: Some(50),
+            total,
+        }
+    }
+
+    // AC-026.1
+    #[test]
+    fn pagination_follows_next_without_is_last_and_flags_incomplete_listings() {
+        let base = "https://z/v2";
+        let url = "https://z/v2/testcases?projectKey=P&maxResults=50";
+        let next = "https://z/v2/testcases?startAt=50";
+        // Missing isLast on a full page: continue (this used to stop after page 1).
+        assert_eq!(
+            next_page(&page(50, None, Some(next), Some(120)), url, base, 0),
+            PageStep::Next(next.into())
+        );
+        // No `next` link: continue by offset.
+        assert_eq!(
+            next_page(&page(50, Some(false), None, None), url, base, 0),
+            PageStep::Next(format!("{url}&startAt=50"))
+        );
+        // A `next` equal to the current URL would loop: continue by offset.
+        assert_eq!(
+            next_page(&page(50, Some(false), Some(url), None), url, base, 0),
+            PageStep::Next(format!("{url}&startAt=50"))
+        );
+        assert_eq!(
+            next_page(&page(3, Some(true), None, None), url, base, 0),
+            PageStep::Done { complete: true }
+        );
+        assert_eq!(
+            next_page(&page(7, None, None, None), url, base, 0),
+            PageStep::Done { complete: true }
+        );
+        // The last page arrives, but fewer items than `total`: incomplete.
+        assert_eq!(
+            next_page(&page(20, Some(true), None, Some(120)), url, base, 50),
+            PageStep::Done { complete: false }
+        );
+        assert_eq!(
+            next_page(&page(20, None, None, Some(120)), url, base, 100),
+            PageStep::Done { complete: true }
+        );
+    }
 
     #[test]
     fn deserialize_paginated_folders() {

@@ -3,13 +3,16 @@
 
 use serde::Serialize;
 
-use crate::config::{AppConfig, LIBRARY_COLLECTION};
+use std::path::Path;
+
+use crate::config::{AppConfig, FetchConfig, PruneConfig, LIBRARY_COLLECTION};
 use crate::embedding::Embedder;
 use crate::error::ColibriError;
+use crate::fetch::FetchReport;
 use crate::indexer::{index_library, IndexEvent, IndexOptions};
 use crate::ingest::convert::Converter;
 use crate::ingest::library::{sweep, LibraryOptions, LibraryReport};
-use crate::ingest::mirror::{reconcile_mirror, MirrorReport, ReconcileOptions};
+use crate::ingest::mirror::{reconcile_mirror, MirrorReport, Problem, ReconcileOptions};
 use crate::metadata_store::MetadataStore;
 
 #[derive(Debug, Clone, Default)]
@@ -82,16 +85,69 @@ pub async fn run_update<E: Embedder>(
         dry_run: opts.dry_run,
         allow_mass_prune: opts.allow_mass_prune,
         retry_failed: opts.retry_failed,
+        fetch_incomplete: false,
     };
     let mut mirrors = Vec::new();
     for mirror in selected {
-        mirrors.push(reconcile_mirror(
+        let Some(fetch) = &mirror.fetch else {
+            mirrors.push(reconcile_mirror(
+                config,
+                store,
+                mirror,
+                converter,
+                reconcile_opts,
+            )?);
+            continue;
+        };
+        if opts.dry_run {
+            mirrors.push(MirrorReport {
+                name: mirror.name.clone(),
+                status: "skipped".into(),
+                dry_run: true,
+                problems: vec![Problem::new(
+                    mirror.path.display().to_string(),
+                    "fetch_skipped",
+                    "dry run: the fetch was not run, so changes at the source are not shown",
+                )],
+                ..Default::default()
+            });
+            continue;
+        }
+        let prune = (!opts.allow_mass_prune).then_some(config.prune);
+        let fetched = run_fetch(fetch, &mirror.path, prune).await;
+        let mut report = reconcile_mirror(
             config,
             store,
             mirror,
             converter,
-            reconcile_opts,
-        )?);
+            ReconcileOptions {
+                fetch_incomplete: !fetched.complete,
+                ..reconcile_opts
+            },
+        )?;
+        if !fetched.problems.is_empty() {
+            let failed = !fetched.complete && fetched.listed == 0;
+            let fetch_status = if failed { "error" } else { "partial" };
+            report.status = worse_status(&report.status, fetch_status).into();
+            report.problems.extend(fetched.problems.iter().cloned());
+            if let Some(store) = store {
+                let problems: Vec<(String, String, String)> = report
+                    .problems
+                    .iter()
+                    .map(|p| (p.source_path.clone(), p.kind.clone(), p.message.clone()))
+                    .collect();
+                store.replace_problems(&mirror.name, &problems)?;
+                store.record_collection_run(
+                    &mirror.name,
+                    "mirror",
+                    Some(&mirror.path.display().to_string()),
+                    &report.status,
+                    &serde_json::to_string(&report)?,
+                )?;
+            }
+        }
+        report.fetch = Some(fetched);
+        mirrors.push(report);
     }
 
     let wants_library = opts.names.is_empty() || opts.names.iter().any(|n| n == LIBRARY_COLLECTION);
@@ -137,6 +193,37 @@ pub async fn run_update<E: Embedder>(
     })
 }
 
+/// The more severe of two mirror statuses (`error` > `partial` > others).
+fn worse_status<'a>(a: &'a str, b: &'a str) -> &'a str {
+    let rank = |s: &str| match s {
+        "error" => 2,
+        "partial" => 1,
+        _ => 0,
+    };
+    if rank(b) > rank(a) {
+        b
+    } else {
+        a
+    }
+}
+
+/// Fill a mirror folder from its source. `prune` limits deletions by the
+/// fetcher (`None` with `--allow-mass-prune`).
+async fn run_fetch(fetch: &FetchConfig, dir: &Path, prune: Option<PruneConfig>) -> FetchReport {
+    match fetch {
+        FetchConfig::ZephyrScale(cfg) => match crate::fetch::zephyr::ApiSource::from_config(cfg) {
+            Ok(source) => {
+                crate::fetch::zephyr::fetch(&source, cfg, dir, chrono::Utc::now(), prune).await
+            }
+            Err(e) => FetchReport {
+                problems: vec![Problem::new("zephyr", "fetch_failed", e)],
+                ..Default::default()
+            },
+        },
+        FetchConfig::Command { run } => crate::fetch::command::fetch(run, dir),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +243,7 @@ mod tests {
             include: vec!["**/*.md".into()],
             exclude: vec![],
             plantuml_summaries: false,
+            fetch: None,
         }];
         (dir, config, root)
     }

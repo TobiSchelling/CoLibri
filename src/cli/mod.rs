@@ -2,7 +2,6 @@
 
 pub mod add;
 pub mod bootstrap;
-pub mod connectors;
 pub mod doctor;
 pub mod index;
 pub mod instructions;
@@ -12,7 +11,6 @@ pub mod reset;
 pub mod search;
 pub mod serve;
 pub mod status;
-pub mod sync;
 pub mod tour;
 pub mod update;
 
@@ -46,15 +44,6 @@ pub(crate) fn missing_tools(include: &[String]) -> Vec<String> {
         missing.push("markitdown or pandoc, needed for PPTX".to_string());
     }
     missing
-}
-
-/// Extract a non-empty trimmed string value from a JSON object by key.
-pub(crate) fn config_string(config: &serde_json::Value, key: &str) -> Option<String> {
-    config
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 #[derive(Subcommand)]
@@ -98,43 +87,6 @@ pub enum Commands {
         /// Skip the confirmation prompt
         #[arg(long)]
         yes: bool,
-    },
-
-    /// Manage native connectors
-    Connectors {
-        #[command(subcommand)]
-        command: ConnectorCommands,
-    },
-
-    /// Sync configured sources into canonical store (and optionally index)
-    Sync {
-        /// Restrict to specific connector id(s); may be repeated
-        #[arg(long = "connector")]
-        connectors: Vec<String>,
-
-        /// Also run jobs marked as disabled in config
-        #[arg(long)]
-        include_disabled: bool,
-
-        /// Stop on first failed job
-        #[arg(long)]
-        fail_fast: bool,
-
-        /// Skip indexing step (default is to index after a successful sync)
-        #[arg(long)]
-        no_index: bool,
-
-        /// Force full rebuild for index step
-        #[arg(long)]
-        force: bool,
-
-        /// Validate and report writes without mutating canonical storage/state
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
 
     /// Reconcile mirrors (new, changed and deleted files) and update the index
@@ -211,7 +163,7 @@ pub enum Commands {
         #[arg(long)]
         doc_type: Option<String>,
 
-        /// Restrict to one collection (connector id, e.g. `vault`, or `books`)
+        /// Restrict to one collection (mirror name, e.g. `vault`, or `books`)
         #[arg(long)]
         collection: Option<String>,
 
@@ -297,15 +249,5 @@ pub enum Commands {
     Remove {
         /// Book id (see `colibri list --json`) or part of its title
         query: String,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum ConnectorCommands {
-    /// List configured connectors
-    List {
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
 }

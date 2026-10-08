@@ -12,9 +12,9 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use crate::canonical_store::content_hash;
 use crate::canonical_store::{canonical_rel_path, doc_id_for};
 use crate::config::{AppConfig, MirrorConfig};
-use crate::envelope::content_hash;
 use crate::error::ColibriError;
 use crate::ingest::convert::{convert_cached, file_sha256, is_convertible, Converter};
 use crate::ingest::frontmatter::parse_frontmatter;
@@ -62,6 +62,9 @@ pub struct MirrorReport {
     pub prune_blocked: Option<String>,
     pub prune_candidates: usize,
     pub problems: Vec<Problem>,
+    /// Result of the fetch that filled the folder, if the mirror has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fetch: Option<crate::fetch::FetchReport>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -70,6 +73,8 @@ pub struct ReconcileOptions {
     pub allow_mass_prune: bool,
     /// Retry conversions that failed in an earlier run.
     pub retry_failed: bool,
+    /// The fetch before this reconcile was incomplete: do not prune.
+    pub fetch_incomplete: bool,
 }
 
 /// Markdown plus metadata ready to be stored.
@@ -333,6 +338,8 @@ fn reconcile_walked(
     let limit = config.prune.limit(active_count);
     report.prune_blocked = if to_prune.is_empty() {
         None
+    } else if opts.fetch_incomplete {
+        Some("the fetch was incomplete; deletions wait for a complete fetch".into())
     } else if !walked.complete {
         Some("the folder could not be read completely".into())
     } else if walked.files.is_empty() && !opts.allow_mass_prune {
@@ -562,6 +569,7 @@ mod tests {
             include: vec!["**/*.md".into(), "**/*.yaml".into(), "**/*.epub".into()],
             exclude: vec![],
             plantuml_summaries: true,
+            fetch: None,
         };
         Fixture {
             _dir: dir,

@@ -9,10 +9,9 @@
 mod canonical_store;
 mod cli;
 mod config;
-mod connectors;
 mod embedding;
-mod envelope;
 mod error;
+mod fetch;
 mod index_meta;
 mod indexer;
 mod ingest;
@@ -91,30 +90,7 @@ async fn main() -> anyhow::Result<()> {
             .await
         }
         cli::Commands::Status { json } => cli::status::run(json).await,
-        cli::Commands::Connectors { command } => match command {
-            cli::ConnectorCommands::List { json } => cli::connectors::list(json).await,
-        },
         cli::Commands::Index { force } => cli::index::run(force).await,
-        cli::Commands::Sync {
-            connectors,
-            include_disabled,
-            fail_fast,
-            no_index,
-            force,
-            dry_run,
-            json,
-        } => {
-            cli::sync::run(
-                connectors,
-                include_disabled,
-                fail_fast,
-                no_index,
-                force,
-                dry_run,
-                json,
-            )
-            .await
-        }
         cli::Commands::Instructions { output } => cli::instructions::run(output).await,
         cli::Commands::Tour { topic } => cli::tour::run(topic).await,
         cli::Commands::Search {

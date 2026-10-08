@@ -47,12 +47,13 @@ colibri tour
 # First-time setup wizard
 colibri bootstrap
 
-# Health check (config, connectors, metadata DB, Ollama, index readiness)
+# Health check (config, mirrors, fetchers, metadata DB, Ollama, index readiness)
 colibri doctor
 colibri doctor --json --strict
 
-# Bring mirrors (folders) up to date: new, changed and deleted files, then index
+# Fetch remote sources, bring mirrors (folders) up to date, sweep the library, index
 colibri update
+colibri update zephyr-ctslab            # one mirror (runs its fetcher first)
 colibri update vault --dry-run          # show what would change, write nothing
 colibri update --allow-mass-prune       # accept deletions above the safety limit
 colibri update --retry-failed           # retry files whose conversion failed before
@@ -60,9 +61,6 @@ colibri update --retry-failed           # retry files whose conversion failed be
 # What is in CoLibri, what is pending, what needs attention
 colibri status
 colibri status --json
-
-# Remote connectors (Zephyr Scale) until they become fetchers
-colibri sync --connector zephyr-ctslab
 
 # Bring the index in line with the metadata DB
 colibri index
@@ -101,7 +99,7 @@ colibri reset
 colibri update
 ```
 
-Every ingested document belongs to a collection: the mirror `name`, the connector `id` for `sync`, and `books` for the library. Search results carry the collection, and `--collection` (CLI) or `collection` (MCP) restricts a search to one.
+Every ingested document belongs to a collection: the mirror `name` and `books` for the library. Search results carry the collection, and `--collection` (CLI) or `collection` (MCP) restricts a search to one.
 
 ### Library
 
@@ -117,7 +115,16 @@ A mirror is a folder CoLibri keeps in sync. `colibri update` ingests new files, 
 
 Deletions are guarded. Nothing is pruned when the mirror folder is missing or any part of it could not be read, and a run that would delete more than `max(prune.min_count, prune.max_fraction × documents)` stops and reports instead (override with `--allow-mass-prune`). Narrowing `include`/`exclude` counts as deleting, so review `colibri update --dry-run` first. Files that exist only in the cloud (OneDrive/iCloud placeholders) are skipped and reported, never pruned.
 
-Commands that change data (`update`, `add`, `remove`, `sync`, `index`, `reset`) take a write lock, so only one runs at a time; a second one fails immediately and names the process holding the lock. `search` and `serve` only read and never block writers.
+Commands that change data (`update`, `add`, `remove`, `index`, `reset`) take a write lock, so only one runs at a time; a second one fails immediately and names the process holding the lock. `search` and `serve` only read and never block writers.
+
+### Fetched mirrors
+
+Remote sources are mirrors with a `fetch:` section. `colibri update` first runs the fetcher, which writes one Markdown file per item into the mirror folder, then reconciles that folder like any other. Fetched folders default to `<mirrors_dir>/<name>` (`~/Documents/CoLibri/mirrors/<name>`), so DEVONthink or Finder can index the same files.
+
+- `type: zephyr_scale` writes `<KEY>.md` per test case with YAML frontmatter (`key`, `folder`, `status`, `priority`, `owner`, `labels`, `tags`, `links`), so `--frontmatter status=Approved` works. It remembers a fingerprint per test case in `.fetch-state.json` and requests steps and links only for new or changed cases, plus a full refresh every `full_refresh_days`. The API token comes from the environment variable named in `token_env` (default `ZEPHYR_API_TOKEN`).
+- `type: command` runs any program (`{path}` is replaced by the mirror folder). A non-zero exit counts as an incomplete fetch.
+
+A fetcher only writes into a folder that is new, empty or carries its `.colibri-mirror` marker, and never rewrites a file whose bytes did not change. Edits made to fetched files are overwritten on the next fetch. Files are deleted only after a complete listing and within the same limit as pruning (`--allow-mass-prune` lifts it). When a fetch fails or is incomplete, the mirror prunes nothing in that run. Script fetchers are stopped after 60 minutes. A fetched mirror needs a folder of its own: it may not overlap another mirror's folder. `colibri update --dry-run` skips fetchers.
 
 `colibri serve --check` and `colibri doctor` report whether the index matches the configured embedding model; `colibri serve` refuses to start when it does not.
 
@@ -137,6 +144,7 @@ chunking:
 retrieval:
   top_k: 10
   similarity_threshold: 0.3
+mirrors_dir: ~/Documents/CoLibri/mirrors  # default home of fetched mirrors
 mirrors:
   - name: vault                      # collection name, prefix of document ids
     path: ~/PKM
@@ -148,6 +156,16 @@ mirrors:
     include: ["**/*.md", "**/*.yaml", "**/*.yml"]
     doc_type: architecture
     plantuml_summaries: true         # default
+  - name: zephyr-ctslab              # fetched: no path needed
+    doc_type: test_case
+    fetch:
+      type: zephyr_scale
+      project_key: CTSLAB
+      token_env: ZEPHYR_API_TOKEN    # default
+      full_refresh_days: 7           # default
+      # folder_path: "/SIT"          # only test cases below this folder
+  - name: wiki
+    fetch: {type: command, run: [~/bin/export-wiki, "{path}"]}
 prune:
   max_fraction: 0.2                  # defaults
   min_count: 25
@@ -158,17 +176,30 @@ library:
     - path: "~/Library/CloudStorage/OneDrive-Hilti/00 My Workflow/101 Bibliothek/eBooks - calibre"
 ```
 
-Unknown keys inside `mirrors`, `prune` and `library` are errors, so typos do not go unnoticed. `type: filesystem` connectors are no longer supported; move them to `mirrors:`.
+Unknown keys inside `mirrors`, `fetch`, `prune` and `library` are errors, so typos do not go unnoticed. The `connectors:` section is gone; a config that still has it fails with a message showing the replacement.
 
 The older `ollama: {base_url, embedding_model}` section is still read when `embedding:` is absent. `OLLAMA_BASE_URL` and `COLIBRI_EMBEDDING_MODEL` override both. Changing the model triggers a full re-embed on the next index run.
+
+## Upgrading from 0.15
+
+0.16 turns Zephyr into a fetcher and removes `colibri sync` and `colibri connectors`.
+
+1. Replace the `connectors:` entry with a mirror. `id` becomes `name`, the remaining keys move under `fetch:`:
+   ```yaml
+   mirrors:
+     - name: zephyr-ctslab
+       doc_type: test_case
+       fetch: {type: zephyr_scale, project_key: CTSLAB}
+   ```
+2. Run `colibri update zephyr-ctslab --allow-mass-prune` once. Document ids change from `zephyr-ctslab:CTSLAB-T1` to `zephyr-ctslab:CTSLAB-T1.md`, so the first run replaces every old document, which trips the mass-prune guard without the flag.
 
 ## Upgrading from 0.14
 
 0.15 changes how content gets in and how data is stored, so the data directory is rebuilt once:
 
-1. Config: move `type: filesystem` connectors to `mirrors:` (`root_path` → `path`, `include_extensions` → `include` globs such as `"**/*.md"`, `exclude_globs` → `exclude`); move book folders to `library: {roots: [{path: ...}]}`; `classification:` keys and `embeddings:`/`routing:` sections are gone (`ollama:` still works, `embedding:` is the new name). Zephyr connectors stay under `connectors:` and run with `colibri sync`.
+1. Config: move `type: filesystem` connectors to `mirrors:` (`root_path` → `path`, `include_extensions` → `include` globs such as `"**/*.md"`, `exclude_globs` → `exclude`); move book folders to `library: {roots: [{path: ...}]}`; `classification:` keys and `embeddings:`/`routing:` sections are gone (`ollama:` still works, `embedding:` is the new name). Zephyr connectors stay under `connectors:` and run with `colibri sync` (see 0.16 for their replacement).
 2. `colibri doctor` reports the old metadata DB as unusable and leaves it untouched.
-3. Stop running `colibri serve` processes, then `colibri reset` (or move `~/.local/share/colibri` aside), `colibri update`, and `colibri sync` for Zephyr.
+3. Stop running `colibri serve` processes, then `colibri reset` (or move `~/.local/share/colibri` aside), `colibri update`, and `colibri sync` for Zephyr (0.15 only).
 
 The first `update` converts every PDF/EPUB once (docling needs roughly 0.4 s per PDF page) and embeds everything; later runs only touch what changed.
 

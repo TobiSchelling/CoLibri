@@ -731,7 +731,7 @@ pub(crate) mod tests {
         let mut doc = DocumentRecord::new(id, "t", id);
         doc.title = id.into();
         doc.doc_type = "note".into();
-        doc.content_hash = crate::envelope::content_hash(text);
+        doc.content_hash = crate::canonical_store::content_hash(text);
         doc.markdown_path = rel;
         store.upsert_document(&doc).unwrap();
     }

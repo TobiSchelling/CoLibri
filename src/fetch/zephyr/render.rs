@@ -12,7 +12,6 @@ use super::html_to_md::html_to_md;
 /// Rendered test case output.
 pub struct RenderedTestCase {
     pub markdown: String,
-    pub title: String,
 }
 
 /// Render a test case into markdown with YAML frontmatter.
@@ -63,43 +62,48 @@ pub fn render_test_case(
     let created_on = tc.created_on.as_deref().unwrap_or("");
     let updated_on = tc.updated_on.as_deref().unwrap_or("");
 
-    // YAML frontmatter
-    out.push_str("---\n");
-    out.push_str(&format!("key: {}\n", tc.key));
-    out.push_str(&format!("name: {}\n", yaml_escape(&tc.name)));
-    out.push_str(&format!("project: {project_key}\n"));
-    out.push_str(&format!("folder: {folder_path}\n"));
-    out.push_str(&format!("status: {status}\n"));
-    out.push_str(&format!("priority: {priority}\n"));
-    out.push_str(&format!("owner: {owner}\n"));
-
-    // Labels as YAML array
-    if !tc.labels.is_empty() {
-        let labels: Vec<String> = tc.labels.iter().map(|l| l.to_string()).collect();
-        out.push_str(&format!("labels: [{}]\n", labels.join(", ")));
-    } else {
-        out.push_str("labels: []\n");
-    }
-
-    // Links as YAML array
-    if !links.is_empty() {
-        out.push_str("links:\n");
-        for link in links {
+    // YAML frontmatter, serialized (names, labels and folder paths can
+    // contain `:`, `#` or quotes).
+    let title = format!("{}: {}", tc.key, tc.name);
+    let mut tags = vec!["zephyr".to_string(), project_key.to_string()];
+    tags.extend(tc.labels.iter().cloned());
+    let link_values: Vec<serde_yaml::Value> = links
+        .iter()
+        .flat_map(|link| {
+            let mut out = Vec::new();
             if let Some(key) = &link.issue_key {
-                out.push_str(&format!("  - issue: {key}\n"));
+                out.push(yaml_pair("issue", key));
             }
             if let Some(url) = &link.url {
-                out.push_str(&format!("  - url: {url}\n"));
+                out.push(yaml_pair("url", url));
             }
-        }
+            out
+        })
+        .collect();
+    let mut fm = serde_yaml::Mapping::new();
+    let mut put = |k: &str, v: serde_yaml::Value| {
+        fm.insert(serde_yaml::Value::String(k.into()), v);
+    };
+    put("title", title.clone().into());
+    put("key", tc.key.clone().into());
+    put("name", tc.name.clone().into());
+    put("project", project_key.into());
+    put("folder", folder_path.clone().into());
+    put("status", status.into());
+    put("priority", priority.into());
+    put("owner", owner.into());
+    put("labels", tc.labels.clone().into());
+    put("tags", tags.into());
+    if !link_values.is_empty() {
+        put("links", serde_yaml::Value::Sequence(link_values));
     }
-
-    out.push_str(&format!("created_on: {created_on}\n"));
-    out.push_str(&format!("updated_on: {updated_on}\n"));
+    put("created_on", created_on.into());
+    put("updated_on", updated_on.into());
+    out.push_str("---\n");
+    out.push_str(&serde_yaml::to_string(&fm).unwrap_or_default());
     out.push_str("---\n\n");
 
     // Title
-    let title = format!("{}: {}", tc.key, tc.name);
     out.push_str(&format!("# {title}\n"));
 
     // Objective
@@ -184,26 +188,20 @@ pub fn render_test_case(
         out.push_str("\n_No test steps available._\n");
     }
 
-    RenderedTestCase {
-        markdown: out,
-        title,
-    }
+    RenderedTestCase { markdown: out }
 }
 
-/// Escape a YAML string value if it contains special characters.
-fn yaml_escape(s: &str) -> String {
-    if s.contains(':') || s.contains('#') || s.contains('"') || s.contains('\'') {
-        format!("\"{}\"", s.replace('"', "\\\""))
-    } else {
-        s.to_string()
-    }
+fn yaml_pair(key: &str, value: &str) -> serde_yaml::Value {
+    let mut m = serde_yaml::Mapping::new();
+    m.insert(key.into(), value.into());
+    serde_yaml::Value::Mapping(m)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connectors::zephyr_scale::api::{ApiRef, ApiTestScript};
-    use crate::connectors::zephyr_scale::folders::RawFolder;
+    use crate::fetch::zephyr::api::{ApiRef, ApiTestScript};
+    use crate::fetch::zephyr::folders::RawFolder;
 
     fn empty_lookups() -> (HashMap<i64, String>, HashMap<i64, String>) {
         (HashMap::new(), HashMap::new())
@@ -282,12 +280,14 @@ mod tests {
         let (sl, pl) = empty_lookups();
         let result = render_test_case(&tc, "CTSLAB", &tree, &steps, &links, &sl, &pl);
 
-        assert_eq!(result.title, "CTSLAB-T123: Verify login flow");
         assert!(result.markdown.contains("key: CTSLAB-T123"));
         assert!(result.markdown.contains("folder: /Regression/Login"));
         assert!(result.markdown.contains("status: Approved"));
         assert!(result.markdown.contains("priority: High"));
-        assert!(result.markdown.contains("labels: [smoke, regression]"));
+        assert!(result.markdown.contains("labels:\n- smoke\n- regression"));
+        assert!(result
+            .markdown
+            .contains("title: 'CTSLAB-T123: Verify login flow'"));
         assert!(result.markdown.contains("# CTSLAB-T123: Verify login flow"));
         assert!(result
             .markdown
@@ -375,10 +375,21 @@ mod tests {
     }
 
     #[test]
-    fn yaml_escape_special_chars() {
-        assert_eq!(yaml_escape("simple"), "simple");
-        assert_eq!(yaml_escape("has: colon"), "\"has: colon\"");
-        assert_eq!(yaml_escape("has # hash"), "\"has # hash\"");
+    fn frontmatter_survives_special_characters() {
+        let tree = sample_tree();
+        let (statuses, priorities) = empty_lookups();
+        let mut tc = sample_test_case();
+        tc.name = "Login: \"quoted\" # not a comment".into();
+        tc.labels = vec!["a: b".into(), "#hash".into()];
+        let result = render_test_case(&tc, "CTSLAB", &tree, &[], &[], &statuses, &priorities);
+        let yaml = result.markdown.split("---").nth(1).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            parsed["name"].as_str(),
+            Some("Login: \"quoted\" # not a comment")
+        );
+        assert_eq!(parsed["labels"][0].as_str(), Some("a: b"));
+        assert_eq!(parsed["tags"][0].as_str(), Some("zephyr"));
     }
 
     #[test]
