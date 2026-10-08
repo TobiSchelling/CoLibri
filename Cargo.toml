@@ -1,6 +1,6 @@
 [package]
 name = "colibri"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2021"
 rust-version = "1.89"
 description = "Local RAG system — index markdown, search semantically, serve via MCP"
