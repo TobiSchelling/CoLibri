@@ -6,7 +6,7 @@
 > **Repo Type:** code
 > **Spec Directory:** specs/files-first-ingestion/
 > **Design Doc Location:** specs/files-first-ingestion/design.md (approved plan, phases P1-P5)
-> **Status:** In Progress (P1+P2, P3, P4 verified 2026-10-06; P5 verified 2026-10-08; REQ-031 rebuild checks partly open)
+> **Status:** Verified (P1+P2, P3, P4 2026-10-06; P5 and REQ-031 rebuild 2026-10-08)
 
 ---
 
@@ -428,4 +428,4 @@ The following deliverables are committed for this feature:
 | REQ-028 | P5 | #4, #9 | zephyr::tests::{unchanged_cases_*, full_refresh_*, failed_full_refresh_*}; cli_fetch |
 | REQ-029 | P5 | #5, #7, #9 | command::tests; cli_fetch::script_fetchers_fill_folders_and_failures_block_pruning |
 | REQ-030 | P5 | #6 | config::tests::mirrors_are_resolved_and_validated |
-| REQ-031 | Rebuild | | |
+| REQ-031 | Rebuild | plan step 4 | live checks in verification.md (list/status, search ×3 modes, MCP over stdio, prune of a scratch note) |

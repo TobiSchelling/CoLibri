@@ -4,7 +4,7 @@
 > **Date:** 2026-10-06 (P1+P2, P3, P4), 2026-10-08 (P5)
 > **Spec:** specs/files-first-ingestion/requirements.md
 > **Verified by:** Claude (claude-opus-5-5)
-> **Status:** PASSED for P1+P2 (REQ-001..008), P3 (REQ-009..016, AC-006.2) P4 (REQ-017..024, AC-014.1 library row) and P5 (REQ-025..030); REQ-031 (rebuild) partly verified 2026-10-08, AC-031.2/031.3 open
+> **Status:** PASSED for P1+P2 (REQ-001..008), P3 (REQ-009..016, AC-006.2) P4 (REQ-017..024, AC-014.1 library row) and P5 (REQ-025..030); REQ-031 (rebuild, 2026-10-08)
 
 ---
 
@@ -214,12 +214,16 @@ Tests reference acceptance criteria by `AC-0xx` comments rather than `REQ-0xx`; 
 
 **Gate (phase P5):** all MUST criteria pass, no MUST failed, deliverables produced. **Result: PASSED (phase P5).**
 
-## REQ-031: Rebuild on the real setup (checked 2026-10-08, read-only, installed v0.15.0)
+## REQ-031: Rebuild on the real setup (checked 2026-10-08 with v0.16.0 after the config migration)
+
+Live run order: `brew upgrade` to 0.16.0, config migrated (`connectors:` → `zephyr-ctslab` mirror with `fetch:`, backup `config.yaml.bak-2026-10-08`), `colibri update zephyr-ctslab --allow-mass-prune` (fetch listed 376, written 376, complete; 376 added, 376 old ids pruned, 376 indexed, 0 problems, 13.5 min), then `colibri update` (vault +80 / ~127 / -76 after the vault folder renames; Zephyr listed 376, written 0, unchanged 376; index 181 docs, 0 errors).
 
 | REQ | Priority | Criterion | Method | Result | Evidence |
 |-----|----------|-----------|--------|--------|----------|
-| REQ-031 | MUST | AC-031.1: `list` shows the calibre books (about 96) with authors; ACSM-only books are problems | `colibri list --json`, `colibri status` | PASS | 95 books, all 95 with authors, formats epub/pdf, all 95 source paths exist; 3 `drm_placeholder` problems (Co-Intelligence, SCRUM Pocket Guide, Turn the Ship Around!). The 2 failed conversions (docling hang, pandoc crash) are the gap to 97 |
-| REQ-031 | MUST | AC-031.2: keyword/semantic/hybrid hits have existing source paths; MCP `search_books` works | `colibri search --json` in 3 modes × 3 queries | OPEN | books, zephyr-ctslab and repo mirrors: 10/10 hits with existing paths in every mode. Vault hits: 2-6 of 10 point to paths renamed in the vault after the rebuild (e.g. `0300_PROJECTS/P001_aegis/` → `P001 Aegis/`), so the index is stale until the next `colibri update`. MCP not checked: the colibri MCP server did not connect in this session |
-| REQ-031 | MUST | AC-031.3: deleting a vault scratch note + `update` prunes exactly it; `add` then reports 0 new books | — | OPEN | Needs writes to the live vault and data; planned together with the config migration (`connectors:` → fetched mirror) after the P5 release |
+| REQ-031 | MUST | AC-031.1: `list` shows the calibre books (about 96) with authors; ACSM-only books are problems | `colibri list --json`, `colibri status`, update report | PASS | 95 books, all with authors, formats epub/pdf, all 95 source paths exist; 3 `drm_placeholder` problems (Co-Intelligence, SCRUM Pocket Guide, Turn the Ship Around!); 2 `conversion_failed` (Agile Meetings und Workshops PDF: docling; Principles EPUB: pandoc) |
+| REQ-031 | MUST | AC-031.2: keyword/semantic/hybrid hits have existing source paths; MCP `search_books` works | `colibri search --json` 4 queries × 3 modes; `colibri serve` over stdio (initialize + tools/call) | PASS | 120/120 hits with existing paths across books, vault, zephyr-ctslab and repo mirrors; MCP `search_books` returns Agile Estimating and Planning chunks, `search_library` with `collection: zephyr-ctslab` returns `~/Documents/CoLibri/mirrors/zephyr-ctslab/CTSLAB-T304.md` with frontmatter. `--frontmatter status=Approved` filters live Zephyr docs (5 hits for an Approved case's title, 1 for Draft) |
+| REQ-031 | MUST | AC-031.3: deleting a vault scratch note + `update` prunes exactly it; `add` then reports 0 new books | temporary `~/PKM/zz-colibri-prune-test.md`: create, `update vault`, delete, `update vault`, `add` | PASS | after create: added 1; after delete: pruned 1 (candidates 1), keyword search for its marker 0 hits; `colibri add`: added 0, unchanged 95; no trace in the vault git status |
 
-**REQ-031 status:** AC-031.1 passes; AC-031.2 and AC-031.3 are re-checked after the next live `colibri update`.
+**REQ-031: PASSED.** All 31 requirements of the spec are verified.
+
+Follow-up found during the check: `update --dry-run` counts books whose earlier conversion failed (negative cache) as "added"; the real run reports them as `conversion_failed`.
