@@ -59,29 +59,25 @@ pub async fn run_server(config: &AppConfig) -> Result<(), ColibriError> {
             }
         };
 
-        let id = request.get("id").cloned();
         let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        // A message without an id is a notification (`notifications/initialized`,
+        // `notifications/cancelled`, ...). JSON-RPC forbids answering it, and
+        // strict clients drop the connection on a reply with `"id": null`.
+        let Some(id) = request.get("id").cloned() else {
+            debug!("MCP notification ignored: {method}");
+            continue;
+        };
+        let id = Some(id);
 
         let response = match method {
             "initialize" => handle_initialize(id),
-            "initialized" => {
-                // Notification — no response needed
-                continue;
-            }
             "tools/list" => handle_tools_list(id, config.top_k),
             "tools/call" => handle_tools_call(id, &request, &engine, config.top_k).await,
-            "notifications/cancelled" | "ping" => {
-                // Ignore notifications, respond to ping
-                if method == "ping" {
-                    json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {}
-                    })
-                } else {
-                    continue;
-                }
-            }
+            "ping" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {}
+            }),
             _ => error_response(id, -32601, &format!("Method not found: {method}")),
         };
 

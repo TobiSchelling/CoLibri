@@ -113,3 +113,37 @@ fn old_metadata_db_is_reported_and_left_unchanged() {
     assert!(out.stderr.contains("colibri reset"), "{}", out.stderr);
     assert_eq!(std::fs::read(&db).unwrap(), original);
 }
+
+#[test]
+fn mcp_server_answers_requests_and_never_notifications() {
+    let ollama = FakeOllama::start();
+    let home = TestHome::new(&ollama);
+    home.write_source("alpha.md", "# Alpha\nThe alpha plan.\n");
+    home.colibri(&["update"]).assert_ok();
+
+    let stdin = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#,
+        r#"{"jsonrpc":"2.0","id":4,"method":"no/such/method"}"#,
+    ]
+    .join("\n");
+    let out = home.colibri_with_stdin(&["serve"], &stdin);
+    out.assert_ok();
+
+    let replies: Vec<Value> = out
+        .stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let ids: Vec<i64> = replies.iter().map(|r| r["id"].as_i64().unwrap()).collect();
+    assert_eq!(
+        ids,
+        [1, 2, 3, 4],
+        "one reply per request, none for notifications"
+    );
+    assert!(replies[1]["result"]["tools"].is_array());
+    assert_eq!(replies[3]["error"]["code"], -32601);
+}
