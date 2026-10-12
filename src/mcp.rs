@@ -140,7 +140,7 @@ fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
                             "path_includes": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Optional. Restrict to docs whose source path (relative to its source root) contains ANY of these substrings. e.g. [\"03_MY_PROJECTS/02_HEIMDALL\"]. Combine multiple substrings to broaden inclusion."
+                                "description": "Optional. Restrict to docs whose source path (relative to its mirror root; for books, relative to the library root) contains ANY of these substrings. e.g. [\"03_MY_PROJECTS/02_HEIMDALL\"]. Combine multiple substrings to broaden inclusion."
                             },
                             "path_excludes": {
                                 "type": "array",
@@ -191,12 +191,12 @@ fn handle_tools_list(id: Option<Value>, top_k: usize) -> Value {
                             "path_includes": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Optional. Restrict to books whose source path contains ANY of these substrings."
+                                "description": "Optional. Restrict to books whose file path inside the library (e.g. \"Author/Title (id)/file.epub\") contains ANY of these substrings, e.g. [\"Wheatcraft\"]."
                             },
                             "path_excludes": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Optional. Drop books whose source path contains ANY of these substrings."
+                                "description": "Optional. Drop books whose file path inside the library contains ANY of these substrings."
                             },
                             "frontmatter": {
                                 "type": "object",

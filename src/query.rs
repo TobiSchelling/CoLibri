@@ -1,9 +1,11 @@
 //! Query engine: hybrid (BM25 + vector), semantic and keyword search over the
 //! single LanceDB `chunks` table, joined with document metadata from SQLite.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use arrow_array::{Float32Array, RecordBatch, StringArray};
@@ -15,7 +17,7 @@ use serde::Serialize;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use tracing::warn;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, LIBRARY_COLLECTION};
 use crate::embedding::embed_texts;
 use crate::error::ColibriError;
 use crate::metadata_store::DocumentRecord;
@@ -43,20 +45,36 @@ pub struct SearchResult {
     pub frontmatter: Option<JsonMap<String, JsonValue>>,
 }
 
+/// Upper bound of chunks fetched from the index per search.
+const MAX_CANDIDATES: usize = 500;
+
 /// Optional filters applied to a search. `Default` means no filter.
 #[derive(Debug, Clone, Default)]
 pub struct SearchFilter {
     pub collection: Option<String>,
     pub doc_type: Option<String>,
-    /// Keep only docs whose source key (path relative to the source root)
-    /// contains *any* listed substring.
+    /// Keep only docs whose path contains *any* listed substring. The path is
+    /// the source key for mirror docs and, for books, the source file path
+    /// relative to its library root (the full path outside all roots).
     pub path_includes: Vec<String>,
-    /// Drop docs whose source key contains *any* listed substring.
+    /// Drop docs whose path (as for `path_includes`) contains *any* listed substring.
     pub path_excludes: Vec<String>,
     /// Equality match on parsed frontmatter fields. Multiple keys combine with AND.
     pub frontmatter: BTreeMap<String, String>,
     /// Drop docs with `source_updated_at` strictly before this timestamp.
     pub since: Option<DateTime<Utc>>,
+}
+
+impl SearchFilter {
+    /// True when no filter is set.
+    pub fn is_empty(&self) -> bool {
+        self.collection.is_none()
+            && self.doc_type.is_none()
+            && self.path_includes.is_empty()
+            && self.path_excludes.is_empty()
+            && self.frontmatter.is_empty()
+            && self.since.is_none()
+    }
 }
 
 /// Controls how search queries are executed against LanceDB.
@@ -230,12 +248,17 @@ impl SearchEngine {
         if let Err(e) = self.table.checkout_latest().await {
             warn!("Failed to refresh index table: {e}");
         }
-        let candidates = self
-            .config
-            .top_k
-            .saturating_mul(5)
-            .max(limit.saturating_mul(5))
-            .min(500);
+        // Filters are applied after the index query, so a filtered search
+        // fetches the maximum to leave enough candidates after filtering.
+        let candidates = if filter.is_empty() {
+            self.config
+                .top_k
+                .saturating_mul(5)
+                .max(limit.saturating_mul(5))
+                .min(MAX_CANDIDATES)
+        } else {
+            MAX_CANDIDATES
+        };
         let batches = self.fetch(query, mode, candidates).await?;
 
         let mut hits = Vec::new();
@@ -249,12 +272,18 @@ impl SearchEngine {
             .into_iter()
             .collect();
         let docs_by_id = self.config.open_read()?.get_documents_by_ids(&doc_ids)?;
+        let library_roots = self
+            .config
+            .library
+            .as_ref()
+            .map_or(&[][..], |l| l.roots.as_slice());
 
         let filtered: Vec<(SearchHit, &DocumentRecord)> = hits
             .into_iter()
             .filter_map(|hit| {
                 let doc = docs_by_id.get(&hit.doc_id)?;
-                (doc.is_searchable() && document_matches_filter(doc, filter)).then_some((hit, doc))
+                (doc.is_searchable() && document_matches_filter(doc, filter, library_roots))
+                    .then_some((hit, doc))
             })
             .collect();
 
@@ -320,8 +349,29 @@ impl SearchEngine {
     }
 }
 
+/// The path the path filters match against: the source key of a mirror doc
+/// (e.g. `03_PROJECTS/HEIMDALL/foo.md`). A book's key is `calibre:<uuid>` or
+/// `sha:<hash>`, so books use their source file path relative to the library
+/// root (e.g. `Wheatcraft, L/INCOSE …/….epub`).
+fn filter_path<'a>(doc: &'a DocumentRecord, library_roots: &[PathBuf]) -> Cow<'a, str> {
+    if doc.collection != LIBRARY_COLLECTION {
+        return Cow::Borrowed(&doc.key);
+    }
+    let Some(source) = doc.source_path.as_deref() else {
+        return Cow::Borrowed(&doc.key);
+    };
+    library_roots
+        .iter()
+        .find_map(|root| Path::new(source).strip_prefix(root).ok())
+        .map_or(Cow::Borrowed(source), |rel| rel.to_string_lossy())
+}
+
 /// Predicate: does this document satisfy every active filter?
-fn document_matches_filter(doc: &DocumentRecord, filter: &SearchFilter) -> bool {
+fn document_matches_filter(
+    doc: &DocumentRecord,
+    filter: &SearchFilter,
+    library_roots: &[PathBuf],
+) -> bool {
     if filter
         .collection
         .as_ref()
@@ -332,20 +382,19 @@ fn document_matches_filter(doc: &DocumentRecord, filter: &SearchFilter) -> bool 
     if filter.doc_type.as_ref().is_some_and(|t| doc.doc_type != *t) {
         return false;
     }
-    // Path filters target the source key (e.g. `03_PROJECTS/HEIMDALL/foo.md`),
-    // not the internal canonical path.
+    let path = filter_path(doc, library_roots);
     if !filter.path_includes.is_empty()
         && !filter
             .path_includes
             .iter()
-            .any(|needle| doc.key.contains(needle))
+            .any(|needle| path.contains(needle.as_str()))
     {
         return false;
     }
     if filter
         .path_excludes
         .iter()
-        .any(|needle| doc.key.contains(needle))
+        .any(|needle| path.contains(needle.as_str()))
     {
         return false;
     }
@@ -550,7 +599,13 @@ mod tests {
     #[test]
     fn filter_default_matches_everything() {
         let doc = make_doc("d1", "a.md", "vault", "{}");
-        assert!(document_matches_filter(&doc, &SearchFilter::default()));
+        assert!(document_matches_filter(&doc, &SearchFilter::default(), &[]));
+        assert!(SearchFilter::default().is_empty());
+        let f = SearchFilter {
+            path_excludes: vec!["x".into()],
+            ..Default::default()
+        };
+        assert!(!f.is_empty());
     }
 
     // AC-007.1 (filter part): collection and doc_type filters.
@@ -561,17 +616,17 @@ mod tests {
             collection: Some("books".into()),
             ..Default::default()
         };
-        assert!(document_matches_filter(&doc, &f));
+        assert!(document_matches_filter(&doc, &f, &[]));
         f.collection = Some("vault".into());
-        assert!(!document_matches_filter(&doc, &f));
+        assert!(!document_matches_filter(&doc, &f, &[]));
 
         let mut f = SearchFilter {
             doc_type: Some("note".into()),
             ..Default::default()
         };
-        assert!(document_matches_filter(&doc, &f));
+        assert!(document_matches_filter(&doc, &f, &[]));
         f.doc_type = Some("book".into());
-        assert!(!document_matches_filter(&doc, &f));
+        assert!(!document_matches_filter(&doc, &f, &[]));
     }
 
     #[test]
@@ -581,17 +636,46 @@ mod tests {
             path_includes: vec!["02_HEIMDALL".into()],
             ..Default::default()
         };
-        assert!(document_matches_filter(&doc, &f));
+        assert!(document_matches_filter(&doc, &f, &[]));
         f.path_includes = vec!["03_GO_AI".into()];
-        assert!(!document_matches_filter(&doc, &f));
+        assert!(!document_matches_filter(&doc, &f, &[]));
         f.path_includes = vec!["03_GO_AI".into(), "HEIMDALL".into()];
-        assert!(document_matches_filter(&doc, &f));
+        assert!(document_matches_filter(&doc, &f, &[]));
 
         let f = SearchFilter {
             path_excludes: vec!["03_MY".into()],
             ..Default::default()
         };
-        assert!(!document_matches_filter(&doc, &f));
+        assert!(!document_matches_filter(&doc, &f, &[]));
+    }
+
+    #[test]
+    fn book_path_filters_use_the_path_inside_the_library_root() {
+        let roots = [PathBuf::from("/lib/calibre")];
+        let mut book = make_doc("books:calibre:u1", "calibre:u1", "books", "{}");
+        book.source_path = Some("/lib/calibre/Wheatcraft, L/INCOSE Manual (123)/m.epub".into());
+        let mut f = SearchFilter {
+            path_includes: vec!["Wheatcraft".into()],
+            ..Default::default()
+        };
+        assert!(document_matches_filter(&book, &f, &roots));
+        // The root itself is not part of the matched path.
+        f.path_includes = vec!["calibre".into()];
+        assert!(!document_matches_filter(&book, &f, &roots));
+
+        let f = SearchFilter {
+            path_excludes: vec!["INCOSE".into()],
+            ..Default::default()
+        };
+        assert!(!document_matches_filter(&book, &f, &roots));
+
+        // A book added from outside every root matches on its full path.
+        book.source_path = Some("/elsewhere/papers/x.pdf".into());
+        let f = SearchFilter {
+            path_includes: vec!["elsewhere/papers".into()],
+            ..Default::default()
+        };
+        assert!(document_matches_filter(&book, &f, &roots));
     }
 
     #[test]
@@ -601,21 +685,21 @@ mod tests {
         f.frontmatter.insert("area".into(), "SIT".into());
         f.frontmatter.insert("n".into(), "3".into());
         f.frontmatter.insert("ok".into(), "true".into());
-        assert!(document_matches_filter(&doc, &f));
+        assert!(document_matches_filter(&doc, &f, &[]));
         f.frontmatter.insert("status".into(), "draft".into());
-        assert!(!document_matches_filter(&doc, &f));
+        assert!(!document_matches_filter(&doc, &f, &[]));
 
         let at = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
         let mut f = SearchFilter {
             since: Some(at("2026-04-01T00:00:00Z")),
             ..Default::default()
         };
-        assert!(document_matches_filter(&doc, &f));
+        assert!(document_matches_filter(&doc, &f, &[]));
         f.since = Some(at("2026-05-01T00:00:00Z"));
-        assert!(!document_matches_filter(&doc, &f));
+        assert!(!document_matches_filter(&doc, &f, &[]));
         let mut undated = doc.clone();
         undated.source_updated_at = None;
-        assert!(!document_matches_filter(&undated, &f));
+        assert!(!document_matches_filter(&undated, &f, &[]));
     }
 
     #[test]
