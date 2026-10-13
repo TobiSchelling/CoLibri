@@ -64,6 +64,8 @@ pub struct IndexOptions {
     pub force: bool,
     /// Embed and commit once this many chunks are pending.
     pub batch_chunks: usize,
+    /// Table versions younger than this many minutes are kept.
+    pub prune_grace_minutes: i64,
 }
 
 impl Default for IndexOptions {
@@ -71,6 +73,7 @@ impl Default for IndexOptions {
         Self {
             force: false,
             batch_chunks: 256,
+            prune_grace_minutes: PRUNE_GRACE_MINUTES,
         }
     }
 }
@@ -591,6 +594,9 @@ pub async fn index_library<E: Embedder>(
             }
             compact(t, &on_progress).await;
         }
+        // Every run, not only writing ones: the files a write run replaces
+        // are still inside the grace window when that run ends.
+        prune_old_versions(t, opts.prune_grace_minutes, &on_progress).await;
         let mut extra = chunking_meta(config);
         extra.insert(
             "chunk_count".into(),
@@ -657,27 +663,36 @@ async fn embed_documents<E: Embedder>(
     Ok(())
 }
 
-/// Merge small data files and drop table versions older than
-/// [`PRUNE_GRACE_MINUTES`]. The grace window keeps the files that a search
-/// running concurrently in `colibri serve` may still be reading.
+/// Merge small data files.
 async fn compact(table: &lancedb::Table, on_progress: &impl Fn(IndexEvent)) {
-    let steps = [
-        OptimizeAction::Compact {
-            options: CompactionOptions::default(),
-            remap_options: None,
-        },
-        OptimizeAction::Prune {
-            older_than: Some(Duration::minutes(PRUNE_GRACE_MINUTES)),
-            delete_unverified: Some(true),
-            error_if_tagged_old_versions: Some(false),
-        },
-    ];
-    for step in steps {
-        if let Err(e) = table.optimize(step).await {
-            on_progress(IndexEvent::Warning {
-                message: format!("Index compaction step failed: {e}"),
-            });
-        }
+    let step = OptimizeAction::Compact {
+        options: CompactionOptions::default(),
+        remap_options: None,
+    };
+    if let Err(e) = table.optimize(step).await {
+        on_progress(IndexEvent::Warning {
+            message: format!("Index compaction failed: {e}"),
+        });
+    }
+}
+
+/// Drop table versions older than `grace_minutes` and the files only they
+/// use. The grace window keeps the files that a search running concurrently
+/// in `colibri serve` may still be reading.
+async fn prune_old_versions(
+    table: &lancedb::Table,
+    grace_minutes: i64,
+    on_progress: &impl Fn(IndexEvent),
+) {
+    let step = OptimizeAction::Prune {
+        older_than: Some(Duration::minutes(grace_minutes)),
+        delete_unverified: Some(true),
+        error_if_tagged_old_versions: Some(false),
+    };
+    if let Err(e) = table.optimize(step).await {
+        on_progress(IndexEvent::Warning {
+            message: format!("Index cleanup of old versions failed: {e}"),
+        });
     }
 }
 
@@ -747,8 +762,8 @@ pub(crate) mod tests {
 
     fn opts_per_doc() -> IndexOptions {
         IndexOptions {
-            force: false,
             batch_chunks: 1,
+            ..Default::default()
         }
     }
 
@@ -980,6 +995,50 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(r.files_indexed, 1, "new chunk size re-embeds everything");
+    }
+
+    fn data_files(config: &AppConfig) -> usize {
+        let dir = config.index_dir.join(format!("{TABLE_NAME}.lance/data"));
+        std::fs::read_dir(dir).unwrap().count()
+    }
+
+    #[tokio::test]
+    async fn run_without_changes_prunes_versions_of_earlier_runs() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = AppConfig::for_test(dir.path());
+        let (_lock, store) = config.open_for_write().unwrap();
+        for id in ["a", "b", "c"] {
+            add_doc(&config, &store, id, &format!("{id} text"));
+        }
+        let fake = FakeEmbedder::new();
+        index_library(&config, &store, &fake, &opts_per_doc(), |_| {})
+            .await
+            .unwrap();
+        store
+            .set_status("b", DocStatus::Removed, Some("user"))
+            .unwrap();
+        // The write run compacts, but its replaced files are inside the grace window.
+        index_library(&config, &store, &fake, &opts_per_doc(), |_| {})
+            .await
+            .unwrap();
+        let before = data_files(&config);
+
+        let no_grace = IndexOptions {
+            prune_grace_minutes: 0,
+            ..opts_per_doc()
+        };
+        let r = index_library(&config, &store, &fake, &no_grace, |_| {})
+            .await
+            .unwrap();
+        assert_eq!((r.files_indexed, r.files_deleted), (0, 0));
+        assert!(
+            data_files(&config) < before,
+            "no-op run must prune files of earlier runs ({before} before)"
+        );
+        assert_eq!(
+            table_ids(&config).await,
+            HashSet::from(["a".into(), "c".into()])
+        );
     }
 
     #[test]

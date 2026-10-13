@@ -227,3 +227,21 @@ Live run order: `brew upgrade` to 0.16.0, config migrated (`connectors:` → `ze
 **REQ-031: PASSED.** All 31 requirements of the spec are verified.
 
 Follow-up found during the check: `update --dry-run` counts books whose earlier conversion failed (negative cache) as "added"; the real run reports them as `conversion_failed`.
+
+---
+
+## Regression check 2026-10-13: index cleanup on every run (v0.16.3)
+
+Change: `index_library` (`src/indexer.rs`) now drops old LanceDB versions on every index run, not only on runs that wrote. Before, the files a write run replaced were still inside the 10-minute grace window when that run ended, so one superseded copy of the table stayed on disk (2 GB on the live install). New option `IndexOptions::prune_grace_minutes` (default 10) lets tests use 0.
+
+| REQ | Priority | Criterion | Method | Result | Evidence |
+|-----|----------|-----------|--------|--------|----------|
+| REQ-005 | MUST | AC-005.1 | `indexer::tests::interrupted_run_resumes_with_remaining_documents` | PASS | `1 passed` |
+| REQ-006 | MUST | AC-006.1 | `indexer::tests::orphan_chunks_are_purged`; `cargo test --test cli_mirrors` (status orphan count) | PASS | `1 passed` each |
+| REQ-002 | MUST | AC-002.1 | `query::tests::read_paths_filter_by_collection_and_leave_data_dir_untouched`; cleanup is only called from `index_library` (write lock held) | PASS | `1 passed`; grep shows one call site, `src/indexer.rs:599` |
+| (fix) | — | No-op run removes files of earlier runs | `indexer::tests::run_without_changes_prunes_versions_of_earlier_runs` | PASS | failed before the fix ("5 before"), passes after |
+| (fix) | — | Live install | release build, `colibri update books` with nothing to do | PASS | data dir 4.1 GB → 2.2 GB, one data file left, search returns hits |
+
+Full suite `make test`: 176 unit + 7 integration tests pass. `make lint` and `cargo fmt --check` clean.
+
+**Gate:** PASSED (no MUST criterion failed).
